@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use clap::error::{ContextKind, ErrorKind};
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};
-use plastinka::api::{self, ApiError};
+use plastinka::api::{self, ApiError, Subscription};
 use plastinka::auth::{self, AuthError, OAuthApp};
 use plastinka::net::{self, NetError};
 use plastinka::storage::config::Config;
@@ -19,6 +19,9 @@ const HELP_TEMPLATE: &str = "{about}\n\nИспользование: {usage}\n\n{
 
 /// Где пользователь может отозвать доступ вручную.
 const DATA_ACCESS_URL: &str = "https://id.yandex.ru/personal/data-access";
+
+/// Где оформить подписку.
+const PLUS_URL: &str = "https://plus.yandex.ru";
 
 /// Неофициальный клиент Яндекс Музыки: только потоковое воспроизведение.
 #[derive(Debug, Parser)]
@@ -55,7 +58,7 @@ enum Command {
     /// Выйти: удалить токен с этого компьютера и отозвать его
     #[command(help_template = HELP_TEMPLATE)]
     Logout,
-    /// Показать, под каким аккаунтом выполнен вход
+    /// Показать, под каким аккаунтом выполнен вход и есть ли подписка Плюс
     #[command(help_template = HELP_TEMPLATE)]
     Account,
     /// О программе и где лежат её данные
@@ -79,6 +82,8 @@ enum CliError {
     TokenExpired,
     #[error("Яндекс выдал токен, но сервис музыки его не принимает. Токен не сохранён")]
     TokenRejected,
+    #[error("{0}. Подписка не проверена")]
+    StatusUnknown(ApiError),
     #[error("вход отменён")]
     Cancelled,
     #[error("не удалось запустить асинхронную среду: {0}")]
@@ -254,21 +259,21 @@ async fn login() -> Result<(), CliError> {
     };
 
     let checked = tokio::select! {
-        result = api::fetch_account(&http, &token.access_token) => result,
+        result = api::fetch_status(&http, &token.access_token) => result,
         () = ctrl_c() => {
             discard_token(&http, &app, &token.access_token).await;
             return Err(CliError::Cancelled);
         }
     };
-    let account = match checked {
-        Ok(account) => Some(account),
+    let status = match checked {
+        Ok(status) => Some(status),
         Err(ApiError::Unauthorized) => {
             discard_token(&http, &app, &token.access_token).await;
             return Err(CliError::TokenRejected);
         }
         Err(err) => {
             warn(format_args!(
-                "не удалось проверить токен: {err}. Сохраняю его, проверить можно командой plastinka account"
+                "не удалось проверить токен и подписку: {err}. Сохраняю токен, проверить можно командой plastinka account"
             ));
             None
         }
@@ -282,11 +287,14 @@ async fn login() -> Result<(), CliError> {
         discard_token(&http, &app, &access_token).await;
         return Err(err.into());
     }
-    match account {
-        Some(account) => say(format_args!(
-            "Вход выполнен: {}. Токен сохранён в системном хранилище паролей.",
-            account.name()
-        )),
+    match status {
+        Some(status) => {
+            say(format_args!(
+                "Вход выполнен: {}. Токен сохранён в системном хранилище паролей.",
+                status.account().name()
+            ))?;
+            say(subscription_text(status.subscription()))
+        }
         None => say("Токен сохранён в системном хранилище паролей."),
     }
 }
@@ -383,10 +391,61 @@ async fn account() -> Result<(), CliError> {
         .await?
         .ok_or(CliError::NotLoggedIn)?;
     let http = net::http_client()?;
-    match api::fetch_account(&http, &token.access_token).await {
-        Ok(account) => say(format_args!("Вход выполнен: {}", account.name())),
-        Err(ApiError::Unauthorized) => Err(CliError::TokenExpired),
-        Err(err) => Err(err.into()),
+    // Ошибка запроса — это «проверить не удалось», а не «подписки нет».
+    let status = match api::fetch_status(&http, &token.access_token).await {
+        Ok(status) => status,
+        Err(ApiError::Unauthorized) => return Err(CliError::TokenExpired),
+        Err(err) => return Err(CliError::StatusUnknown(err)),
+    };
+    say(format_args!("Вход выполнен: {}", status.account().name()))?;
+    say(subscription_text(status.subscription()))
+}
+
+/// Что сказать пользователю о подписке.
+fn subscription_text(subscription: &Subscription) -> String {
+    match subscription {
+        Subscription::Active(details) => {
+            let mut text = "Подписка Плюс активна".to_owned();
+            if details.family {
+                text.push_str(" (семейная)");
+            }
+            if let Some(until) = details.until {
+                text.push_str(&format!(" до {until}"));
+            }
+            match details.auto_renewal {
+                Some(true) => text.push_str(", продлевается автоматически"),
+                Some(false) => text.push_str(", без автопродления"),
+                None => {}
+            }
+            text.push('.');
+            text
+        }
+        Subscription::Missing { can_start_trial } => {
+            let trial = if *can_start_trial {
+                " Для аккаунта доступен пробный период."
+            } else {
+                ""
+            };
+            format!(
+                "Нужна подписка Плюс: без неё {APP_NAME} не воспроизводит музыку.{trial}\n\
+                 Оформите подписку на {PLUS_URL} и проверьте снова: plastinka account"
+            )
+        }
+        Subscription::RegionUnavailable { region_code } => {
+            let region = region_code
+                .as_deref()
+                .map(|code| format!(" (код региона {code})"))
+                .unwrap_or_default();
+            format!(
+                "Сервис музыки недоступен в регионе аккаунта{region}. \
+                 Воспроизведение невозможно, даже если подписка Плюс есть."
+            )
+        }
+        Subscription::Unconfirmed => "Подписку Плюс подтвердить не удалось: сервис не прислал \
+                                      сведений о ней. Пока подписка не подтверждена, \
+                                      воспроизведение недоступно. Повторите позже: \
+                                      plastinka account"
+            .to_owned(),
     }
 }
 
