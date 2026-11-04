@@ -187,7 +187,9 @@ impl TokenStore {
 /// Значение отладочного хука из переменной окружения, если оно непустое.
 #[cfg(debug_assertions)]
 fn env_hook(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 /// Имя сервиса. В отладочной сборке его можно подменить, чтобы тесты не

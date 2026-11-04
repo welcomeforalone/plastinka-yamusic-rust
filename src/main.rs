@@ -11,6 +11,7 @@ use plastinka::net::{self, NetError};
 use plastinka::storage::config::Config;
 use plastinka::storage::token::TokenStore;
 use plastinka::storage::{self, AppDirs, StorageError};
+use plastinka::texts::tracks_word;
 use plastinka::{APP_NAME, DISCLAIMER};
 
 /// Шаблон справки: clap сам пишет только «Usage», поэтому подписи задаём явно.
@@ -102,6 +103,16 @@ fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(err) => return report_parse_error(&err),
     };
+    // Без команды открывается окно. У iced свой рантайм tokio.
+    if cli.command.is_none() {
+        return match plastinka::ui::run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                let _ = writeln!(io::stderr(), "Ошибка: не удалось открыть окно: {err}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     // `#[tokio::main]` паникует, если среда не запустилась, поэтому собираем её сами.
     let result = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -220,8 +231,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Some(Command::Account) => account().await,
         Some(Command::Likes) => likes().await,
         Some(Command::About) => about(),
-        // Окна пока нет, поэтому без команды показываем справку.
-        None => Ok(Cli::command().print_help()?),
+        // Без команды открывается окно, сюда не доходим.
+        None => Ok(()),
     }
 }
 
@@ -498,15 +509,6 @@ fn token_error(err: ApiError) -> CliError {
     }
 }
 
-/// «трек», «трека» или «треков» для числа.
-fn tracks_word(count: usize) -> &'static str {
-    match (count % 10, count % 100) {
-        (1, n) if n != 11 => "трек",
-        (2..=4, n) if !(12..=14).contains(&n) => "трека",
-        _ => "треков",
-    }
-}
-
 /// Что сказать пользователю о подписке.
 fn subscription_text(subscription: &Subscription) -> String {
     match subscription {
@@ -589,24 +591,6 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
-    }
-
-    #[test]
-    fn tracks_word_agrees_with_number() {
-        for (count, word) in [
-            (0, "треков"),
-            (1, "трек"),
-            (2, "трека"),
-            (5, "треков"),
-            (11, "треков"),
-            (12, "треков"),
-            (21, "трек"),
-            (22, "трека"),
-            (111, "треков"),
-            (1001, "трек"),
-        ] {
-            assert_eq!(tracks_word(count), word, "{count}");
-        }
     }
 
     #[test]

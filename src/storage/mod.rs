@@ -47,6 +47,13 @@ pub enum StorageError {
     Interrupted,
 }
 
+/// Отладочный запуск с фальшивым токеном (`PLASTINKA_TEST_TOKEN`). Окно тогда
+/// не пишет в `config.toml`, и проверки не меняют настройки пользователя.
+pub fn test_hooks_active() -> bool {
+    cfg!(debug_assertions)
+        && std::env::var("PLASTINKA_TEST_TOKEN").is_ok_and(|value| !value.trim().is_empty())
+}
+
 fn at_line(line: &Option<usize>) -> String {
     line.map(|line| format!(" в строке {line}"))
         .unwrap_or_default()

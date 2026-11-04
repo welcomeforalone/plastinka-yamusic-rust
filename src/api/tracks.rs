@@ -137,11 +137,21 @@ pub async fn fetch_tracks(
     #[cfg(debug_assertions)]
     if let Some(fixture) = test_hook::fixture(token)? {
         let (status, body) = fixture.tracks;
-        return load_tracks(ids, async |_| Ok((status, body.clone())), progress).await;
+        return load_tracks(
+            ids,
+            |_| std::future::ready(Ok((status, body.clone()))),
+            progress,
+        )
+        .await;
     }
+    // Пачка и клиент передаются во владение: так future запроса можно
+    // отправить в другой поток (окно запускает загрузку в фоне).
     load_tracks(
         ids,
-        async |batch| post_tracks(http, token, batch).await,
+        |batch| {
+            let (http, token) = (http.clone(), token.to_owned());
+            async move { post_tracks(&http, &token, &batch).await }
+        },
         progress,
     )
     .await
@@ -174,11 +184,14 @@ async fn post_tracks(
 /// Сломанный запрос отличаем от плохих идентификаторов по всему списку, а не
 /// по одной пачке: ни одного успешного ответа на несколько треков (или
 /// слишком много отказов до первого успеха) — ошибка.
-async fn load_tracks(
+async fn load_tracks<F>(
     ids: &[String],
-    mut send: impl AsyncFnMut(&[String]) -> Result<(StatusCode, String), ApiError>,
+    mut send: impl FnMut(Vec<String>) -> F,
     mut progress: impl FnMut(usize),
-) -> Result<Vec<Track>, ApiError> {
+) -> Result<Vec<Track>, ApiError>
+where
+    F: Future<Output = Result<(StatusCode, String), ApiError>>,
+{
     let broken = || ApiError::UnexpectedStatus(StatusCode::BAD_REQUEST.as_u16());
     let valid: Vec<String> = ids.iter().filter(|id| plausible_id(id)).cloned().collect();
     let mut queue: Vec<&[String]> = valid.chunks(TRACKS_BATCH).rev().collect();
@@ -186,7 +199,7 @@ async fn load_tracks(
     let (mut rejected, mut splits, mut done) = (0, 0, ids.len().saturating_sub(valid.len()));
     let mut accepted = false;
     while let Some(batch) = queue.pop() {
-        let (status, body) = send(batch).await?;
+        let (status, body) = send(batch.to_vec()).await?;
         if status == StatusCode::BAD_REQUEST {
             rejected += 1;
             if !accepted && rejected > MAX_REJECTED_BEFORE_SUCCESS {
@@ -527,7 +540,7 @@ mod tests {
     async fn load_sample(ids: &[String]) -> Vec<Track> {
         load_tracks(
             ids,
-            async |_| Ok((StatusCode::OK, fixtures::SAMPLE_TRACKS.to_owned())),
+            |_| std::future::ready(Ok((StatusCode::OK, fixtures::SAMPLE_TRACKS.to_owned()))),
             no_progress,
         )
         .await
@@ -654,9 +667,9 @@ mod tests {
             .into();
         let tracks = load_tracks(
             &ids,
-            async |batch| {
-                sent.borrow_mut().extend_from_slice(batch);
-                Ok((StatusCode::OK, r#"{"result":[]}"#.to_owned()))
+            |batch: Vec<String>| {
+                sent.borrow_mut().extend(batch);
+                std::future::ready(Ok((StatusCode::OK, r#"{"result":[]}"#.to_owned())))
             },
             no_progress,
         )
@@ -677,9 +690,9 @@ mod tests {
         let last_progress = RefCell::new(0);
         let result = load_tracks(
             ids,
-            async |batch| {
+            |batch: Vec<String>| {
                 *requests.borrow_mut() += 1;
-                Ok(reply(batch, bad))
+                std::future::ready(Ok(reply(&batch, bad)))
             },
             |done| *last_progress.borrow_mut() = done,
         )
@@ -759,17 +772,27 @@ mod tests {
             (StatusCode::OK, "<html>", "InvalidResponse"),
             (StatusCode::OK, r#"{"result":{}}"#, "InvalidResponse"),
         ] {
-            let result =
-                load_tracks(&ids, async |_| Ok((status, body.to_owned())), no_progress).await;
+            let result = load_tracks(
+                &ids,
+                |_| std::future::ready(Ok((status, body.to_owned()))),
+                no_progress,
+            )
+            .await;
             assert_eq!(format!("{:?}", result.unwrap_err()), expected);
         }
     }
 
     #[tokio::test]
     async fn empty_list_sends_nothing() {
-        let tracks = load_tracks(&[], async |_| panic!("запроса быть не должно"), no_progress)
-            .await
-            .unwrap();
+        let tracks = load_tracks(
+            &[],
+            |_| -> std::future::Ready<Result<(StatusCode, String), ApiError>> {
+                panic!("запроса быть не должно")
+            },
+            no_progress,
+        )
+        .await
+        .unwrap();
         assert!(tracks.is_empty());
     }
 

@@ -7,6 +7,7 @@ pub mod auth;
 pub mod net;
 pub mod player;
 pub mod storage;
+pub mod texts;
 pub mod ui;
 
 /// Имя приложения: заголовок окна, каталоги настроек и кэша.

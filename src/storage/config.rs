@@ -22,6 +22,9 @@ pub struct Config {
     pub oauth_client_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth_client_secret: Option<String>,
+    /// Боковое меню свёрнуто до иконок.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sidebar_collapsed: bool,
 }
 
 impl Config {
