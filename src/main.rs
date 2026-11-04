@@ -61,6 +61,9 @@ enum Command {
     /// Показать, под каким аккаунтом выполнен вход и есть ли подписка Плюс
     #[command(help_template = HELP_TEMPLATE)]
     Account,
+    /// Показать треки из «Мне нравится»
+    #[command(help_template = HELP_TEMPLATE)]
+    Likes,
     /// О программе и где лежат её данные
     #[command(help_template = HELP_TEMPLATE)]
     About,
@@ -86,6 +89,8 @@ enum CliError {
     StatusUnknown(ApiError),
     #[error("вход отменён")]
     Cancelled,
+    #[error("загрузка отменена")]
+    LoadCancelled,
     #[error("не удалось запустить асинхронную среду: {0}")]
     Runtime(io::Error),
     #[error("не удалось вывести текст: {0}")]
@@ -116,6 +121,10 @@ fn main() -> ExitCode {
         Err(CliError::Output(err)) if err.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(CliError::Cancelled) => {
             let _ = writeln!(io::stderr(), "Вход отменён.");
+            ExitCode::from(130)
+        }
+        Err(CliError::LoadCancelled) => {
+            let _ = writeln!(io::stderr(), "Загрузка отменена.");
             ExitCode::from(130)
         }
         Err(err) => {
@@ -209,6 +218,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Some(Command::Login) => login().await,
         Some(Command::Logout) => logout().await,
         Some(Command::Account) => account().await,
+        Some(Command::Likes) => likes().await,
         Some(Command::About) => about(),
         // Окна пока нет, поэтому без команды показываем справку.
         None => Ok(Cli::command().print_help()?),
@@ -401,6 +411,102 @@ async fn account() -> Result<(), CliError> {
     say(subscription_text(status.subscription()))
 }
 
+async fn likes() -> Result<(), CliError> {
+    let token = storage::blocking(|| TokenStore::open()?.load())
+        .await?
+        .ok_or(CliError::NotLoggedIn)?;
+    let http = net::http_client()?;
+    tokio::select! {
+        result = show_likes(&http, &token.access_token) => result,
+        () = ctrl_c() => Err(CliError::LoadCancelled),
+    }
+}
+
+async fn show_likes(http: &reqwest::Client, token: &str) -> Result<(), CliError> {
+    let status = api::fetch_status(http, token).await.map_err(token_error)?;
+    let liked = api::fetch_liked_ids(http, token, status.account().uid)
+        .await
+        .map_err(token_error)?;
+    if liked.unreadable > 0 {
+        warn(format_args!(
+            "часть списка сервис прислал в непонятном виде, пропущено: {}",
+            liked.unreadable
+        ));
+    }
+    let total = liked.ids.len();
+    if total == 0 {
+        return say("В «Мне нравится» пока пусто.");
+    }
+
+    // Прогресс — в stderr, чтобы не мешать выводу списка в файл. Только для
+    // больших списков и не чаще раза на пачку.
+    let mut shown = 0;
+    let tracks = api::fetch_tracks(http, token, &liked.ids, |done| {
+        if total > api::TRACKS_BATCH && done < total && done >= shown + api::TRACKS_BATCH {
+            shown = done;
+            let _ = writeln!(io::stderr(), "Загружено треков: {done} из {total}…");
+        }
+    })
+    .await
+    .map_err(token_error)?;
+
+    let unavailable = tracks.iter().filter(|track| !track.available).count();
+    let mut out = io::stdout().lock();
+    writeln!(out, "Мне нравится: {total} {}", tracks_word(total))?;
+    if status.playback_permit().is_none() {
+        writeln!(out, "{}", subscription_text(status.subscription()))?;
+    }
+    let width = total.to_string().len();
+    for (number, track) in (1..).zip(&tracks) {
+        // Заглушка: сервис ничего не рассказал о треке.
+        if track.title.is_none() && track.artists.is_empty() {
+            writeln!(
+                out,
+                "{number:>width$}. нет данных о треке {}  [недоступен]",
+                track.id
+            )?;
+            continue;
+        }
+        let mark = if track.available {
+            ""
+        } else {
+            "  [недоступен]"
+        };
+        writeln!(
+            out,
+            "{number:>width$}. {} — {}  {}{mark}",
+            track.artists_text(),
+            track.display_title(),
+            track.duration_text()
+        )?;
+    }
+    if unavailable > 0 {
+        writeln!(
+            out,
+            "Недоступно: {unavailable} {}. Такие треки нельзя послушать: их убрали из каталога или они недоступны в вашем регионе.",
+            tracks_word(unavailable)
+        )?;
+    }
+    Ok(())
+}
+
+/// 401 и 403 значат, что токен больше не действует.
+fn token_error(err: ApiError) -> CliError {
+    match err {
+        ApiError::Unauthorized => CliError::TokenExpired,
+        err => err.into(),
+    }
+}
+
+/// «трек», «трека» или «треков» для числа.
+fn tracks_word(count: usize) -> &'static str {
+    match (count % 10, count % 100) {
+        (1, n) if n != 11 => "трек",
+        (2..=4, n) if !(12..=14).contains(&n) => "трека",
+        _ => "треков",
+    }
+}
+
 /// Что сказать пользователю о подписке.
 fn subscription_text(subscription: &Subscription) -> String {
     match subscription {
@@ -483,6 +589,24 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn tracks_word_agrees_with_number() {
+        for (count, word) in [
+            (0, "треков"),
+            (1, "трек"),
+            (2, "трека"),
+            (5, "треков"),
+            (11, "треков"),
+            (12, "треков"),
+            (21, "трек"),
+            (22, "трека"),
+            (111, "треков"),
+            (1001, "трек"),
+        ] {
+            assert_eq!(tracks_word(count), word, "{count}");
+        }
     }
 
     #[test]

@@ -12,7 +12,7 @@ use reqwest::header::AUTHORIZATION;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{API_BASE, ApiError, MUSIC_CLIENT, auth_header};
+use super::{API_BASE, ApiError, MUSIC_CLIENT, auth_header, check_status};
 use crate::net::NetError;
 
 /// Аккаунт, под которым выполнен вход.
@@ -173,15 +173,7 @@ fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<V
 }
 
 fn parse_status(status: StatusCode, body: &str) -> Result<AccountStatus, ApiError> {
-    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-        return Err(ApiError::Unauthorized);
-    }
-    if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
-        return Err(ApiError::Server(status.as_u16()));
-    }
-    if !status.is_success() {
-        return Err(ApiError::UnexpectedStatus(status.as_u16()));
-    }
+    check_status(status)?;
     let envelope: StatusEnvelope =
         serde_json::from_str(body).map_err(|_| ApiError::InvalidResponse)?;
     let result = envelope.result;
@@ -363,9 +355,7 @@ mod fixtures {
 }
 
 /// Отладочный хук `PLASTINKA_TEST_STATUS`: вместо запроса к сервису разбираем
-/// готовый ответ. Работает только для токена из `PLASTINKA_TEST_TOKEN`, чтобы
-/// поддельный Плюс нельзя было получить для настоящего токена (в том числе
-/// только что выданного при `login`).
+/// готовый ответ. Условия — у `api::test_hook`.
 #[cfg(debug_assertions)]
 mod test_hook {
     use reqwest::StatusCode;
@@ -376,28 +366,16 @@ mod test_hook {
     const VAR: &str = "PLASTINKA_TEST_STATUS";
 
     pub fn fixture(token: &str) -> Result<Option<(StatusCode, &'static str)>, ApiError> {
-        let Some(name) = std::env::var(VAR).ok().filter(|value| !value.is_empty()) else {
+        let Some(name) = crate::api::test_hook(VAR, token)? else {
             return Ok(None);
         };
-        let test_token = std::env::var("PLASTINKA_TEST_TOKEN").ok();
-        if test_token
-            .as_deref()
-            .is_none_or(|test| test.is_empty() || test != token)
-        {
-            return Err(ApiError::TestHook(format!(
-                "{VAR} работает только с фальшивым токеном из PLASTINKA_TEST_TOKEN"
-            )));
-        }
         fixtures::ALL
             .iter()
             .find(|(known, _, _)| *known == name)
             .map(|&(_, status, body)| Some((status, body)))
             .ok_or_else(|| {
                 let known: Vec<&str> = fixtures::ALL.iter().map(|(known, _, _)| *known).collect();
-                ApiError::TestHook(format!(
-                    "неизвестное значение {VAR}. Возможные: {}",
-                    known.join(", ")
-                ))
+                crate::api::unknown_fixture(VAR, &known)
             })
     }
 }
