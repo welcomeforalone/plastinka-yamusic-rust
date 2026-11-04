@@ -1,6 +1,10 @@
 //! Локальные данные: каталоги настроек и кэша, токен в системном
 //! хранилище секретов. В кэш попадают только метаданные и обложки.
 
+pub mod config;
+pub mod token;
+
+use std::io;
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
@@ -12,6 +16,40 @@ use crate::APP_NAME;
 pub enum StorageError {
     #[error("не удалось определить домашний каталог пользователя")]
     NoHomeDir,
+    #[error("не удалось прочитать или записать настройки {}: {source}", .path.display())]
+    ConfigIo {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    // Текст строки с ошибкой не выводим: там может быть свой client_secret.
+    #[error("файл настроек {} повреждён{}: {message}", .path.display(), at_line(.line))]
+    ConfigParse {
+        path: PathBuf,
+        line: Option<usize>,
+        message: String,
+    },
+    #[error("не удалось подготовить настройки к сохранению: {0}")]
+    ConfigSerialize(#[from] toml::ser::Error),
+    #[error("системное хранилище паролей недоступно ({0}). {hint}", hint = token::UNAVAILABLE_HINT)]
+    SecretStoreUnavailable(String),
+    #[error("нет доступа к системному хранилищу паролей. Разблокируйте его и повторите")]
+    SecretStoreLocked,
+    #[error("сохранённый токен повреждён. Войдите заново: plastinka login")]
+    BadStoredToken,
+    #[error(
+        "в хранилище паролей несколько записей Plastinka. Удалите их командой plastinka logout"
+    )]
+    SecretStoreDuplicates,
+    #[error("ошибка системного хранилища паролей: {0}")]
+    SecretStore(String),
+    #[error("фоновая операция с локальными данными прервалась")]
+    Interrupted,
+}
+
+fn at_line(line: &Option<usize>) -> String {
+    line.map(|line| format!(" в строке {line}"))
+        .unwrap_or_default()
 }
 
 /// Каталоги приложения в стандартных для ОС местах.
@@ -36,10 +74,27 @@ impl AppDirs {
         &self.config
     }
 
+    /// Файл настроек `config.toml`.
+    pub fn config_file(&self) -> PathBuf {
+        self.config.join("config.toml")
+    }
+
     /// Каталог кэша метаданных и обложек.
     pub fn cache_dir(&self) -> &Path {
         &self.cache
     }
+}
+
+/// Выполняет блокирующую работу с диском или хранилищем паролей вне рабочих
+/// потоков tokio.
+pub async fn blocking<T, F>(work: F) -> Result<T, StorageError>
+where
+    F: FnOnce() -> Result<T, StorageError> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| StorageError::Interrupted)?
 }
 
 #[cfg(test)]
@@ -54,5 +109,6 @@ mod tests {
             let path = path.to_string_lossy().to_lowercase();
             assert!(path.contains(&name), "в пути нет имени приложения: {path}");
         }
+        assert!(dirs.config_file().starts_with(dirs.config_dir()));
     }
 }
