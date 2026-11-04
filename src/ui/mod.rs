@@ -1,9 +1,8 @@
 //! Окно приложения на iced: вход, «Нужна подписка», главное окно с боковым
 //! меню, списком «Мне нравится» и панелью плеера, окно «О программе».
 //!
-//! Звука на этапе 5 нет: панель плеера только показывает выбранный трек.
-//! Главное окно создаётся только с пропуском [`PlaybackPermit`], то есть
-//! после явного подтверждения Плюса.
+//! Главное окно и плеер в нём создаются только с пропуском
+//! [`PlaybackPermit`], то есть после явного подтверждения Плюса.
 
 mod covers;
 mod gate;
@@ -404,6 +403,10 @@ impl App {
                         Some(library::Effect::Relogin) => self.start_login(Some(
                             "Вход больше не действует. Войдите заново.".to_owned(),
                         )),
+                        Some(library::Effect::Toast(text)) => {
+                            self.show_toast(text);
+                            Task::none()
+                        }
                         None => Task::none(),
                     };
                     return Task::batch([task, covers, effect]);
@@ -794,6 +797,9 @@ impl App {
         if animating {
             subscriptions.push(iced::time::every(Duration::from_millis(33)).map(Message::Frame));
         }
+        if let Screen::Main(library) = &self.screen {
+            subscriptions.push(library.subscription());
+        }
         Subscription::batch(subscriptions)
     }
 
@@ -810,6 +816,7 @@ impl App {
                     &self.covers,
                     self.sidebar_collapsed,
                     self.compact(),
+                    self.size.width,
                     turn,
                 ));
             }
@@ -829,7 +836,12 @@ impl App {
             });
         let mut layers = stack![window].width(Length::Fill).height(Length::Fill);
         if let Some((text, _)) = &self.toast {
-            layers = layers.push(gate::toast(text));
+            // В главном окне — по центру плеера, а не всего окна.
+            let insets = match self.screen {
+                Screen::Main(_) => library::player_insets(self.sidebar_collapsed),
+                _ => (0.0, 0.0),
+            };
+            layers = layers.push(gate::toast(text, insets));
         }
         if let Some(dialog) = self.dialog {
             layers = layers.push(gate::dialog(dialog));

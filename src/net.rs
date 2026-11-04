@@ -80,3 +80,17 @@ pub fn http_client() -> Result<reqwest::Client, NetError> {
         .build()
         .map_err(NetError::from)
 }
+
+/// HTTP-клиент для звука. Общего таймаута нет: трек качается долго. Вместо
+/// него таймаут на тишину между кусками ответа. Редиректы разрешены: запросы
+/// без тела и без токена.
+pub fn audio_client() -> Result<reqwest::Client, NetError> {
+    reqwest::Client::builder()
+        .user_agent(concat!("Plastinka/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(10))
+        .read_timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .https_only(true)
+        .build()
+        .map_err(NetError::from)
+}

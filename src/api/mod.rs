@@ -1,9 +1,10 @@
-//! Запросы к API музыки: статус аккаунта и подписки, «Мне нравится», дальше
-//! плейлисты, поиск, «Моя волна». Запросы свои, на reqwest; крейт
+//! Запросы к API музыки: статус аккаунта и подписки, «Мне нравится», прямая
+//! ссылка на звук, дальше плейлисты, поиск, «Моя волна». Запросы свои, на reqwest; крейт
 //! `yandex-music` не подключён (почему — `docs/api/stage-4.md`). Сетевые
 //! ошибки возвращаются как значения и не роняют приложение.
 
 mod account;
+mod stream;
 mod tracks;
 
 use reqwest::StatusCode;
@@ -14,6 +15,7 @@ use crate::net::NetError;
 pub use account::{
     Account, AccountStatus, Date, PlaybackPermit, PlusDetails, Subscription, fetch_status,
 };
+pub use stream::{StreamError, StreamSource, fetch_stream_source};
 pub use tracks::{LikedIds, TRACKS_BATCH, Track, fetch_liked_ids, fetch_tracks};
 
 const API_BASE: &str = "https://api.music.yandex.net";

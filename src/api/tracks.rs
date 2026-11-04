@@ -236,7 +236,7 @@ where
 
 /// Сервис принимает число от 1 до `i32::MAX` или UUID (так выглядят
 /// загруженные пользователем треки). Остальное ломает всю пачку.
-fn plausible_id(id: &str) -> bool {
+pub(super) fn plausible_id(id: &str) -> bool {
     if id.bytes().all(|byte| byte.is_ascii_digit()) {
         return id.parse::<i32>().is_ok_and(|number| number > 0);
     }

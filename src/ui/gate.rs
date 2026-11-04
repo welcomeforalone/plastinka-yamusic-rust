@@ -573,7 +573,8 @@ pub fn paywall<'a>(paywall: &'a Paywall, turn: f32) -> Element<'a, Message> {
 // ---------------------------------------------------------------- поверх окна
 
 /// Всплывающее сообщение над плеером.
-pub fn toast<'a>(text: &'a str) -> Element<'a, Message> {
+/// Сообщение внизу, по центру между отступами `insets` (слева, справа).
+pub fn toast<'a>(text: &'a str, insets: (f32, f32)) -> Element<'a, Message> {
     container(
         container(theme::label(text, Style::Body, theme::TEXT_PRIMARY))
             .max_width(560)
@@ -593,7 +594,12 @@ pub fn toast<'a>(text: &'a str) -> Element<'a, Message> {
     .height(Length::Fill)
     .align_x(Alignment::Center)
     .align_y(Alignment::End)
-    .padding(Padding::default().bottom(104))
+    .padding(
+        Padding::default()
+            .bottom(104)
+            .left(insets.0)
+            .right(insets.1),
+    )
     .into()
 }
 
@@ -684,6 +690,10 @@ const LICENSES: &[(&str, &str)] = &[
         "Apache-2.0, ISC, MIT",
     ),
     ("image — обложки", "MIT или Apache-2.0"),
+    // MPL-2.0: код symphonia не меняем, исходники — github.com/pdeljanov/Symphonia.
+    ("symphonia — декодер MP3", "MPL-2.0"),
+    ("rodio, cpal — вывод звука", "MIT или Apache-2.0"),
+    ("md-5 — подпись ссылок", "MIT или Apache-2.0"),
 ];
 
 fn licenses<'a>() -> Element<'a, Message> {
