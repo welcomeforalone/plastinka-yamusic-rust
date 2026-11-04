@@ -1,0 +1,30 @@
+[package]
+name = "plastinka"
+version = "0.1.0"
+edition = "2024"
+description = "Неофициальный десктопный клиент Яндекс Музыки: только потоковое воспроизведение"
+publish = false
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+directories = "6.0.0"
+thiserror = "2.0.21"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# Правило проекта: в рабочем коде ничего не паникует. В тестах разрешено (см. clippy.toml).
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+dbg_macro = "deny"
+# `println!` и `eprintln!` паникуют, если поток вывода закрыт: пишем через `writeln!`.
+print_stdout = "deny"
+print_stderr = "deny"
+# Индексация и срезы паникуют при выходе за границы: используем `get`.
+indexing_slicing = "deny"
+string_slice = "deny"
