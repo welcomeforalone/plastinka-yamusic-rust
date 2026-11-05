@@ -9,43 +9,73 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use iced::widget::{
-    Space, button, center, column, container, hover, mouse_area, row, scrollable, slider, tooltip,
+    Space, button, center, column, container, hover, mouse_area, row, scrollable, slider,
+    text_input, toggler, tooltip,
 };
-use iced::{
-    Alignment, Background, Border, Color, Element, Length, Padding, Radians, Subscription, Task,
-    mouse,
-};
+use iced::{Alignment, Border, Color, Element, Length, Padding, Subscription, Task, mouse};
 
 use super::Message as App;
 use super::Message::Library as Lib;
+use super::anim;
 use super::covers::{Art, Covers};
+use super::filter;
 use super::icons::{Icon, icon, spinner};
 use super::marquee::marquee;
+use super::scroll;
 use super::theme::{self, Style};
+use super::visualizer::{self, Analyzer};
 use super::widgets::{self, CoverArt, Kind, Size};
-use super::{Dialog, Failure, FailureKind};
+use super::{Dialog, Failure, FailureKind, Moment, Prefs, Zoom};
 use crate::api::{self, AccountStatus, PlaybackPermit, Track};
 use crate::player::{self as audio, Command, PlayError};
+use crate::storage::config;
 use crate::storage::token::StoredToken;
 use crate::texts::{self, sentence};
+use iced::animation::Animation;
+use iced::time::Instant;
 
 /// Высота строки трека.
 const ROW: f32 = 56.0;
 /// Сколько строк строить сверх видимых, сверху и снизу.
 const OVERSCAN: usize = 8;
-/// Отступ над первой строкой.
+/// Отступ над первой строкой и под последней.
 const LIST_TOP: f32 = 8.0;
+const LIST_BOTTOM: f32 = 8.0;
+/// Список для прокрутки по команде и поле поиска для Ctrl + F.
+const LIST_ID: &str = "liked-list";
+const SEARCH_ID: &str = "liked-search";
+/// Высота поля поиска.
+const SEARCH_HEIGHT: f32 = 44.0;
+/// Отступ полосы прокрутки от правого края.
+const RAIL_RIGHT: f32 = 6.0;
 /// Громкость, которую возвращает кнопка звука, если громкость была нулевой.
 const UNMUTE_VOLUME: f32 = 0.5;
 /// Через сколько показывать скелетон: быстрые ответы не мигают.
 const SKELETON_DELAY: Duration = Duration::from_millis(300);
 /// Ширина меню: развёрнутого и свёрнутого.
-const SIDEBAR: f32 = 232.0;
-const SIDEBAR_COLLAPSED: f32 = 72.0;
+pub const SIDEBAR: f32 = 232.0;
+pub const SIDEBAR_COLLAPSED: f32 = 72.0;
+/// Уже этой ширины меню показывает только иконки (пока сворачивается).
+const SIDEBAR_ICONS_BELOW: f32 = 150.0;
 /// Кнопки и перемотка в середине плеера.
 const CONTROLS: f32 = 440.0;
-/// Поля плеера, промежутки между его частями и отступ справа от него.
-const PLAYER_CHROME: f32 = 16.0 * 2.0 + 16.0 * 2.0 + 8.0;
+/// Поля плеера, промежутки между его частями и разделитель у меню.
+/// Непрозрачность столбиков спектра под плеером.
+const SPECTRUM_ALPHA: f32 = 0.22;
+/// Полноэкранный плеер: заголовок окна, строка с крестиком, плеер и
+/// подписи под обложкой по высоте; поля по бокам; пределы обложки.
+const FULLSCREEN_CHROME: f32 = 36.0 + 40.0 + 89.0 + 110.0;
+const FULLSCREEN_SIDE: f32 = 64.0;
+const FULLSCREEN_COVER_MIN: f32 = 160.0;
+const FULLSCREEN_COVER_MAX: f32 = 560.0;
+/// Вуаль поверх размытого фона.
+const FULLSCREEN_SCRIM: f32 = 0.25;
+/// Затемнение заглушки на фоне: как у размытой обложки (120 из 256).
+const PLACEHOLDER_DIM: f32 = 0.53;
+const PLAYER_CHROME: f32 = 20.0 * 2.0 + 16.0 * 2.0 + 1.0;
+/// Поля раздела: сверху и по бокам.
+const PAGE_TOP: f32 = 32.0;
+const PAGE_SIDE: f32 = 40.0;
 /// Сколько нужно правому краю плеера с полным значком качества
 /// («MP3 · 320») и с коротким («320») при узкой громкости.
 const EXTRAS_WITH_QUALITY: f32 = 330.0;
@@ -62,17 +92,10 @@ enum Quality {
     Full,
 }
 
-/// Где на экране плеер: отступы слева и справа. Сообщения выводятся по его
-/// центру.
-pub fn player_insets(collapsed: bool) -> (f32, f32) {
-    (
-        if collapsed {
-            SIDEBAR_COLLAPSED
-        } else {
-            SIDEBAR
-        },
-        8.0,
-    )
+/// Где на экране плеер: отступы слева и справа при ширине меню `sidebar`.
+/// Сообщения выводятся по его центру.
+pub fn player_insets(sidebar: f32) -> (f32, f32) {
+    (sidebar + 1.0, 0.0)
 }
 /// Громкость при запуске.
 const START_VOLUME: f32 = 0.7;
@@ -135,6 +158,13 @@ pub enum Message {
     ShowSkeleton,
     RetryLikes,
     Scrolled(scrollable::Viewport),
+    /// Щелчки колеса над списком (вниз — больше нуля): плавная прокрутка.
+    Wheel(f32),
+    /// Ручку полосы прокрутки тянут: список сразу на этот сдвиг.
+    ScrollTo(f32),
+    /// Поиск трека в списке: новый текст запроса.
+    Search(String),
+    ClearSearch,
     Select(usize),
     Play(usize),
     PlayAll,
@@ -153,6 +183,11 @@ pub enum Message {
     ToggleMute,
     /// Перемешать и слушать.
     ShuffleAll,
+    /// Мышь над ползунком перемотки или ушла с него.
+    SeekHover(bool),
+    VolumeHover(bool),
+    /// Открыть или закрыть полноэкранный плеер.
+    Fullscreen(bool),
     Audio(audio::Event),
     Noop,
 }
@@ -225,6 +260,63 @@ pub struct Library {
     /// прокрутке, а после увеличения окна она бы устарела.
     viewport: f32,
     player: Player,
+    motion: PlayerMotion,
+    /// Отвод звука плеера и спектр для визуализатора.
+    tap: Option<Arc<audio::Tap>>,
+    spectrum: Analyzer,
+    /// Полноэкранный плеер открыт (выезжает снизу).
+    fullscreen: Animation<bool>,
+    /// Плавная прокрутка списка колесом, пока она идёт.
+    glide: Option<scroll::Glide>,
+    /// Высота видимой части списка, по последнему сообщению `scrollable`.
+    list_height: Option<f32>,
+    /// Поиск трека: запрос, строки треков для поиска и номера найденных
+    /// (`None` — запрос пустой, видно всё).
+    query: String,
+    haystacks: Vec<String>,
+    shown: Option<Vec<usize>>,
+}
+
+/// Анимации плеера.
+struct PlayerMotion {
+    /// Нажатие Play: кнопка коротко сжимается.
+    pulse: Animation<bool>,
+    /// Прежний трек, чья обложка тает, и ход затухания.
+    cover_from: Option<usize>,
+    cover_fade: Animation<bool>,
+    /// Ручка и заливка ползунков проявляются при наведении.
+    seek_hover: Animation<bool>,
+    volume_hover: Animation<bool>,
+    /// Громкость на ползунке: после щелчка по иконке и колеса — плавно.
+    volume: Animation<f32>,
+}
+
+impl PlayerMotion {
+    fn new(volume: f32) -> Self {
+        Self {
+            pulse: anim::settled(true, anim::PANEL),
+            cover_from: None,
+            cover_fade: anim::settled(true, anim::COVER),
+            seek_hover: anim::settled(false, anim::HOVER),
+            volume_hover: anim::settled(false, anim::HOVER),
+            volume: still_volume(volume),
+        }
+    }
+
+    fn running(&self, now: Instant) -> bool {
+        self.pulse.is_animating(now)
+            || self.cover_fade.is_animating(now)
+            || self.seek_hover.is_animating(now)
+            || self.volume_hover.is_animating(now)
+            || self.volume.is_animating(now)
+    }
+}
+
+/// Громкость без анимации: ползунок тянут, он идёт за мышью.
+fn still_volume(volume: f32) -> Animation<f32> {
+    Animation::new(volume)
+        .duration(anim::PANEL)
+        .easing(iced::animation::Easing::EaseOutCubic)
 }
 
 impl Library {
@@ -244,6 +336,7 @@ impl Library {
         if let Ok(engine) = &engine {
             engine.send(Command::Volume(START_VOLUME));
         }
+        let tap = engine.as_ref().ok().map(audio::Player::tap);
         let mut library = Self {
             token,
             status,
@@ -272,6 +365,15 @@ impl Library {
                 sounded: false,
                 order: Vec::new(),
             },
+            motion: PlayerMotion::new(START_VOLUME),
+            tap,
+            spectrum: Analyzer::default(),
+            fullscreen: anim::settled(false, anim::FULLSCREEN),
+            glide: None,
+            list_height: None,
+            query: String::new(),
+            haystacks: Vec::new(),
+            shown: None,
         };
         let task = library.load_likes(http);
         (library, task)
@@ -336,6 +438,101 @@ impl Library {
             || (self.player.playing && self.player.buffering)
     }
 
+    /// Насколько выехал полноэкранный плеер: 0 — его нет, 1 — во всё окно.
+    pub fn fullscreen_shown(&self, now: Instant) -> f32 {
+        anim::progress(&self.fullscreen, now)
+    }
+
+    /// Esc: закрыть полноэкранный плеер. `false` — он и не был открыт.
+    pub fn close_fullscreen(&mut self) -> bool {
+        let open = self.fullscreen.value();
+        if open {
+            self.fullscreen.go_mut(false, Instant::now());
+        }
+        open
+    }
+
+    /// Большая обложка, которая нужна полноэкранному плееру сейчас.
+    pub fn fullscreen_cover(&self) -> Option<&str> {
+        if !self.fullscreen.value() {
+            return None;
+        }
+        self.current().and_then(|track| track.cover_uri.as_deref())
+    }
+
+    /// Нужны ли кадры визуализатору: играет звук или столбики опускаются.
+    pub fn visualizing(&self, enabled: bool) -> bool {
+        enabled && (self.player.playing || self.spectrum.moving())
+    }
+
+    /// Кадр визуализатора. `enabled` — он включён в настройках.
+    /// Кадр: спектр (`enabled` — визуализатор включён) и плавная прокрутка.
+    pub fn frame(&mut self, now: Instant, enabled: bool) -> Task<Message> {
+        if enabled {
+            let tap = self.tap.as_deref().filter(|_| self.player.playing);
+            self.spectrum.frame(tap, now);
+        } else {
+            self.spectrum.clear();
+        }
+        let Some(glide) = &mut self.glide else {
+            return Task::none();
+        };
+        let (offset, done) = glide.step(now);
+        if done {
+            self.glide = None;
+        }
+        scroll_list(offset)
+    }
+
+    /// Высота списка «Мне нравится» со всеми видимыми строками.
+    fn list_content(&self) -> f32 {
+        LIST_TOP + rows_height(self.shown_count()) + LIST_BOTTOM
+    }
+
+    /// Сколько строк в списке с учётом поиска.
+    fn shown_count(&self) -> usize {
+        self.shown.as_ref().map_or(self.tracks().len(), Vec::len)
+    }
+
+    /// Номер трека в строке `row` списка с учётом поиска.
+    fn shown_at(&self, row: usize) -> Option<usize> {
+        match &self.shown {
+            Some(shown) => shown.get(row).copied(),
+            None => (row < self.tracks().len()).then_some(row),
+        }
+    }
+
+    /// Новый запрос: список фильтруется и встаёт в начало.
+    fn search(&mut self, query: String) -> Task<Message> {
+        self.query = query;
+        self.shown = filter::matching(&self.haystacks, &self.query);
+        self.scroll_y = 0.0;
+        self.glide = None;
+        scroll_list(0.0)
+    }
+
+    /// Esc: сбросить поиск. `None` — сбрасывать нечего.
+    pub fn clear_search(&mut self) -> Option<Task<Message>> {
+        (self.section == Section::Liked && !self.query.is_empty())
+            .then(|| self.search(String::new()))
+    }
+
+    /// Ctrl + F: курсор в поле поиска, если оно на экране.
+    pub fn focus_search(&self) -> Task<Message> {
+        if self.section == Section::Liked && !self.tracks().is_empty() {
+            iced::widget::operation::focus(SEARCH_ID)
+        } else {
+            Task::none()
+        }
+    }
+
+    /// Дальше этого список не прокрутить. Пока `scrollable` не сообщил свою
+    /// высоту, берём высоту окна: цель поправится при первом сообщении.
+    fn max_scroll(&self) -> f32 {
+        let height = self.list_height.unwrap_or(self.viewport * 0.5);
+        (self.list_content() - height).max(0.0)
+    }
+
     /// События плеера: позиция, конец трека, ошибки.
     pub fn subscription(&self) -> Subscription<App> {
         match &self.engine {
@@ -363,13 +560,16 @@ impl Library {
                 // Список при возврате в раздел создаётся заново, с начала.
                 if section != self.section {
                     self.scroll_y = 0.0;
+                    self.glide = None;
                 }
                 self.section = section;
                 None
             }
             Message::LikesLoaded(result) => match result {
                 Ok(tracks) => {
+                    self.haystacks = tracks.iter().map(filter::haystack).collect();
                     self.likes = Likes::Ready(tracks);
+                    self.shown = filter::matching(&self.haystacks, &self.query);
                     self.selected = None;
                     self.stop();
                     None
@@ -389,8 +589,35 @@ impl Library {
             Message::RetryLikes => return (self.load_likes(http), None),
             Message::Scrolled(viewport) => {
                 self.scroll_y = viewport.absolute_offset().y;
+                self.list_height = Some(viewport.bounds().height);
+                // Цель за концом списка (высота была неизвестна) — правим.
+                let max = self.max_scroll();
+                if let Some(glide) = &mut self.glide
+                    && glide.target() > max
+                {
+                    glide.retarget(max);
+                }
                 None
             }
+            Message::Wheel(lines) => {
+                let max = self.max_scroll();
+                let base = self.glide.map_or(self.scroll_y, |glide| glide.target());
+                let target = (base + lines * scroll::WHEEL_STEP).clamp(0.0, max);
+                match &mut self.glide {
+                    Some(glide) => glide.retarget(target),
+                    None if (target - self.scroll_y).abs() >= 0.5 => {
+                        self.glide = Some(scroll::Glide::new(self.scroll_y, target));
+                    }
+                    None => {}
+                }
+                None
+            }
+            Message::ScrollTo(offset) => {
+                self.glide = None;
+                return (scroll_list(offset.clamp(0.0, self.max_scroll())), None);
+            }
+            Message::Search(query) => return (self.search(query), None),
+            Message::ClearSearch => return (self.search(String::new()), None),
             Message::Select(index) => {
                 self.selected = Some(index);
                 None
@@ -416,7 +643,25 @@ impl Library {
                 let first = self.player.order.first().copied();
                 first.and_then(|index| self.start(index, 0.0))
             }
-            Message::TogglePlay => self.toggle_play(),
+            Message::TogglePlay => {
+                self.motion.pulse = anim::entering(anim::PANEL, Instant::now());
+                self.toggle_play()
+            }
+            Message::SeekHover(over) => {
+                self.motion.seek_hover.go_mut(over, Instant::now());
+                None
+            }
+            Message::VolumeHover(over) => {
+                self.motion.volume_hover.go_mut(over, Instant::now());
+                None
+            }
+            Message::Fullscreen(open) => {
+                // Без трека смотреть не на что.
+                if !open || self.current().is_some() {
+                    self.fullscreen.go_mut(open, Instant::now());
+                }
+                None
+            }
             Message::Previous => match self.player.current {
                 Some(_) if self.player.position > RESTART_AFTER => {
                     self.seek_to(0.0);
@@ -462,6 +707,7 @@ impl Library {
             Message::Volume(volume) => {
                 self.player.volume = volume;
                 self.player.muted = volume <= 0.0;
+                self.motion.volume = still_volume(volume);
                 self.send(Command::Volume(self.player.gain()));
                 None
             }
@@ -478,6 +724,9 @@ impl Library {
                 };
                 self.player.volume = (base + step).clamp(0.0, 1.0);
                 self.player.muted = self.player.volume <= 0.0;
+                self.motion
+                    .volume
+                    .go_mut(self.player.gain(), Instant::now());
                 self.send(Command::Volume(self.player.gain()));
                 None
             }
@@ -489,6 +738,9 @@ impl Library {
                 } else {
                     self.player.muted = !self.player.muted;
                 }
+                self.motion
+                    .volume
+                    .go_mut(self.player.gain(), Instant::now());
                 self.send(Command::Volume(self.player.gain()));
                 None
             }
@@ -506,6 +758,13 @@ impl Library {
             .filter(|track| track.available)?
             .id
             .clone();
+        let now = Instant::now();
+        if self.player.current != Some(index) {
+            // Обложка прежнего трека тает под новой.
+            self.motion.cover_from = self.player.current;
+            self.motion.cover_fade = anim::entering(anim::COVER, now);
+        }
+        self.motion.pulse = anim::entering(anim::PANEL, now);
         let player = &mut self.player;
         player.current = Some(index);
         player.playing = true;
@@ -741,7 +1000,7 @@ impl Library {
 
     /// Диапазон строк, которые надо построить.
     fn visible_range(&self) -> (usize, usize) {
-        let count = self.tracks().len();
+        let count = self.shown_count();
         let first = rows_in(self.scroll_y - LIST_TOP).saturating_sub(OVERSCAN);
         let last = (rows_in(self.scroll_y - LIST_TOP + self.viewport) + 1 + OVERSCAN).min(count);
         (first.min(last), last)
@@ -756,11 +1015,11 @@ impl Library {
             .into_iter()
             .collect();
         if self.section == Section::Liked {
+            let tracks = self.tracks();
             uris.extend(
-                self.tracks()
-                    .get(first..last)
-                    .unwrap_or_default()
-                    .iter()
+                (first..last)
+                    .filter_map(|row| self.shown_at(row))
+                    .filter_map(|index| tracks.get(index))
                     .filter_map(|track| track.cover_uri.as_deref()),
             );
         }
@@ -769,62 +1028,207 @@ impl Library {
 
     // ------------------------------------------------------------ вид
 
-    /// `collapsed` — меню свёрнуто до иконок, `compact` — узкое окно: в плеере
-    /// меньше кнопок. `width` — ширина окна.
+    /// `compact` — узкое окно: в плеере меньше кнопок. `width` — ширина окна.
     pub fn view<'a>(
         &'a self,
         covers: &'a Covers,
-        collapsed: bool,
+        prefs: &Prefs,
+        moment: Moment,
         compact: bool,
         width: f32,
         turn: f32,
     ) -> Element<'a, App> {
+        let collapsed = prefs.sidebar_collapsed;
         let content: Element<'a, App> = match self.section {
             Section::Liked => self.liked(covers, turn),
-            Section::Settings => self.settings(),
+            Section::Settings => self.settings(prefs),
             section => placeholder(section),
         };
-        let panel = container(content)
+        let panel = container(super::appear(content, moment.page))
             .width(Length::Fill)
             .height(Length::Fill)
-            .clip(true)
-            .style(|_| container::Style {
-                background: Some(theme::SURFACE_1.into()),
-                border: Border::default().rounded(16),
-                ..container::Style::default()
-            });
-        // Как в официальном клиенте: меню во всю высоту слева, справа
-        // карточка раздела и под ней карточка плеера.
+            .clip(true);
+        // Меню во всю высоту слева, справа раздел и под ним плеер. Фон везде
+        // чёрный, части разделены тонкими линиями.
         // Значок качества — полный, если правый край плеера вмещает его;
-        // иначе короткий при узкой громкости. Плеер стоит справа от меню, а
-        // не во всю ширину, как в макете.
+        // иначе короткий при узкой громкости.
         let sidebar = if collapsed {
             SIDEBAR_COLLAPSED
         } else {
             SIDEBAR
         };
-        let edge = (width - sidebar - PLAYER_CHROME - CONTROLS) / 2.0;
-        let quality = match edge {
-            _ if compact => Quality::Hidden,
-            edge if edge >= EXTRAS_WITH_QUALITY => Quality::Full,
-            edge if edge >= EXTRAS_WITH_SHORT_QUALITY => Quality::Short,
-            _ => Quality::Hidden,
-        };
-        let right = column![panel, self.player_bar(covers, compact, quality, turn)]
-            .spacing(8)
-            .width(Length::Fill)
-            .padding(Padding {
-                top: 0.0,
-                right: 8.0,
-                bottom: 8.0,
-                left: 0.0,
-            });
-        row![self.sidebar(collapsed), right]
-            .height(Length::Fill)
-            .into()
+        let quality = quality_for(width - sidebar, compact);
+        let right = column![
+            panel,
+            widgets::divider(),
+            self.player_bar(
+                covers,
+                compact,
+                quality,
+                turn,
+                moment.now,
+                prefs.visualizer,
+                false
+            )
+        ]
+        .width(Length::Fill);
+        row![
+            self.sidebar(moment.sidebar),
+            widgets::vertical_divider(),
+            right
+        ]
+        .height(Length::Fill)
+        .into()
     }
 
-    fn sidebar(&self, compact: bool) -> Element<'_, App> {
+    /// Полноэкранный плеер поверх окна: размытая обложка на фоне, крупная
+    /// обложка слева, место под текст песни справа, плеер внизу. Выезжает
+    /// снизу. `title_bar` — заголовок окна: за него окно по-прежнему можно
+    /// таскать. `None` — плеер закрыт.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fullscreen<'a>(
+        &'a self,
+        covers: &'a Covers,
+        prefs: &Prefs,
+        now: Instant,
+        compact: bool,
+        window: iced::Size,
+        turn: f32,
+        title_bar: Element<'a, App>,
+    ) -> Option<Element<'a, App>> {
+        let shown = anim::progress(&self.fullscreen, now);
+        if shown <= 0.0 {
+            return None;
+        }
+        let track = self.current();
+        let big = track.and_then(|track| covers.big(track.cover_uri.as_deref(), now));
+        let small = track.map(|track| cover_art(covers, track));
+
+        // Фон: размытая обложка. Пока её нет — чёрный, у трека без обложки —
+        // цвета заглушки под вуалью.
+        let backdrop: Element<'a, App> = match (big, &small) {
+            (Some((big, opacity)), _) => iced::widget::image(big.backdrop.clone())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .content_fit(iced::ContentFit::Cover)
+                .opacity(opacity)
+                .into(),
+            (None, Some(CoverArt::Placeholder(background))) => {
+                let background = *background;
+                // Размытая обложка уже затемнена при подготовке, заглушку
+                // затемняем здесь так же.
+                iced::widget::stack![
+                    fill(move || container::Style {
+                        background: Some(background),
+                        ..container::Style::default()
+                    }),
+                    fill(|| container::Style {
+                        background: Some(theme::alpha(theme::BG, PLACEHOLDER_DIM).into()),
+                        ..container::Style::default()
+                    }),
+                ]
+                .into()
+            }
+            _ => Space::new().into(),
+        };
+
+        let side = ((window.height - FULLSCREEN_CHROME) * 0.9)
+            .min((window.width - 3.0 * FULLSCREEN_SIDE) / 2.0)
+            .clamp(FULLSCREEN_COVER_MIN, FULLSCREEN_COVER_MAX);
+        let radius = 16.0;
+        let base = widgets::cover(small.unwrap_or(CoverArt::Loading), side, radius);
+        let cover: Element<'a, App> = match big {
+            Some((big, opacity)) if opacity >= 1.0 => {
+                widgets::picture(&big.cover, side, radius, 1.0)
+            }
+            Some((big, opacity)) => {
+                iced::widget::stack![base, widgets::picture(&big.cover, side, radius, opacity)]
+                    .into()
+            }
+            None => base,
+        };
+        let cover = container(cover).style(move |_| container::Style {
+            background: Some(theme::SURFACE_2.into()),
+            border: Border::default().rounded(radius),
+            shadow: widgets::cover_shadow(),
+            ..container::Style::default()
+        });
+        let (title, artist) = match track {
+            Some(track) => (track.display_title(), track.artists_text()),
+            None => ("Ничего не играет".to_owned(), String::new()),
+        };
+        let about = column![
+            cover,
+            column![
+                marquee(title, Style::Display, theme::TEXT_PRIMARY),
+                marquee(artist, Style::Headline, theme::TEXT_SECONDARY),
+            ]
+            .spacing(6)
+            .width(side),
+        ]
+        .spacing(28)
+        .width(side);
+        let lyrics = center(
+            column![
+                icon(Icon::Lyrics, 40.0, theme::TEXT_TERTIARY),
+                theme::line("Текст появится позже", Style::Title, theme::TEXT_PRIMARY),
+                theme::line(
+                    "Тексты песен добавим на одном из следующих этапов",
+                    Style::Secondary,
+                    theme::TEXT_SECONDARY,
+                ),
+            ]
+            .spacing(12)
+            .align_x(Alignment::Center),
+        );
+        let body = row![about, lyrics]
+            .spacing(FULLSCREEN_SIDE)
+            .padding([0.0, FULLSCREEN_SIDE])
+            .align_y(Alignment::Center)
+            .height(Length::Fill);
+        let close = container(widgets::with_tooltip(
+            widgets::icon_button(
+                Icon::Close,
+                Size::M,
+                false,
+                Some(Lib(Message::Fullscreen(false))),
+            ),
+            "Свернуть · Esc",
+            tooltip::Position::Right,
+        ))
+        .padding([0.0, 24.0]);
+        let player = self.player_bar(
+            covers,
+            compact,
+            quality_for(window.width, compact),
+            turn,
+            now,
+            prefs.visualizer,
+            true,
+        );
+        let layers = iced::widget::stack![
+            fill(|| container::Style {
+                background: Some(theme::BG.into()),
+                ..container::Style::default()
+            }),
+            backdrop,
+            // Вуаль: на светлой обложке текст и кнопки должны читаться.
+            fill(|| container::Style {
+                background: Some(theme::alpha(theme::BG, FULLSCREEN_SCRIM).into()),
+                ..container::Style::default()
+            }),
+            column![title_bar, close, body, player],
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill);
+        let sheet =
+            anim::motion(iced::widget::opaque(layers)).offset(0.0, window.height * (1.0 - shown));
+        Some(sheet.into())
+    }
+
+    /// Меню шириной `width`: узкое — только иконки.
+    fn sidebar(&self, width: f32) -> Element<'_, App> {
+        let compact = width < SIDEBAR_ICONS_BELOW;
         let item = |section: Section| nav_item(section, self.section == section, compact);
         // Кнопка сворачивания появляется, когда мышь над шапкой меню.
         let brand: Element<'_, App> = if compact {
@@ -871,7 +1275,7 @@ impl Library {
             })
             .into()
         };
-        column![
+        let menu = column![
             brand,
             Space::new().height(12),
             item(Section::Wave),
@@ -887,14 +1291,23 @@ impl Library {
             self.account_card(compact),
         ]
         .spacing(2)
-        .width(if compact { SIDEBAR_COLLAPSED } else { SIDEBAR })
+        .width(width)
         .padding(Padding {
             top: 4.0,
             right: 12.0,
             bottom: 12.0,
             left: 12.0,
-        })
-        .into()
+        });
+        container(menu).width(width).clip(true).into()
+    }
+
+    pub fn section(&self) -> Section {
+        self.section
+    }
+
+    /// Идёт ли переход внутри главного окна.
+    pub fn transitioning(&self, now: Instant) -> bool {
+        self.motion.running(now) || self.fullscreen.is_animating(now) || self.glide.is_some()
     }
 
     fn account_card(&self, compact: bool) -> Element<'_, App> {
@@ -925,29 +1338,25 @@ impl Library {
             avatar,
             column![
                 theme::line(name, Style::BodyStrong, theme::TEXT_PRIMARY),
-                theme::line("Плюс активен", Style::Caption, theme::ACCENT),
+                theme::line("Плюс активен", Style::Caption, theme::accent()),
             ]
             .width(Length::Fill),
         ]
         .spacing(10)
         .align_y(Alignment::Center);
-        button(card)
+        let card = button(card)
             .padding(8)
             .width(Length::Fill)
             .style(|_, status| button::Style {
-                background: Some(
-                    if status == button::Status::Hovered {
-                        theme::SURFACE_3
-                    } else {
-                        theme::SURFACE_2
-                    }
-                    .into(),
-                ),
+                background: match status {
+                    button::Status::Pressed => Some(theme::SURFACE_3.into()),
+                    _ => None,
+                },
                 border: Border::default().rounded(12),
                 ..button::Style::default()
             })
-            .on_press(open)
-            .into()
+            .on_press(open);
+        anim::hover_fill(card, theme::clear(theme::SURFACE_2), theme::SURFACE_2, 12.0).into()
     }
 
     fn liked<'a>(&'a self, covers: &'a Covers, turn: f32) -> Element<'a, App> {
@@ -978,10 +1387,10 @@ impl Library {
             }
             Likes::Ready(tracks) if tracks.is_empty() => column![
                 container(liked_header(tracks, false)).padding(Padding {
-                    top: 28.0,
-                    right: 32.0,
+                    top: PAGE_TOP,
+                    right: PAGE_SIDE,
                     bottom: 0.0,
-                    left: 32.0,
+                    left: PAGE_SIDE,
                 }),
                 state_block(
                     widgets::badge(Icon::Heart, theme::TEXT_SECONDARY, theme::SURFACE_2),
@@ -996,22 +1405,51 @@ impl Library {
                 ),
             ]
             .into(),
-            Likes::Ready(tracks) => column![
-                container(liked_header(tracks, true)).padding(Padding {
-                    top: 28.0,
-                    right: 32.0,
-                    bottom: 0.0,
-                    left: 32.0,
-                }),
-                container(list_header()).padding(Padding {
-                    top: 20.0,
-                    right: 32.0,
-                    bottom: 0.0,
-                    left: 32.0,
-                }),
-                self.rows(tracks, covers),
-            ]
-            .into(),
+            Likes::Ready(tracks) => {
+                let body: Element<'a, App> = if self.shown_count() == 0 {
+                    state_block(
+                        widgets::badge(Icon::Search, theme::TEXT_SECONDARY, theme::SURFACE_2),
+                        "Ничего не нашлось",
+                        format!(
+                            "В «Мне нравится» нет треков по запросу «{}».",
+                            self.query.trim()
+                        ),
+                        widgets::action(
+                            Kind::Secondary,
+                            Some(Icon::Close),
+                            "Сбросить поиск",
+                            Some(Lib(Message::ClearSearch)),
+                        ),
+                    )
+                } else {
+                    column![
+                        container(list_header()).padding(Padding {
+                            top: 20.0,
+                            right: PAGE_SIDE,
+                            bottom: 0.0,
+                            left: PAGE_SIDE,
+                        }),
+                        self.rows(tracks, covers),
+                    ]
+                    .into()
+                };
+                column![
+                    container(liked_header(tracks, true)).padding(Padding {
+                        top: PAGE_TOP,
+                        right: PAGE_SIDE,
+                        bottom: 0.0,
+                        left: PAGE_SIDE,
+                    }),
+                    container(search_box(&self.query)).padding(Padding {
+                        top: 24.0,
+                        right: PAGE_SIDE,
+                        bottom: 0.0,
+                        left: PAGE_SIDE,
+                    }),
+                    body,
+                ]
+                .into()
+            }
         }
     }
 
@@ -1019,43 +1457,36 @@ impl Library {
     fn rows<'a>(&'a self, tracks: &'a [Track], covers: &'a Covers) -> Element<'a, App> {
         let (first, last) = self.visible_range();
         let mut list = column![Space::new().height(LIST_TOP + rows_height(first))];
-        for (index, track) in tracks
-            .get(first..last)
-            .unwrap_or_default()
-            .iter()
-            .enumerate()
-            .map(|(offset, track)| (first + offset, track))
-        {
-            list = list.push(self.track_row(index, track, covers));
+        // Номер в строке — номер трека во всём списке, даже при поиске.
+        for index in (first..last).filter_map(|row| self.shown_at(row)) {
+            if let Some(track) = tracks.get(index) {
+                list = list.push(self.track_row(index, track, covers));
+            }
         }
-        list = list.push(Space::new().height(rows_height(tracks.len().saturating_sub(last)) + 8.0));
-        scrollable(container(list).padding(Padding {
+        list = list.push(
+            Space::new().height(rows_height(self.shown_count().saturating_sub(last)) + LIST_BOTTOM),
+        );
+        // Полоса прокрутки своя (у iced ручка длинного списка — точка), колесо
+        // прокручивает плавно. Тачпад и клавиши — как обычно у `scrollable`.
+        let list = scrollable(container(list).padding(Padding {
             top: 0.0,
-            right: 32.0,
+            right: PAGE_SIDE,
             bottom: 0.0,
-            left: 32.0,
+            left: PAGE_SIDE,
         }))
+        .id(LIST_ID)
         .direction(scrollable::Direction::Vertical(
-            scrollable::Scrollbar::new()
-                .width(4)
-                .scroller_width(4)
-                .margin(5),
+            scrollable::Scrollbar::hidden(),
         ))
         .on_scroll(|viewport| Lib(Message::Scrolled(viewport)))
         .height(Length::Fill)
-        .style(|_, status| {
-            let active = !matches!(status, scrollable::Status::Active { .. });
+        .style(|_, _| {
             let rail = scrollable::Rail {
                 background: None,
                 border: Border::default(),
                 scroller: scrollable::Scroller {
-                    background: (if active {
-                        theme::TEXT_DISABLED
-                    } else {
-                        theme::SURFACE_4
-                    })
-                    .into(),
-                    border: Border::default().rounded(2),
+                    background: Color::TRANSPARENT.into(),
+                    border: Border::default(),
                 },
             };
             scrollable::Style {
@@ -1070,7 +1501,22 @@ impl Library {
                     icon: theme::TEXT_PRIMARY,
                 },
             }
-        })
+        });
+        let rail = row![
+            Space::new().width(Length::Fill),
+            container(scroll::rail(self.scroll_y, self.list_content(), |offset| {
+                Lib(Message::ScrollTo(offset))
+            }))
+            .padding(Padding {
+                right: RAIL_RIGHT,
+                ..Padding::ZERO
+            }),
+        ];
+        iced::widget::stack![
+            scroll::wheel(list, |lines| Lib(Message::Wheel(lines))),
+            rail
+        ]
+        .height(Length::Fill)
         .into()
     }
 
@@ -1083,17 +1529,13 @@ impl Library {
         let current = self.player.current == Some(index);
         let selected = self.selected == Some(index);
         let make = |hovered: bool| -> Element<'a, App> {
-            let background = match (selected, hovered) {
-                (true, _) => Some(theme::SURFACE_3),
-                (false, true) => Some(theme::SURFACE_2),
-                (false, false) => None,
-            };
             container(track_cells(
                 index,
                 track,
                 covers,
                 current,
                 self.player.playing,
+                self.player.buffering,
                 hovered,
             ))
             .height(ROW)
@@ -1104,20 +1546,26 @@ impl Library {
                 left: 8.0,
             })
             .center_y(ROW)
-            .style(move |_| container::Style {
-                background: background.map(Background::Color),
-                border: Border::default().rounded(widgets::RADIUS_M),
-                ..container::Style::default()
-            })
             .into()
         };
-        mouse_area(hover(make(false), make(true)))
-            .on_press(Lib(Message::Select(index)))
-            .on_double_click(Lib(Message::Play(index)))
-            .into()
+        // Фон строки проявляется плавно; выбранная строка подсвечена всегда.
+        let (idle, hovered) = if selected {
+            (theme::SURFACE_3, theme::SURFACE_3)
+        } else {
+            (theme::clear(theme::SURFACE_2), theme::SURFACE_2)
+        };
+        mouse_area(anim::hover_fill(
+            anim::swap(make(false), make(true)),
+            idle,
+            hovered,
+            widgets::RADIUS_M,
+        ))
+        .on_press(Lib(Message::Select(index)))
+        .on_double_click(Lib(Message::Play(index)))
+        .into()
     }
 
-    fn settings(&self) -> Element<'_, App> {
+    fn settings(&self, prefs: &Prefs) -> Element<'_, App> {
         let account = self.status.account();
         let name = account.name();
         let initial = name
@@ -1143,7 +1591,7 @@ impl Library {
                 avatar(initial, 44.0),
                 column![
                     theme::line(name, Style::BodyStrong, theme::TEXT_PRIMARY),
-                    theme::line(plus, Style::Secondary, theme::ACCENT),
+                    theme::line(plus, Style::Secondary, theme::accent()),
                 ]
                 .spacing(2)
                 .width(Length::Fill),
@@ -1159,75 +1607,55 @@ impl Library {
         )
         .padding(16)
         .width(Length::Fill)
-        .style(|_| surface_2(14.0));
-        let about = button(
-            row![
-                icon(Icon::About, 20.0, theme::TEXT_SECONDARY),
-                theme::line("О программе", Style::Body, theme::TEXT_PRIMARY).width(Length::Fill),
-                theme::line(
-                    concat!("Версия ", env!("CARGO_PKG_VERSION")),
-                    Style::Secondary,
-                    theme::TEXT_TERTIARY
-                ),
-                icon(Icon::ChevronDown, 18.0, theme::TEXT_TERTIARY)
-                    .rotation(Radians(-std::f32::consts::FRAC_PI_2)),
-            ]
-            .spacing(12)
-            .align_y(Alignment::Center),
-        )
-        .padding([14, 16])
-        .width(Length::Fill)
-        .style(|_, status| button::Style {
-            background: Some(
-                if status == button::Status::Hovered {
-                    theme::SURFACE_3
-                } else {
-                    theme::SURFACE_2
-                }
-                .into(),
-            ),
-            border: Border::default().rounded(12),
-            ..button::Style::default()
-        })
-        .on_press(App::OpenDialog(Dialog::About));
+        .style(|_| card_style());
         scrollable(
             column![
                 theme::line("Настройки", Style::Display, theme::TEXT_PRIMARY),
-                column![
-                    theme::line("Аккаунт", Style::Title, theme::TEXT_PRIMARY),
-                    account_card,
-                ]
-                .spacing(16),
-                about,
+                section_block("Внешний вид", appearance(prefs)),
+                section_block("Аккаунт", account_card.into()),
+                section_block("О программе", about_block()),
             ]
-            .spacing(28)
-            .width(Length::Fill)
+            .spacing(36)
+            .max_width(760)
             .padding(Padding {
-                top: 28.0,
-                right: 32.0,
-                bottom: 28.0,
-                left: 32.0,
+                top: PAGE_TOP,
+                right: PAGE_SIDE,
+                bottom: PAGE_TOP,
+                left: PAGE_SIDE,
             }),
         )
+        .width(Length::Fill)
         .into()
     }
 
     /// `quality` — показать значок качества потока.
+    #[allow(clippy::too_many_arguments)]
     fn player_bar<'a>(
         &'a self,
         covers: &'a Covers,
         compact: bool,
         quality: Quality,
         turn: f32,
+        now: Instant,
+        visualizer: bool,
+        fullscreen: bool,
     ) -> Element<'a, App> {
         let player = &self.player;
         let track = self.current();
         let has_track = track.is_some();
         let on = |message: Message| has_track.then_some(Lib(message));
+        let motion = &self.motion;
 
         let (cover, title, artist): (Element<'a, App>, String, String) = match track {
             Some(track) => (
-                widgets::cover(cover_art(covers, track), 56.0, 8.0),
+                crossfade_cover(
+                    covers,
+                    track,
+                    motion.cover_from.and_then(|index| self.tracks().get(index)),
+                    anim::progress(&motion.cover_fade, now),
+                    56.0,
+                    8.0,
+                ),
                 track.display_title(),
                 track.artists_text(),
             ),
@@ -1238,25 +1666,63 @@ impl Library {
                     .style(|_| surface_2(8.0))
                     .into(),
                 "Ничего не играет".to_owned(),
-                "Выберите трек или включите «Мою волну»".to_owned(),
+                "Выберите трек в списке".to_owned(),
             ),
         };
-        // Длинное название не обрезается, а прокручивается: его видно целиком.
-        let now_playing = row![
-            cover,
+        // Щелчок по обложке открывает полноэкранный плеер; при наведении на
+        // ней проступает значок «развернуть».
+        let cover: Element<'a, App> = if has_track && !fullscreen {
+            let glyph: Element<'a, App> = icon(Icon::Expand, 20.0, theme::TEXT_PRIMARY).into();
+            let badge = container(center(glyph))
+                .width(56)
+                .height(56)
+                .style(|_| container::Style {
+                    background: Some(theme::alpha(theme::BG, 0.5).into()),
+                    border: Border::default().rounded(8.0),
+                    ..container::Style::default()
+                });
+            let cover = widgets::with_tooltip(
+                hover(cover, badge),
+                "Полноэкранный плеер",
+                tooltip::Position::Top,
+            );
+            mouse_area(cover)
+                .interaction(mouse::Interaction::Pointer)
+                .on_press(Lib(Message::Fullscreen(true)))
+                .into()
+        } else {
+            cover
+        };
+        // Длинное название трека не обрезается, а прокручивается: его видно
+        // целиком. Подсказка без трека стоит на месте и обрезается: бегущая
+        // строка в простое заставляла бы окно перерисовываться всё время.
+        let texts: Element<'a, App> = if has_track {
             column![
                 marquee(title, Style::BodyStrong, theme::TEXT_PRIMARY),
                 marquee(artist, Style::Secondary, theme::TEXT_SECONDARY),
             ]
             .spacing(2)
-            .width(Length::Fill),
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center)
-        .width(Length::FillPortion(if compact { 3 } else { 1 }));
+            .width(Length::Fill)
+            .into()
+        } else {
+            container(
+                column![
+                    theme::line(title, Style::BodyStrong, theme::TEXT_PRIMARY),
+                    theme::line(artist, Style::Secondary, theme::TEXT_SECONDARY),
+                ]
+                .spacing(2),
+            )
+            .width(Length::Fill)
+            .clip(true)
+            .into()
+        };
+        let now_playing = row![cover, texts]
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .width(Length::FillPortion(if compact { 3 } else { 1 }));
 
         let glyph_color = if has_track {
-            theme::ON_ACCENT
+            theme::on_accent()
         } else {
             theme::TEXT_DISABLED
         };
@@ -1271,19 +1737,23 @@ impl Library {
             .height(48)
             .padding(0)
             .style(|_, status| button::Style {
-                background: Some(
-                    match status {
-                        button::Status::Active => theme::ACCENT,
-                        button::Status::Hovered => theme::ACCENT_HOVER,
-                        button::Status::Pressed => theme::ACCENT_PRESSED,
-                        button::Status::Disabled => theme::SURFACE_3,
-                    }
-                    .into(),
-                ),
+                background: match status {
+                    button::Status::Pressed => Some(theme::accent_pressed().into()),
+                    button::Status::Disabled => Some(theme::SURFACE_3.into()),
+                    _ => None,
+                },
                 border: Border::default().rounded(widgets::ROUND),
                 ..button::Style::default()
             })
             .on_press_maybe(on(Message::TogglePlay));
+        let play: Element<'a, App> = if has_track {
+            anim::hover_fill(play, theme::accent(), theme::accent_hover(), widgets::ROUND).into()
+        } else {
+            play.into()
+        };
+        // Нажатие: кнопка коротко сжимается и возвращается.
+        let squeeze = (std::f32::consts::PI * anim::progress(&motion.pulse, now)).sin();
+        let play = anim::motion(play).scale(1.0 - 0.1 * squeeze);
         let repeat_icon = if player.repeat == Repeat::One {
             Icon::RepeatOne
         } else {
@@ -1329,13 +1799,16 @@ impl Library {
             theme::line(clock(position), Style::Caption, theme::TEXT_TERTIARY)
                 .width(36)
                 .align_x(Alignment::End),
-            bar(
+            mouse_area(bar(
                 0.0..=range_end,
                 position.min(range_end),
                 seekable,
+                anim::progress(&motion.seek_hover, now),
                 |value| Lib(Message::SeekDrag(value)),
                 Some(Lib(Message::SeekCommit)),
-            ),
+            ))
+            .on_enter(Lib(Message::SeekHover(true)))
+            .on_exit(Lib(Message::SeekHover(false))),
             theme::line(total_text, Style::Caption, theme::TEXT_TERTIARY).width(36),
         ]
         .spacing(10)
@@ -1348,6 +1821,7 @@ impl Library {
             .width(if compact { 300.0 } else { CONTROLS });
 
         let volume = if player.muted { 0.0 } else { player.volume };
+        let volume_shown = motion.volume.interpolate_with(|value| value, now);
         let volume_icon = match volume {
             v if v <= 0.0 => Icon::VolumeMute,
             v if v < 0.5 => Icon::VolumeLow,
@@ -1382,13 +1856,18 @@ impl Library {
                     Some(Lib(Message::ToggleMute)),
                 ))
                 .push(
-                    container(bar(
-                        0.0..=1.0,
-                        volume,
-                        true,
-                        |value| Lib(Message::Volume(value)),
-                        None,
-                    ))
+                    container(
+                        mouse_area(bar(
+                            0.0..=1.0,
+                            volume_shown,
+                            true,
+                            anim::progress(&motion.volume_hover, now),
+                            |value| Lib(Message::Volume(value)),
+                            None,
+                        ))
+                        .on_enter(Lib(Message::VolumeHover(true)))
+                        .on_exit(Lib(Message::VolumeHover(false))),
+                    )
                     .width(volume_width),
                 ),
         )
@@ -1398,16 +1877,27 @@ impl Library {
         let bar = container(
             row![now_playing, controls, extras]
                 .spacing(16)
-                .padding([0, 16])
+                .padding([0, 20])
                 .align_y(Alignment::Center),
         )
         .height(88)
-        .center_y(88)
-        .style(|_| container::Style {
-            background: Some(theme::SURFACE_1.into()),
-            border: Border::default().rounded(16),
-            ..container::Style::default()
-        });
+        .center_y(88);
+        // Спектр — тихим слоем под кнопками.
+        let bar: Element<'a, App> = if visualizer && self.spectrum.moving() {
+            let color = theme::alpha(theme::accent(), SPECTRUM_ALPHA);
+            iced::widget::stack![
+                container(visualizer::bars(self.spectrum.levels(), color))
+                    .padding(Padding {
+                        top: 14.0,
+                        ..Padding::ZERO
+                    })
+                    .height(88),
+                bar
+            ]
+            .into()
+        } else {
+            bar.into()
+        };
         // Колесо мыши над плеером меняет громкость.
         mouse_area(bar)
             .on_scroll(|delta| {
@@ -1464,6 +1954,217 @@ fn surface_2(radius: f32) -> container::Style {
     }
 }
 
+/// Карточка настроек: чуть светлее фона, с тонкой рамкой.
+fn card_style() -> container::Style {
+    container::Style {
+        background: Some(theme::SURFACE_1.into()),
+        border: Border {
+            color: theme::BORDER,
+            width: 1.0,
+            radius: 14.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
+/// Раздел настроек: заголовок и содержимое.
+fn section_block<'a>(title: &'a str, content: Element<'a, App>) -> Element<'a, App> {
+    column![
+        theme::line(title, Style::Title, theme::TEXT_PRIMARY),
+        content
+    ]
+    .spacing(16)
+    .into()
+}
+
+/// Строка настройки: подпись с пояснением слева, управление справа.
+fn setting_row<'a>(title: &'a str, hint: String, control: Element<'a, App>) -> Element<'a, App> {
+    row![
+        column![
+            theme::line(title, Style::BodyStrong, theme::TEXT_PRIMARY),
+            theme::label(hint, Style::Secondary, theme::TEXT_TERTIARY),
+        ]
+        .spacing(2)
+        .width(Length::Fill),
+        control,
+    ]
+    .spacing(16)
+    .align_y(Alignment::Center)
+    .padding([16, 18])
+    .into()
+}
+
+/// «Внешний вид»: акцент, масштаб, визуализатор.
+fn appearance<'a>(prefs: &Prefs) -> Element<'a, App> {
+    let current = prefs.accent;
+    let swatches = row(theme::Accent::ALL.into_iter().map(|accent| {
+        let selected = accent == current;
+        let mark: Element<'a, App> = if selected {
+            center(icon(Icon::Check, 16.0, contrast_on(accent.color()))).into()
+        } else {
+            Space::new().into()
+        };
+        let swatch = button(mark)
+            .width(30)
+            .height(30)
+            .padding(0)
+            .style(move |_, status| button::Style {
+                background: Some(accent.color().into()),
+                border: Border {
+                    color: match (selected, status) {
+                        (true, _) => theme::TEXT_PRIMARY,
+                        (false, button::Status::Hovered) => theme::TEXT_SECONDARY,
+                        _ => Color::TRANSPARENT,
+                    },
+                    width: 2.0,
+                    radius: widgets::ROUND.into(),
+                },
+                ..button::Style::default()
+            })
+            .on_press(App::SetAccent(accent));
+        widgets::with_tooltip(swatch, accent.title(), tooltip::Position::Top)
+    }))
+    .spacing(10)
+    .align_y(Alignment::Center);
+
+    let scale = prefs.scale;
+    let zoom = row![
+        widgets::icon_button(
+            Icon::Minus,
+            Size::S,
+            false,
+            (scale > config::SCALE_MIN).then_some(App::Zoom(Zoom::Out)),
+        ),
+        container(theme::line(
+            format!("{scale} %"),
+            Style::BodyStrong,
+            theme::TEXT_PRIMARY
+        ))
+        .center_x(56),
+        widgets::icon_button(
+            Icon::Plus,
+            Size::S,
+            false,
+            (scale < config::SCALE_MAX).then_some(App::Zoom(Zoom::In)),
+        ),
+        widgets::action(
+            Kind::Secondary,
+            None,
+            "Сбросить",
+            (scale != config::SCALE_DEFAULT).then_some(App::Zoom(Zoom::Reset)),
+        ),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    let visualizer = toggler(prefs.visualizer)
+        .on_toggle(|_| App::ToggleVisualizer)
+        .size(22)
+        .style(|_, status| {
+            let (on, hovered) = match status {
+                toggler::Status::Active { is_toggled } => (is_toggled, false),
+                toggler::Status::Hovered { is_toggled } => (is_toggled, true),
+                toggler::Status::Disabled { is_toggled } => (is_toggled, false),
+            };
+            toggler::Style {
+                background: match (on, hovered) {
+                    (true, false) => theme::accent(),
+                    (true, true) => theme::accent_hover(),
+                    (false, false) => theme::SURFACE_4,
+                    (false, true) => theme::OUTLINE,
+                }
+                .into(),
+                background_border_width: 0.0,
+                background_border_color: Color::TRANSPARENT,
+                foreground: (if on {
+                    theme::on_accent()
+                } else {
+                    theme::TEXT_SECONDARY
+                })
+                .into(),
+                foreground_border_width: 0.0,
+                foreground_border_color: Color::TRANSPARENT,
+                text_color: None,
+                border_radius: None,
+                padding_ratio: 0.12,
+            }
+        });
+
+    container(column![
+        setting_row(
+            "Акцент",
+            format!("{} — кнопки, выбранный трек, ползунки", current.title()),
+            swatches.into(),
+        ),
+        widgets::divider(),
+        setting_row(
+            "Масштаб",
+            "Ctrl + = и Ctrl + − меняют масштаб, Ctrl + 0 — 100 %".to_owned(),
+            zoom.into(),
+        ),
+        widgets::divider(),
+        setting_row(
+            "Визуализатор",
+            "Спектр звука под плеером".to_owned(),
+            visualizer.into(),
+        ),
+    ])
+    .width(Length::Fill)
+    .style(|_| card_style())
+    .into()
+}
+
+/// Белая или чёрная галочка на образце акцента.
+fn contrast_on(color: Color) -> Color {
+    let luma = 0.299 * color.r + 0.587 * color.g + 0.114 * color.b;
+    if luma > 0.6 {
+        Color::BLACK
+    } else {
+        Color::WHITE
+    }
+}
+
+/// «О программе»: версия, обязательная строка правила 4, лицензии.
+fn about_block<'a>() -> Element<'a, App> {
+    container(
+        column![
+            row![
+                widgets::logo(44.0),
+                column![
+                    theme::line(super::APP_NAME, Style::Headline, theme::TEXT_PRIMARY),
+                    theme::line(
+                        concat!("Версия ", env!("CARGO_PKG_VERSION")),
+                        Style::Secondary,
+                        theme::TEXT_TERTIARY
+                    ),
+                ]
+                .spacing(2)
+                .width(Length::Fill),
+                widgets::action(
+                    Kind::Secondary,
+                    None,
+                    "Сторонние лицензии",
+                    Some(App::OpenDialog(Dialog::Licenses)),
+                ),
+            ]
+            .spacing(14)
+            .align_y(Alignment::Center),
+            theme::label(crate::DISCLAIMER, Style::BodyStrong, theme::TEXT_PRIMARY),
+            theme::label(
+                "Музыка воспроизводится потоком через API Яндекс Музыки по вашей подписке. \
+                 Аудио не сохраняется на диск.",
+                Style::Secondary,
+                theme::TEXT_SECONDARY
+            ),
+        ]
+        .spacing(14),
+    )
+    .padding(18)
+    .width(Length::Fill)
+    .style(|_| card_style())
+    .into()
+}
+
 fn avatar<'a>(initial: String, size: f32) -> Element<'a, App> {
     container(theme::line(initial, Style::BodyStrong, theme::TEXT_PRIMARY))
         .center(size)
@@ -1475,9 +2176,65 @@ fn avatar<'a>(initial: String, size: f32) -> Element<'a, App> {
         .into()
 }
 
+/// Обложка, под которой тает обложка прежнего трека `from`. `shown` — доля
+/// перехода.
+/// Прокрутить список «Мне нравится» на `offset` от начала.
+fn scroll_list(offset: f32) -> Task<Message> {
+    iced::widget::operation::scroll_to(
+        LIST_ID,
+        scrollable::AbsoluteOffset {
+            x: None,
+            y: Some(offset),
+        },
+    )
+}
+
+/// Какой значок качества влезает в плеер шириной `bar_width`: полный, если
+/// правый край вмещает его, иначе короткий при узкой громкости.
+fn quality_for(bar_width: f32, compact: bool) -> Quality {
+    let edge = (bar_width - PLAYER_CHROME - CONTROLS) / 2.0;
+    match edge {
+        _ if compact => Quality::Hidden,
+        edge if edge >= EXTRAS_WITH_QUALITY => Quality::Full,
+        edge if edge >= EXTRAS_WITH_SHORT_QUALITY => Quality::Short,
+        _ => Quality::Hidden,
+    }
+}
+
+/// Слой во всю ширину и высоту со стилем `style`.
+fn fill<'a>(style: impl Fn() -> container::Style + 'a) -> Element<'a, App> {
+    container(Space::new())
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_| style())
+        .into()
+}
+
+fn crossfade_cover<'a>(
+    covers: &'a Covers,
+    track: &Track,
+    from: Option<&Track>,
+    shown: f32,
+    size: f32,
+    radius: f32,
+) -> Element<'a, App> {
+    let current = cover_art(covers, track);
+    let previous = from.map(|from| cover_art(covers, from));
+    match (current, previous) {
+        (CoverArt::Image(handle, opacity), Some(CoverArt::Image(old, _))) if shown < 1.0 => {
+            iced::widget::stack![
+                widgets::picture(old, size, radius, 1.0),
+                widgets::picture(handle, size, radius, opacity * shown),
+            ]
+            .into()
+        }
+        (current, _) => widgets::cover(current, size, radius),
+    }
+}
+
 fn cover_art<'a>(covers: &'a Covers, track: &Track) -> CoverArt<'a> {
     match covers.art(track.cover_uri.as_deref()) {
-        Art::Ready(handle) => CoverArt::Image(handle),
+        Art::Ready(handle, opacity) => CoverArt::Image(handle, opacity),
         Art::Loading => CoverArt::Loading,
         Art::Missing => CoverArt::Placeholder(theme::cover_placeholder(&track.id)),
     }
@@ -1514,9 +2271,13 @@ fn sidebar_toggle<'a>(collapsed: bool) -> Element<'a, App> {
 fn nav_item<'a>(section: Section, selected: bool, compact: bool) -> Element<'a, App> {
     let make = move |hovered: bool| -> Element<'a, App> {
         let (icon_color, text_color, font) = match (selected, hovered) {
-            (true, _) => (theme::ACCENT, theme::TEXT_PRIMARY, Style::BodyStrong),
-            (false, true) => (theme::TEXT_PRIMARY, theme::TEXT_PRIMARY, Style::Body),
-            (false, false) => (theme::TEXT_SECONDARY, theme::TEXT_SECONDARY, Style::Body),
+            (true, _) => (theme::accent(), theme::TEXT_PRIMARY, Style::BodyStrong),
+            (false, true) => (theme::TEXT_PRIMARY, theme::TEXT_PRIMARY, Style::BodyStrong),
+            (false, false) => (
+                theme::TEXT_SECONDARY,
+                theme::TEXT_SECONDARY,
+                Style::BodyStrong,
+            ),
         };
         let glyph = icon(section.icon(), 20.0, icon_color);
         let content: Element<'a, App> = if compact {
@@ -1533,8 +2294,7 @@ fn nav_item<'a>(section: Section, selected: bool, compact: bool) -> Element<'a, 
             .padding([0, 12])
             .style(move |_, status| button::Style {
                 background: match (selected, status) {
-                    (true, _) => Some(theme::ACCENT_SOFT.into()),
-                    (false, button::Status::Hovered) => Some(theme::SURFACE_2.into()),
+                    (true, _) => Some(theme::SURFACE_3.into()),
                     (false, button::Status::Pressed) => Some(theme::SURFACE_3.into()),
                     _ => None,
                 },
@@ -1547,7 +2307,13 @@ fn nav_item<'a>(section: Section, selected: bool, compact: bool) -> Element<'a, 
     let item = if selected {
         make(false)
     } else {
-        hover(make(false), make(true))
+        anim::hover_fill(
+            hover(make(false), make(true)),
+            theme::clear(theme::SURFACE_2),
+            theme::SURFACE_2,
+            widgets::RADIUS_M,
+        )
+        .into()
     };
     if compact {
         widgets::with_tooltip(item, section.title(), tooltip::Position::Right)
@@ -1567,53 +2333,51 @@ fn liked_header<'a>(tracks: &[Track], with_actions: bool) -> Element<'a, App> {
     if count > 0 {
         subtitle.push_str(&format!(" · {}", texts::total_duration(total)));
     }
-    let tile = container(center(icon(Icon::HeartFilled, 40.0, theme::ON_ACCENT)))
-        .width(88)
-        .height(88)
+    let tile = container(center(icon(Icon::HeartFilled, 64.0, theme::on_accent())))
+        .width(HEADER_COVER)
+        .height(HEADER_COVER)
         .style(|_| container::Style {
             background: Some(theme::liked_tile()),
-            border: Border::default().rounded(14),
+            border: Border::default().rounded(12),
+            shadow: widgets::cover_shadow(),
             ..container::Style::default()
         });
-    let mut header = row![
-        tile,
-        column![
-            theme::line("Коллекция", Style::Caption, theme::TEXT_TERTIARY),
-            theme::line("Мне нравится", Style::Display, theme::TEXT_PRIMARY),
-            theme::line(subtitle, Style::Secondary, theme::TEXT_SECONDARY),
-        ]
-        .spacing(2)
-        .width(Length::Fill),
+    let mut info = column![
+        theme::line("Коллекция", Style::Body, theme::TEXT_SECONDARY),
+        theme::line("Мне нравится", Style::Hero, theme::TEXT_PRIMARY),
+        theme::line(subtitle, Style::Body, theme::TEXT_SECONDARY),
     ]
-    .spacing(20)
-    .align_y(Alignment::Center);
+    .spacing(4)
+    .width(Length::Fill);
     if with_actions {
-        header = header
-            .push(widgets::action(
-                Kind::Primary,
-                Some(Icon::PlayFilled),
-                "Слушать",
-                Some(Lib(Message::PlayAll)),
-            ))
-            .push(widgets::with_tooltip(
-                widgets::icon_button(
-                    Icon::Shuffle,
-                    Size::M,
-                    false,
+        info = info.push(Space::new().height(14)).push(
+            row![
+                widgets::action(
+                    Kind::Primary,
+                    Some(Icon::PlayFilled),
+                    "Слушать",
+                    Some(Lib(Message::PlayAll)),
+                ),
+                widgets::action(
+                    Kind::Secondary,
+                    Some(Icon::Shuffle),
+                    "Перемешать",
                     Some(Lib(Message::ShuffleAll)),
                 ),
-                "Перемешать и слушать",
-                tooltip::Position::Bottom,
-            ))
-            .push(widgets::icon_button(
-                Icon::More,
-                Size::M,
-                false,
-                Some(Lib(Message::Noop)),
-            ));
+                widgets::icon_button(Icon::More, Size::M, false, Some(Lib(Message::Noop))),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        );
     }
-    header.into()
+    row![tile, info]
+        .spacing(28)
+        .align_y(Alignment::Center)
+        .into()
 }
+
+/// Обложка или плитка в шапке коллекции.
+const HEADER_COVER: f32 = 176.0;
 
 /// Колонки строки: номер 32, обложка 40, название, альбом 240, «нравится» 32,
 /// длительность 44.
@@ -1638,14 +2402,63 @@ fn columns<'a>(
     .into()
 }
 
+/// Поле «Поиск трека»: «таблетка» с лупой, крестик сбрасывает запрос.
+fn search_box<'a>(query: &str) -> Element<'a, App> {
+    let input = text_input("Поиск трека", query)
+        .id(SEARCH_ID)
+        .on_input(|value| Lib(Message::Search(value)))
+        .size(14)
+        .padding(0)
+        .style(|_, _| text_input::Style {
+            background: Color::TRANSPARENT.into(),
+            border: Border::default(),
+            icon: theme::TEXT_TERTIARY,
+            placeholder: theme::TEXT_TERTIARY,
+            value: theme::TEXT_PRIMARY,
+            selection: theme::alpha(theme::accent(), 0.35),
+        });
+    let glyph: Element<'a, App> = icon(Icon::Search, 18.0, theme::TEXT_TERTIARY).into();
+    let mut field = row![glyph, input].spacing(12).align_y(Alignment::Center);
+    let right = if query.is_empty() {
+        16.0
+    } else {
+        field = field.push(widgets::icon_button(
+            Icon::Close,
+            Size::S,
+            false,
+            Some(Lib(Message::ClearSearch)),
+        ));
+        6.0
+    };
+    container(field)
+        .width(Length::Fill)
+        .height(SEARCH_HEIGHT)
+        .center_y(SEARCH_HEIGHT)
+        .padding(Padding {
+            top: 0.0,
+            right,
+            bottom: 0.0,
+            left: 16.0,
+        })
+        .style(|_| container::Style {
+            border: Border {
+                color: theme::OUTLINE,
+                width: 1.0,
+                radius: widgets::ROUND.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
+}
+
 fn list_header<'a>() -> Element<'a, App> {
     let caption = |text: &'a str| theme::line(text, Style::Caption, theme::TEXT_TERTIARY);
     column![
         container(columns(
             caption("#").into(),
             Space::new().into(),
-            caption("Название").into(),
-            caption("Альбом").into(),
+            caption("НАЗВАНИЕ").into(),
+            caption("АЛЬБОМ").into(),
             Space::new().into(),
             icon(Icon::Clock, 16.0, theme::TEXT_TERTIARY).into(),
         ))
@@ -1668,12 +2481,13 @@ fn track_cells<'a>(
     covers: &'a Covers,
     current: bool,
     playing: bool,
+    buffering: bool,
     hovered: bool,
 ) -> Element<'a, App> {
     let available = track.available;
     let (title_color, other_color) = match (available, current) {
         (false, _) => (theme::TEXT_DISABLED, theme::TEXT_DISABLED),
-        (true, true) => (theme::ACCENT, theme::TEXT_SECONDARY),
+        (true, true) => (theme::accent(), theme::TEXT_SECONDARY),
         (true, false) => (theme::TEXT_PRIMARY, theme::TEXT_SECONDARY),
     };
     let number = index.saturating_add(1).to_string();
@@ -1682,8 +2496,8 @@ fn track_cells<'a>(
         (true, true, true, true) => {
             play_cell(Icon::PauseFilled, theme::TEXT_PRIMARY, Message::TogglePlay)
         }
-        (true, true, true, false) => equalizer(),
-        (true, true, false, _) => play_cell(Icon::PlayFilled, theme::ACCENT, Message::TogglePlay),
+        (true, true, true, false) => anim::equalizer(theme::accent(), !buffering),
+        (true, true, false, _) => play_cell(Icon::PlayFilled, theme::accent(), Message::TogglePlay),
         (true, false, _, true) => {
             play_cell(Icon::PlayFilled, theme::TEXT_PRIMARY, Message::Play(index))
         }
@@ -1708,7 +2522,7 @@ fn track_cells<'a>(
         Icon::HeartFilled,
         18.0,
         if available {
-            theme::ACCENT
+            theme::accent()
         } else {
             theme::TEXT_DISABLED
         },
@@ -1747,22 +2561,14 @@ fn play_cell<'a>(name: Icon, color: Color, message: Message) -> Element<'a, App>
         .into()
 }
 
-/// Три столбика у играющего трека.
-fn equalizer<'a>() -> Element<'a, App> {
-    let bar = |height: f32| widgets::block(3, height, theme::ACCENT, 1.5);
-    row![bar(10.0), bar(16.0), bar(7.0)]
-        .spacing(2)
-        .height(16)
-        .align_y(Alignment::End)
-        .into()
-}
-
 /// Ползунок перемотки или громкости: дорожка 4, ручка 12 при наведении.
+/// `hover` — доля наведения (ручка и акцентная заливка проявляются плавно),
 /// `on_release` — когда ползунок отпустили.
 fn bar<'a>(
     range: std::ops::RangeInclusive<f32>,
     value: f32,
     enabled: bool,
+    hover: f32,
     on_change: impl Fn(f32) -> App + 'a,
     on_release: Option<App>,
 ) -> Element<'a, App> {
@@ -1774,11 +2580,15 @@ fn bar<'a>(
         .step(0.01_f32)
         .height(16)
         .style(move |_, status| {
-            let engaged = enabled && !matches!(status, slider::Status::Active);
-            let filled = match (enabled, engaged) {
-                (false, _) => theme::SURFACE_4,
-                (true, true) => theme::ACCENT,
-                (true, false) => theme::TEXT_SECONDARY,
+            let engaged = match (enabled, status) {
+                (false, _) => 0.0,
+                (true, slider::Status::Dragged) => 1.0,
+                (true, _) => hover,
+            };
+            let filled = if enabled {
+                theme::mix(theme::TEXT_SECONDARY, theme::accent(), engaged)
+            } else {
+                theme::SURFACE_4
             };
             slider::Style {
                 rail: slider::Rail {
@@ -1788,7 +2598,7 @@ fn bar<'a>(
                 },
                 handle: slider::Handle {
                     shape: slider::HandleShape::Circle {
-                        radius: if engaged { 6.0 } else { 0.0 },
+                        radius: 6.0 * engaged,
                     },
                     background: theme::TEXT_PRIMARY.into(),
                     border_width: 0.0,

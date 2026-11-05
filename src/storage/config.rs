@@ -5,7 +5,8 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::StorageError;
 
@@ -25,6 +26,43 @@ pub struct Config {
     /// Боковое меню свёрнуто до иконок.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub sidebar_collapsed: bool,
+    /// Акцентный цвет окна: `red`, `teal`, `orange`, `violet`, `blue`.
+    /// Неизвестное значение окно заменяет красным.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub accent: Option<String>,
+    /// Масштаб окна в процентах, см. [`Config::scale_percent`].
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub scale: Option<i64>,
+    /// Визуализатор спектра под плеером.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub visualizer: Option<bool>,
+}
+
+/// Масштаб окна: от 75 до 200 % шагом 25.
+pub const SCALE_MIN: u32 = 75;
+pub const SCALE_MAX: u32 = 200;
+pub const SCALE_STEP: u32 = 25;
+pub const SCALE_DEFAULT: u32 = 100;
+
+/// Значение неверного типа (`scale = "big"`) — как будто его нет: из-за
+/// одной опечатки во внешнем виде не должны пропасть остальные настройки.
+fn lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = toml::Value::deserialize(deserializer)?;
+    Ok(value.try_into().ok())
+}
+
+/// Масштаб в допустимых пределах, к ближайшему шагу.
+pub fn normalize_scale(percent: i64) -> u32 {
+    let min = i64::from(SCALE_MIN);
+    let max = i64::from(SCALE_MAX);
+    let step = i64::from(SCALE_STEP);
+    let clamped = percent.clamp(min, max);
+    let snapped = min + (clamped - min + step / 2) / step * step;
+    u32::try_from(snapped.min(max)).unwrap_or(SCALE_DEFAULT)
 }
 
 impl Config {
@@ -61,6 +99,12 @@ impl Config {
         let tmp = path.with_extension("toml.tmp");
         fs::write(&tmp, text).map_err(io_error)?;
         fs::rename(&tmp, path).map_err(io_error)
+    }
+
+    /// Масштаб окна в процентах: вне пределов — к ближайшей границе, между
+    /// шагами — к ближайшему шагу. Нет значения — 100 %.
+    pub fn scale_percent(&self) -> u32 {
+        self.scale.map_or(SCALE_DEFAULT, normalize_scale)
     }
 
     /// Возвращает идентификатор устройства и создаёт его, если его нет или он
@@ -128,6 +172,34 @@ mod tests {
         let (id, created) = config.ensure_device_id();
         assert!(created);
         assert!(is_valid_device_id(&id));
+    }
+
+    #[test]
+    fn appearance_survives_bad_values() {
+        let config: Config = toml::from_str(
+            "device_id = \"abcdef\"
+accent = 5
+scale = \"big\"
+visualizer = \"yes\"
+",
+        )
+        .unwrap();
+        assert_eq!(config.device_id.as_deref(), Some("abcdef"));
+        assert_eq!(config.accent, None);
+        assert_eq!(config.scale, None);
+        assert_eq!(config.visualizer, None);
+        assert_eq!(config.scale_percent(), 100);
+    }
+
+    #[test]
+    fn scale_is_clamped_and_snapped() {
+        assert_eq!(normalize_scale(10), 75);
+        assert_eq!(normalize_scale(-500), 75);
+        assert_eq!(normalize_scale(i64::MAX), 200);
+        assert_eq!(normalize_scale(110), 100);
+        assert_eq!(normalize_scale(113), 125);
+        assert_eq!(normalize_scale(150), 150);
+        assert_eq!(normalize_scale(199), 200);
     }
 
     #[test]

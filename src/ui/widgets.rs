@@ -6,6 +6,7 @@ use iced::widget::{
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Shadow, Vector};
 
 use super::Message;
+use super::anim;
 use super::icons::{Icon, icon, spinner};
 use super::theme::{self, Style};
 
@@ -20,7 +21,6 @@ pub const ROUND: f32 = 999.0;
 pub enum Kind {
     Primary,
     Secondary,
-    Ghost,
     Danger,
 }
 
@@ -31,8 +31,8 @@ impl Kind {
             return theme::TEXT_DISABLED;
         }
         match self {
-            Self::Primary => theme::ON_ACCENT,
-            Self::Secondary | Self::Ghost => theme::TEXT_PRIMARY,
+            Self::Primary => theme::on_accent(),
+            Self::Secondary => theme::TEXT_PRIMARY,
             Self::Danger => theme::ERROR,
         }
     }
@@ -40,33 +40,51 @@ impl Kind {
     fn background(self, status: button::Status) -> Option<Color> {
         use button::Status::{Active, Disabled, Hovered, Pressed};
         match (self, status) {
-            (Self::Primary, Active) => Some(theme::ACCENT),
-            (Self::Primary, Hovered) => Some(theme::ACCENT_HOVER),
-            (Self::Primary, Pressed) => Some(theme::ACCENT_PRESSED),
-            (Self::Secondary, Active) => Some(theme::SURFACE_3),
-            (Self::Secondary | Self::Ghost, Hovered) => Some(theme::SURFACE_4),
-            (Self::Secondary | Self::Ghost, Pressed) => Some(theme::BORDER),
-            (Self::Ghost, Active) => None,
+            (Self::Primary, Active) => Some(theme::accent()),
+            (Self::Primary, Hovered) => Some(theme::accent_hover()),
+            (Self::Primary, Pressed) => Some(theme::accent_pressed()),
+            // «Таблетка» с рамкой: без заливки, при наведении — лёгкий фон.
+            (Self::Secondary, Active) => None,
+            (Self::Secondary, Hovered) => Some(theme::SURFACE_3),
+            (Self::Secondary, Pressed) => Some(theme::SURFACE_4),
             (Self::Danger, Active) => Some(theme::ERROR_SOFT),
             (Self::Danger, Hovered) => Some(theme::ERROR_HOVER),
             (Self::Danger, Pressed) => Some(theme::ERROR_PRESSED),
-            (Self::Ghost, Disabled) => None,
+            (Self::Secondary, Disabled) => None,
             (_, Disabled) => Some(theme::SURFACE_2),
+        }
+    }
+
+    fn border(self, status: button::Status) -> Color {
+        match (self, status) {
+            (Self::Secondary, button::Status::Disabled) => theme::SURFACE_3,
+            (Self::Secondary, _) => theme::OUTLINE,
+            _ => Color::TRANSPARENT,
         }
     }
 }
 
+/// Стиль кнопки. Фон в покое и при наведении рисует [`anim::hover_fill`]
+/// (плавно), здесь — только нажатие и недоступность.
 fn button_style(kind: Kind, status: button::Status) -> button::Style {
+    let background = match status {
+        button::Status::Pressed | button::Status::Disabled => kind.background(status),
+        button::Status::Active | button::Status::Hovered => None,
+    };
     button::Style {
-        background: kind.background(status).map(Background::Color),
+        background: background.map(Background::Color),
         text_color: kind.content(status != button::Status::Disabled),
-        border: Border::default().rounded(RADIUS_M),
+        border: Border {
+            color: kind.border(status),
+            width: if kind == Kind::Secondary { 1.0 } else { 0.0 },
+            radius: ROUND.into(),
+        },
         shadow: Shadow::default(),
         snap: true,
     }
 }
 
-/// Кнопка с подписью и необязательной иконкой, высота 40.
+/// Кнопка-«таблетка» с подписью и необязательной иконкой, высота 40.
 /// `on_press: None` — кнопка недоступна.
 pub fn action<'a>(
     kind: Kind,
@@ -140,7 +158,8 @@ fn action_button<'a>(
     } else {
         content
     };
-    button(content)
+    let enabled = on_press.is_some();
+    let button = button(content)
         .width(if wide { Length::Fill } else { Length::Shrink })
         .height(40)
         .padding(Padding {
@@ -150,8 +169,19 @@ fn action_button<'a>(
             left,
         })
         .style(move |_, status| button_style(kind, status))
-        .on_press_maybe(on_press)
-        .into()
+        .on_press_maybe(on_press);
+    if !enabled {
+        return button.into();
+    }
+    let idle = kind.background(button::Status::Active);
+    let hovered = kind.background(button::Status::Hovered);
+    let (idle, hovered) = match (idle, hovered) {
+        (Some(idle), Some(hovered)) => (idle, hovered),
+        (None, Some(hovered)) => (theme::clear(hovered), hovered),
+        (Some(idle), None) => (idle, theme::clear(idle)),
+        (None, None) => (Color::TRANSPARENT, Color::TRANSPARENT),
+    };
+    anim::hover_fill(button, idle, hovered, ROUND).into()
 }
 
 /// Размер круглой иконочной кнопки.
@@ -179,8 +209,8 @@ pub fn icon_button<'a>(
     let make = move |hovered: bool, on_press: Option<Message>| -> Element<'a, Message> {
         let color = match (enabled, active, hovered) {
             (false, _, _) => theme::TEXT_DISABLED,
-            (true, true, false) => theme::ACCENT,
-            (true, true, true) => theme::ACCENT_HOVER,
+            (true, true, false) => theme::accent(),
+            (true, true, true) => theme::accent_hover(),
             (true, false, false) => theme::TEXT_SECONDARY,
             (true, false, true) => theme::TEXT_PRIMARY,
         };
@@ -190,7 +220,6 @@ pub fn icon_button<'a>(
             .padding(0)
             .style(move |_, status| button::Style {
                 background: match status {
-                    button::Status::Hovered => Some(theme::SURFACE_3.into()),
                     button::Status::Pressed => Some(theme::SURFACE_4.into()),
                     _ => None,
                 },
@@ -201,7 +230,13 @@ pub fn icon_button<'a>(
             .into()
     };
     if enabled {
-        hover(make(false, None), make(true, on_press))
+        anim::hover_fill(
+            hover(make(false, None), make(true, on_press)),
+            theme::clear(theme::SURFACE_3),
+            theme::SURFACE_3,
+            ROUND,
+        )
+        .into()
     } else {
         make(false, None)
     }
@@ -268,6 +303,20 @@ pub fn block<'a>(
 /// Горизонтальный разделитель 1 px.
 pub fn divider<'a>() -> Element<'a, Message> {
     block(Length::Fill, 1, theme::BORDER, 0.0)
+}
+
+/// Вертикальный разделитель 1 px.
+pub fn vertical_divider<'a>() -> Element<'a, Message> {
+    block(1, Length::Fill, theme::BORDER, 0.0)
+}
+
+/// Тень большой обложки в шапке.
+pub fn cover_shadow() -> Shadow {
+    Shadow {
+        color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
+        offset: Vector::new(0.0, 8.0),
+        blur_radius: 24.0,
+    }
 }
 
 /// Карточка входа и подписки: 480 px, `surface-1`, рамка, радиус 20.
@@ -358,7 +407,7 @@ pub fn logo<'a>(size: f32) -> Element<'a, Message> {
         ),
         disc(22.0 * scale, None, Some(theme::SURFACE_3)),
         disc(17.0 * scale, None, Some(theme::SURFACE_3)),
-        disc(11.0 * scale, Some(theme::ACCENT), None),
+        disc(11.0 * scale, Some(theme::accent()), None),
         disc((3.0 * scale).max(2.0), Some(theme::BG), None),
     ])
     .width(size)
@@ -368,18 +417,38 @@ pub fn logo<'a>(size: f32) -> Element<'a, Message> {
 
 /// Обложка: картинка, заглушка-градиент или `surface-3`, пока грузится.
 pub enum CoverArt<'h> {
-    Image(&'h image::Handle),
+    /// Картинка и её непрозрачность.
+    Image(&'h image::Handle, f32),
     Placeholder(Background),
     Loading,
 }
 
+/// Картинка обложки без подложки.
+pub fn picture<'a>(
+    handle: &image::Handle,
+    size: f32,
+    radius: f32,
+    opacity: f32,
+) -> Element<'a, Message> {
+    image(handle.clone())
+        .width(size)
+        .height(size)
+        .border_radius(radius)
+        .opacity(opacity)
+        .into()
+}
+
 pub fn cover<'a>(art: CoverArt<'_>, size: f32, radius: f32) -> Element<'a, Message> {
     match art {
-        CoverArt::Image(handle) => image(handle.clone())
-            .width(size)
-            .height(size)
-            .border_radius(radius)
-            .into(),
+        CoverArt::Image(handle, opacity) => {
+            let picture = picture(handle, size, radius, opacity);
+            if opacity >= 1.0 {
+                picture
+            } else {
+                // Свежая обложка проявляется поверх заглушки загрузки.
+                stack![block(size, size, theme::SURFACE_3, radius), picture].into()
+            }
+        }
         CoverArt::Placeholder(background) => container(Space::new())
             .width(size)
             .height(size)
@@ -396,7 +465,7 @@ pub fn cover<'a>(art: CoverArt<'_>, size: f32, radius: f32) -> Element<'a, Messa
 /// Строка «спиннер + подпись».
 pub fn waiting<'a>(caption: String, turn: f32) -> Element<'a, Message> {
     row![
-        spinner(16.0, theme::ACCENT, turn),
+        spinner(16.0, theme::accent(), turn),
         theme::line(caption, Style::Secondary, theme::TEXT_SECONDARY),
     ]
     .spacing(8)
@@ -419,9 +488,9 @@ pub fn link<'a>(caption: String, style: Style, on_press: Message) -> Element<'a,
     .style(|_, status| button::Style {
         background: None,
         text_color: if status == button::Status::Hovered {
-            theme::ACCENT_HOVER
+            theme::accent_hover()
         } else {
-            theme::ACCENT
+            theme::accent()
         },
         ..button::Style::default()
     })

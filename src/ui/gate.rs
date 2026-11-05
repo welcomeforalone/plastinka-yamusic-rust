@@ -9,7 +9,9 @@ use iced::widget::{
     Space, button, center, column, container, hover, mouse_area, opaque, right, row, scrollable,
     stack,
 };
-use iced::{Alignment, Border, Element, Length, Padding};
+use iced::{Alignment, Border, Element, Length, Padding, Shadow};
+
+use super::anim;
 
 use super::icons::{Icon, icon, spinner};
 use super::theme::{self, Style};
@@ -233,7 +235,7 @@ pub fn frame<'a>(body: Element<'a, Message>) -> Element<'a, Message> {
 
 pub fn loading<'a>(caption: &'a str, turn: f32) -> Element<'a, Message> {
     column![
-        spinner(32.0, theme::ACCENT, turn),
+        spinner(32.0, theme::accent(), turn),
         theme::line(caption, Style::Body, theme::TEXT_SECONDARY),
     ]
     .spacing(16)
@@ -444,7 +446,7 @@ fn step<'a>(number: &'a str, content: Element<'a, Message>) -> Element<'a, Messa
 /// Код устройства крупно. Трекинга в iced нет: буквы ставим по одной.
 fn code_box<'a>(code: Option<&DeviceCode>, copyable: bool, turn: f32) -> Element<'a, Message> {
     let inner: Element<'a, Message> = match code {
-        None => center(spinner(28.0, theme::ACCENT, turn)).into(),
+        None => center(spinner(28.0, theme::accent(), turn)).into(),
         Some(code) => {
             let color = if copyable {
                 theme::TEXT_PRIMARY
@@ -523,7 +525,7 @@ pub fn paywall<'a>(paywall: &'a Paywall, turn: f32) -> Element<'a, Message> {
         ),
     };
     let mut content = column![
-        widgets::badge(Icon::Lock, theme::ACCENT, theme::ACCENT_SOFT),
+        widgets::badge(Icon::Lock, theme::accent(), theme::accent_soft()),
         widgets::heading(title.to_owned(), body),
         widgets::notice(Icon::About, hint.to_owned(), false),
     ]
@@ -535,7 +537,7 @@ pub fn paywall<'a>(paywall: &'a Paywall, turn: f32) -> Element<'a, Message> {
     let recheck: Element<'a, Message> = if paywall.checking {
         widgets::wide_action_with(
             Kind::Primary,
-            Some(spinner(18.0, theme::ON_ACCENT, turn).into()),
+            Some(spinner(18.0, theme::on_accent(), turn).into()),
             "Проверяем…",
             Some(Message::Noop),
         )
@@ -574,39 +576,47 @@ pub fn paywall<'a>(paywall: &'a Paywall, turn: f32) -> Element<'a, Message> {
 
 /// Всплывающее сообщение над плеером.
 /// Сообщение внизу, по центру между отступами `insets` (слева, справа).
-pub fn toast<'a>(text: &'a str, insets: (f32, f32)) -> Element<'a, Message> {
-    container(
-        container(theme::label(text, Style::Body, theme::TEXT_PRIMARY))
-            .max_width(560)
-            .padding([12, 16])
-            .style(|_| container::Style {
-                background: Some(theme::SURFACE_3.into()),
-                border: Border {
-                    color: theme::BORDER,
-                    width: 1.0,
-                    radius: widgets::RADIUS_M.into(),
-                },
-                shadow: widgets::popover_shadow(),
-                ..container::Style::default()
-            }),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .align_x(Alignment::Center)
-    .align_y(Alignment::End)
-    .padding(
-        Padding::default()
-            .bottom(104)
-            .left(insets.0)
-            .right(insets.1),
-    )
-    .into()
+/// `shown` — доля появления: сообщение поднимается и проявляется.
+pub fn toast<'a>(text: &'a str, insets: (f32, f32), shown: f32) -> Element<'a, Message> {
+    let card = container(theme::label(
+        text,
+        Style::Body,
+        theme::alpha(theme::TEXT_PRIMARY, shown),
+    ))
+    .max_width(560)
+    .padding([12, 16])
+    .style(move |_| container::Style {
+        background: Some(theme::alpha(theme::SURFACE_3, shown).into()),
+        border: Border {
+            color: theme::alpha(theme::OUTLINE, shown),
+            width: 1.0,
+            radius: widgets::RADIUS_M.into(),
+        },
+        shadow: Shadow {
+            color: theme::alpha(widgets::popover_shadow().color, 0.5 * shown),
+            ..widgets::popover_shadow()
+        },
+        ..container::Style::default()
+    });
+    container(anim::motion(card).offset(0.0, 16.0 * (1.0 - shown)))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::Center)
+        .align_y(Alignment::End)
+        .padding(
+            Padding::default()
+                .bottom(104)
+                .left(insets.0)
+                .right(insets.1),
+        )
+        .into()
 }
 
 /// Диалог поверх затемнения. Клик мимо карточки закрывает его.
-pub fn dialog<'a>(dialog: Dialog) -> Element<'a, Message> {
+/// `shown` — доля появления; `interactive: false` — диалог уже закрыт и тает,
+/// клики проходят сквозь него.
+pub fn dialog<'a>(dialog: Dialog, shown: f32, interactive: bool) -> Element<'a, Message> {
     let body: Element<'a, Message> = match dialog {
-        Dialog::About => about(),
         Dialog::Licenses => licenses(),
         Dialog::ConfirmLogout => confirm_logout(),
     };
@@ -619,62 +629,36 @@ pub fn dialog<'a>(dialog: Dialog) -> Element<'a, Message> {
     let card = container(stack![body, close])
         .width(460)
         .padding(24)
-        .style(|_| container::Style {
+        .style(move |_| container::Style {
             background: Some(theme::SURFACE_2.into()),
             border: Border {
-                color: theme::BORDER,
+                color: theme::OUTLINE,
                 width: 1.0,
                 radius: widgets::RADIUS_XL.into(),
             },
-            shadow: widgets::popover_shadow(),
+            shadow: Shadow {
+                color: theme::alpha(widgets::popover_shadow().color, 0.5 * shown),
+                ..widgets::popover_shadow()
+            },
             ..container::Style::default()
         });
-    opaque(
-        mouse_area(
-            container(opaque(card))
-                .center(Length::Fill)
-                .style(|_| container::Style {
-                    background: Some(theme::SCRIM.into()),
-                    ..container::Style::default()
-                }),
-        )
-        .on_press(Message::CloseDialog),
-    )
-}
-
-fn about<'a>() -> Element<'a, Message> {
-    column![
-        widgets::logo(64.0),
-        column![
-            theme::line(APP_NAME, Style::Title, theme::TEXT_PRIMARY),
-            theme::line(
-                concat!("Версия ", env!("CARGO_PKG_VERSION")),
-                Style::Secondary,
-                theme::TEXT_TERTIARY
-            ),
-        ]
-        .spacing(2)
-        .align_x(Alignment::Center),
-        widgets::divider(),
-        theme::label(DISCLAIMER, Style::BodyStrong, theme::TEXT_PRIMARY).center(),
-        theme::label(
-            "Музыка воспроизводится потоком через API Яндекс Музыки по вашей подписке. \
-             Аудио не сохраняется на диск.",
-            Style::Secondary,
-            theme::TEXT_SECONDARY
-        )
-        .center(),
-        widgets::action(
-            Kind::Secondary,
-            None,
-            "Сторонние лицензии",
-            Some(Message::OpenDialog(Dialog::Licenses))
-        ),
-    ]
-    .spacing(16)
-    .padding([12, 16])
-    .align_x(Alignment::Center)
-    .into()
+    // Карточка чуть подрастает и проявляется, затемнение густеет.
+    let hidden = 1.0 - shown;
+    let card = anim::motion(card)
+        .scale(0.96 + 0.04 * shown)
+        .offset(0.0, 8.0 * hidden)
+        .veil(theme::alpha(theme::BG, hidden), widgets::RADIUS_XL);
+    let scrim = container(opaque(card))
+        .center(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(theme::alpha(theme::SCRIM, theme::SCRIM.a * shown).into()),
+            ..container::Style::default()
+        });
+    if interactive {
+        opaque(mouse_area(scrim).on_press(Message::CloseDialog))
+    } else {
+        scrim.into()
+    }
 }
 
 /// Главные сторонние компоненты. Полный список зависимостей с лицензиями
@@ -713,12 +697,6 @@ fn licenses<'a>() -> Element<'a, Message> {
             theme::TEXT_SECONDARY
         ),
         iced::widget::Column::with_children(rows).spacing(10),
-        widgets::action(
-            Kind::Ghost,
-            None,
-            "Назад",
-            Some(Message::OpenDialog(Dialog::About))
-        ),
     ]
     .spacing(16)
     .padding(Padding::default().top(4))

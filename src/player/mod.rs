@@ -27,6 +27,7 @@ use crate::net;
 use crate::storage::token::StoredToken;
 use buffer::{Failure, LinkFailure, StreamBuffer};
 use output::{Shared, Volume};
+pub use output::{TAP_LEN, Tap};
 
 /// Как часто поток управления сообщает позицию.
 const TICK: Duration = Duration::from_millis(200);
@@ -138,6 +139,7 @@ impl From<LinkFailure> for PlayError {
 pub struct Player {
     commands: mpsc::Sender<Message>,
     events: Events,
+    tap: Arc<Tap>,
 }
 
 enum Message {
@@ -193,6 +195,7 @@ impl Player {
             .map_err(|err| PlayError::Internal(err.to_string()))?;
         let (commands, inbox) = mpsc::channel();
         let (events_tx, events_rx) = async_mpsc::unbounded_channel();
+        let tap = Arc::new(Tap::default());
         let control = Control {
             runtime,
             api_http: http,
@@ -202,6 +205,7 @@ impl Player {
             device: None,
             device_failed: Arc::new(AtomicBool::new(false)),
             volume: Arc::new(Volume::default()),
+            tap: tap.clone(),
             session: None,
             last_progress: None,
         };
@@ -215,6 +219,7 @@ impl Player {
                 id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
                 receiver: Arc::new(Mutex::new(Some(events_rx))),
             },
+            tap,
         })
     }
 
@@ -226,6 +231,11 @@ impl Player {
 
     pub fn events(&self) -> Events {
         self.events.clone()
+    }
+
+    /// Отвод звука для визуализатора (только память).
+    pub fn tap(&self) -> Arc<Tap> {
+        self.tap.clone()
     }
 }
 
@@ -271,6 +281,7 @@ struct Control {
     device: Option<MixerDeviceSink>,
     device_failed: Arc<AtomicBool>,
     volume: Arc<Volume>,
+    tap: Arc<Tap>,
     session: Option<Session>,
     last_progress: Option<Event>,
 }
@@ -362,7 +373,12 @@ impl Control {
             Ok(mixer) => mixer,
             Err(error) => return self.emit(Event::Failed { id, error }),
         };
-        let shared = Shared::new(StreamBuffer::new(), self.volume.clone(), start);
+        let shared = Shared::new(
+            StreamBuffer::new(),
+            self.volume.clone(),
+            self.tap.clone(),
+            start,
+        );
 
         let (http, token) = (self.api_http.clone(), self.token.clone());
         let relink: download::Relink = Box::new(move || {
@@ -479,7 +495,12 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let volume = Arc::new(Volume::default());
         volume.set(1.0);
-        let shared = Shared::new(StreamBuffer::new(), volume, Duration::ZERO);
+        let shared = Shared::new(
+            StreamBuffer::new(),
+            volume,
+            Arc::new(Tap::default()),
+            Duration::ZERO,
+        );
         let relink: download::Relink =
             Box::new(move || Box::pin(async move { Ok(api::StreamSource::Fake(name.to_owned())) }));
         let buffer = shared.buffer.clone();

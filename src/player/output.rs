@@ -44,6 +44,81 @@ impl Volume {
     }
 }
 
+/// Сколько последних отсчётов (моно) помнит отвод для визуализатора.
+pub const TAP_LEN: usize = 2048;
+
+/// Отвод звука для визуализатора: последние [`TAP_LEN`] отсчётов в памяти,
+/// сведённые в моно. На диск ничего не пишется (правило 1). Источник кладёт
+/// сюда каждую порцию, которую отдаёт микшеру, окно читает копию.
+pub struct Tap {
+    ring: Mutex<TapRing>,
+}
+
+struct TapRing {
+    samples: Vec<f32>,
+    /// Куда писать следующий отсчёт.
+    next: usize,
+    rate: u32,
+    /// Когда пришла последняя порция звука (не тишины).
+    fed_at: Option<std::time::Instant>,
+}
+
+impl Default for Tap {
+    fn default() -> Self {
+        Self {
+            ring: Mutex::new(TapRing {
+                samples: vec![0.0; TAP_LEN],
+                next: 0,
+                rate: 0,
+                fed_at: None,
+            }),
+        }
+    }
+}
+
+impl Tap {
+    /// Порция отсчётов с `channels` каналами (кадры подряд).
+    fn feed(&self, samples: &[f32], channels: usize, rate: u32) {
+        let channels = channels.max(1);
+        let mut ring = lock(&self.ring);
+        ring.rate = rate;
+        ring.fed_at = Some(std::time::Instant::now());
+        let scale = 1.0 / channels as f32;
+        for frame in samples.chunks_exact(channels) {
+            let mono = frame.iter().sum::<f32>() * scale;
+            let next = ring.next;
+            if let Some(slot) = ring.samples.get_mut(next) {
+                *slot = mono;
+            }
+            ring.next = (next + 1) % TAP_LEN;
+        }
+    }
+
+    /// Копирует последние отсчёты в `out` по порядку (старые первыми) и
+    /// возвращает частоту. `None` — звука не было последние `fresh`: пауза,
+    /// конец трека или ожидание сети.
+    pub fn snapshot(&self, out: &mut [f32; TAP_LEN], fresh: Duration) -> Option<u32> {
+        let ring = lock(&self.ring);
+        let recent = ring
+            .fed_at
+            .is_some_and(|at| at.elapsed() <= fresh && ring.rate > 0);
+        if !recent {
+            return None;
+        }
+        let (newer, older) = ring.samples.split_at(ring.next.min(TAP_LEN));
+        for (slot, sample) in out.iter_mut().zip(older.iter().chain(newer)) {
+            *slot = *sample;
+        }
+        Some(ring.rate)
+    }
+
+    /// Моно-отсчёты в отвод — для тестов визуализатора.
+    #[cfg(test)]
+    pub fn feed_for_tests(&self, samples: &[f32], rate: u32) {
+        self.feed(samples, 1, rate);
+    }
+}
+
 #[derive(Default)]
 struct Queue {
     samples: VecDeque<f32>,
@@ -59,6 +134,7 @@ struct Queue {
 pub struct Shared {
     pub buffer: Arc<StreamBuffer>,
     volume: Arc<Volume>,
+    tap: Arc<Tap>,
     queue: Mutex<Queue>,
     /// Частота дискретизации, когда декодер её узнал.
     rate: AtomicU32,
@@ -90,10 +166,16 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Shared {
-    pub fn new(buffer: Arc<StreamBuffer>, volume: Arc<Volume>, start: Duration) -> Arc<Self> {
+    pub fn new(
+        buffer: Arc<StreamBuffer>,
+        volume: Arc<Volume>,
+        tap: Arc<Tap>,
+        start: Duration,
+    ) -> Arc<Self> {
         Arc::new(Self {
             buffer,
             volume,
+            tap,
             queue: Mutex::new(Queue {
                 base: start,
                 ..Queue::default()
@@ -338,6 +420,8 @@ impl Output {
         self.local.extend(queue.samples.drain(..take));
         queue.frames = queue.frames.saturating_add((take / channels) as u64);
         drop(queue);
+        // Визуализатору — то же, что уходит в микшер, без громкости.
+        self.shared.tap.feed(&self.local, channels, self.rate.get());
         self.silent = false;
         self.shared.starved.store(false, Ordering::Relaxed);
         self.shared.started.store(true, Ordering::Relaxed);
@@ -400,7 +484,32 @@ mod tests {
     fn shared() -> Arc<Shared> {
         let volume = Arc::new(Volume::default());
         volume.set(1.0);
-        Shared::new(StreamBuffer::new(), volume, Duration::ZERO)
+        Shared::new(
+            StreamBuffer::new(),
+            volume,
+            Arc::new(Tap::default()),
+            Duration::ZERO,
+        )
+    }
+
+    #[test]
+    fn tap_keeps_latest_mono_samples_in_order() {
+        let tap = Tap::default();
+        let mut out = [9.0; TAP_LEN];
+        assert_eq!(tap.snapshot(&mut out, Duration::from_secs(1)), None);
+        // Стерео: левый 1, правый 3 → моно 2; больше длины кольца.
+        let frames = TAP_LEN + 10;
+        let samples: Vec<f32> = (0..frames)
+            .flat_map(|i| [i as f32, i as f32 + 2.0])
+            .collect();
+        tap.feed(&samples, 2, 44_100);
+        assert_eq!(tap.snapshot(&mut out, Duration::from_secs(1)), Some(44_100));
+        assert_eq!(out[0], 10.0 + 1.0);
+        assert_eq!(out[TAP_LEN - 1], (frames - 1) as f32 + 1.0);
+        assert!(out.windows(2).all(|pair| pair[1] > pair[0]));
+        // Звук давно не приходил — снимка нет.
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(tap.snapshot(&mut out, Duration::from_millis(1)), None);
     }
 
     fn output(shared: &Arc<Shared>) -> Output {
