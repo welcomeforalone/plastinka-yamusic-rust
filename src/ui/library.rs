@@ -41,7 +41,7 @@ use crate::texts::{self, sentence};
 use iced::animation::Animation;
 use iced::time::Instant;
 pub use pages::Target;
-use pages::{Collected, Collections, Entry, Loaded, SearchState};
+use pages::{Collected, Collections, Entry, Loaded, PlaylistTab, SearchState, ShelfId};
 
 /// Высота строки трека.
 const ROW: f32 = 56.0;
@@ -176,6 +176,10 @@ pub enum Message {
     RetryPage,
     CollectionLoaded(Collected),
     RetryCollection,
+    /// Вкладка «Вы собрали» или «Вам понравились» в разделе «Плейлисты».
+    PlaylistTab(PlaylistTab),
+    /// «Показать все» или «Свернуть» у полки коллекции.
+    ToggleShelf(ShelfId),
     /// Поиск по каталогу: текст в поле, ввод замер, Enter, вкладка, ответ.
     SearchInput(String),
     SearchSettled(u64),
@@ -648,7 +652,12 @@ impl Library {
     ) -> (Task<Message>, Option<Effect>) {
         let effect = match message {
             Message::Nav(section) => return (self.nav(section, http), None),
-            Message::Open(target) => return (self.open(target, false, http), None),
+            Message::Open(target) => {
+                // Из полноэкранного плеера (щелчок по исполнителю) — к
+                // странице: плеер сворачивается.
+                self.close_fullscreen();
+                return (self.open(target, false, http), None);
+            }
             Message::PlayCard(target) => return (self.open(target, true, http), None),
             Message::Back => return (self.back().unwrap_or_else(Task::none), None),
             Message::PageLoaded(serial, page, loaded) => {
@@ -663,6 +672,14 @@ impl Library {
             Message::SearchSettled(edit) => return (self.search_settled(Some(edit), http), None),
             Message::SearchSubmit => return (self.search_settled(None, http), None),
             Message::SearchTab(tab) => return (self.search_tab(tab, http), None),
+            Message::PlaylistTab(tab) => {
+                self.collections.playlist_tab = tab;
+                None
+            }
+            Message::ToggleShelf(shelf) => {
+                self.collections.toggle(shelf);
+                None
+            }
             Message::SearchLoaded(generation, kind, page, result) => {
                 return self.search_loaded(generation, kind, page, result, http);
             }
@@ -1140,18 +1157,33 @@ impl Library {
             shadow: widgets::cover_shadow(),
             ..container::Style::default()
         });
-        let (title, artist) = match track {
-            Some(track) => (track.display_title(), track.artists_text()),
-            None => ("Ничего не играет".to_owned(), String::new()),
+        let title = track.map_or_else(|| "Ничего не играет".to_owned(), Track::display_title);
+        // Исполнители — ссылки, как в официальном клиенте: щелчок открывает
+        // страницу исполнителя и сворачивает плеер. Длинный список — в две
+        // строки, дальше обрезается.
+        let artist: Element<'a, App> = match track {
+            Some(track) if track.artists.iter().any(|artist| artist.id.is_some()) => {
+                let (_, line, _) = Style::Headline.metrics();
+                container(browse::artist_lines(
+                    &track.artists,
+                    Style::Headline,
+                    theme::TEXT_SECONDARY,
+                ))
+                .width(side)
+                .max_height(line * 2.0)
+                .clip(true)
+                .into()
+            }
+            Some(track) => {
+                marquee(track.artists_text(), Style::Headline, theme::TEXT_SECONDARY).into()
+            }
+            None => Space::new().into(),
         };
         let about = column![
             cover,
-            column![
-                marquee(title, Style::Display, theme::TEXT_PRIMARY),
-                marquee(artist, Style::Headline, theme::TEXT_SECONDARY),
-            ]
-            .spacing(6)
-            .width(side),
+            column![marquee(title, Style::Display, theme::TEXT_PRIMARY), artist]
+                .spacing(6)
+                .width(side),
         ]
         .spacing(28)
         .width(side);
@@ -1586,9 +1618,20 @@ impl Library {
         // целиком. Подсказка без трека стоит на месте и обрезается: бегущая
         // строка в простое заставляла бы окно перерисовываться всё время.
         let texts: Element<'a, App> = if has_track {
+            // Исполнители — ссылки на их страницы (одной строкой, лишнее
+            // обрезается). Без идентификаторов ссылок нет — бегущая строка.
+            let artist: Element<'a, App> = match track {
+                Some(track) if track.artists.iter().any(|artist| artist.id.is_some()) => container(
+                    browse::artist_links(&track.artists, Style::Secondary, theme::TEXT_SECONDARY),
+                )
+                .width(Length::Fill)
+                .clip(true)
+                .into(),
+                _ => marquee(artist, Style::Secondary, theme::TEXT_SECONDARY).into(),
+            };
             column![
                 marquee(title, Style::BodyStrong, theme::TEXT_PRIMARY),
-                marquee(artist, Style::Secondary, theme::TEXT_SECONDARY),
+                artist
             ]
             .spacing(2)
             .width(Length::Fill)

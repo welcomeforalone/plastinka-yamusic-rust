@@ -13,13 +13,16 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Color, Element, Length, Padding, mouse};
 
-use super::pages::{AlbumView, ArtistView, Entry, Load, Page, Paged, PlaylistView, Target};
+use super::pages::{
+    AlbumView, ArtistView, Entry, Load, Page, Paged, PlaylistTab, PlaylistView, ShelfId, Target,
+};
 use super::{
     App, LIST_BOTTOM, LIST_TOP, Lib, Library, Message, OVERSCAN, PAGE_SIDE, PAGE_TOP, ROW, Section,
     list_header, skeleton, state_block,
 };
 use crate::api::{
-    self, AlbumCard, AlbumKind, ArtistCard, ArtistRef, PlaylistCard, SearchKind, Track,
+    self, AlbumCard, AlbumKind, ArtistCard, ArtistRef, ListeningTop, PlaylistCard, SearchKind,
+    TopArtist, Track, Trend,
 };
 use crate::texts::{self, plural, sentence};
 use crate::ui::FailureKind;
@@ -58,12 +61,64 @@ const POPULAR: usize = 5;
 const TRACKS_HEADER: f32 = 140.0;
 /// Шапка раздела коллекции: заголовок и подпись.
 const COLLECTION_HEADER: f32 = 48.0 + 4.0 + 20.0;
+/// Полка коллекции: отступ под заголовком, отступ после рядов (с
+/// промежутком ряда выходит `SECTION_GAP`), рядов новых релизов.
+const SHELF_TITLE_GAP: f32 = 16.0;
+const SHELF_AFTER: f32 = SECTION_GAP - GRID_ROW_GAP;
+const RELEASE_ROWS: usize = 2;
+/// Строка «Здесь пока пусто» под заголовком сетки.
+const EMPTY_NOTE: f32 = 28.0;
+/// Вторая строка подписи под карточкой.
+const NOTE_LINE: f32 = 18.0;
 /// Строка «Показаны результаты по запросу …».
 const SEARCH_NOTE: f32 = 32.0;
 /// Поле поиска по каталогу.
 const SEARCH_FIELD: f32 = 48.0;
 /// Через сколько показывать скелетон страницы.
 const SKELETON_AFTER: f32 = 0.3;
+
+/// Полка раздела коллекции: заголовок и несколько рядов карточек в блоке
+/// сверху. `link` — «Весь топ», «Показать все» или «Свернуть».
+pub(super) struct Shelf<'a> {
+    title: &'static str,
+    rows: usize,
+    items: ShelfItems<'a>,
+    link: Option<(&'static str, App)>,
+}
+
+impl Shelf<'_> {
+    /// Прибавка к высоте ряда: у «Собираем для вас» описание в две строки.
+    fn extra(&self) -> f32 {
+        match self.items {
+            ShelfItems::Playlists(_) => NOTE_LINE,
+            _ => 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ShelfItems<'a> {
+    Top(&'a [TopArtist]),
+    Artists(&'a [ArtistCard]),
+    Albums(&'a [AlbumCard]),
+    Playlists(&'a [PlaylistCard]),
+}
+
+impl ShelfItems<'_> {
+    fn len(self) -> usize {
+        match self {
+            Self::Top(items) => items.len(),
+            Self::Artists(items) => items.len(),
+            Self::Albums(items) => items.len(),
+            Self::Playlists(items) => items.len(),
+        }
+    }
+}
+
+/// Высота полки из `rows` рядов высотой `row`.
+fn shelf_height(rows: usize, row: f32) -> f32 {
+    SECTION_TITLE + SHELF_TITLE_GAP + span_of(rows, row) + SHELF_AFTER
+}
 
 /// Прокручиваемая часть экрана: блок сверху высотой `top` и `rows` строк
 /// высотой `row`.
@@ -113,6 +168,18 @@ fn grid(width: f32) -> (usize, f32) {
 
 fn grid_rows(items: usize, columns: usize) -> usize {
     items.div_ceil(columns.max(1))
+}
+
+/// Высота блока над сеткой страницы «Топ исполнителей»: «Назад», шапка и,
+/// если топ пуст, строка об этом.
+fn top_page_top(top: Option<&ListeningTop>) -> f32 {
+    let empty = top.is_some_and(|top| top.artists.is_empty());
+    TOP_PAD
+        + BACK_ROW
+        + BACK_GAP
+        + COLLECTION_HEADER
+        + HEADER_GAP
+        + if empty { EMPTY_NOTE } else { 0.0 }
 }
 
 /// Высота блока над альбомами исполнителя.
@@ -183,6 +250,10 @@ impl Library {
                     rows: load.ready().map_or(0, paged_rows),
                     row: ROW,
                 },
+                Page::TopArtists { load } => {
+                    let top = load.ready();
+                    self.grid_body(top_page_top(top), top.map_or(0, |top| top.artists.len()))
+                }
             };
         }
         match self.section {
@@ -217,15 +288,8 @@ impl Library {
                     ),
                 }
             }
-            Section::Playlists => self.grid_body(
-                COLLECTION_TOP,
-                ready_len(self.collections.playlists.as_ref()),
-            ),
-            Section::Albums => {
-                self.grid_body(COLLECTION_TOP, ready_len(self.collections.albums.as_ref()))
-            }
-            Section::Artists => {
-                self.grid_body(COLLECTION_TOP, ready_len(self.collections.artists.as_ref()))
+            Section::Playlists | Section::Albums | Section::Artists => {
+                self.grid_body(self.collection_top(), self.collection_len())
             }
             _ => Body::EMPTY,
         }
@@ -269,6 +333,7 @@ impl Library {
                 Page::ArtistTracks { load, .. } => {
                     load.is_loading() || load.ready().is_some_and(|paged| paged.fetching)
                 }
+                Page::TopArtists { load } => load.is_loading(),
             };
         }
         let fetching = |paged: Option<&Paged<_>>| paged.is_some_and(|paged| paged.fetching);
@@ -347,6 +412,15 @@ impl Library {
                         uris.extend(small(&paged.items, first..last));
                     }
                 }
+                Page::TopArtists { load } => {
+                    if let Some(top) = load.ready() {
+                        uris.extend(cards(first..last).filter_map(|index| {
+                            top.artists
+                                .get(index)
+                                .and_then(|artist| medium(artist.card.cover_uri.as_deref()))
+                        }));
+                    }
+                }
             }
             return uris;
         }
@@ -398,31 +472,43 @@ impl Library {
                     }
                 }
             },
-            Section::Playlists => {
-                if let Some(Load::Ready(items)) = &self.collections.playlists {
-                    uris.extend(cards(first..last).filter_map(|index| {
-                        items
-                            .get(index)
-                            .and_then(|card| medium(card.cover_uri.as_deref()))
-                    }));
-                }
-            }
-            Section::Albums => {
-                if let Some(Load::Ready(items)) = &self.collections.albums {
-                    uris.extend(cards(first..last).filter_map(|index| {
-                        items
-                            .get(index)
-                            .and_then(|card| medium(card.cover_uri.as_deref()))
-                    }));
-                }
-            }
-            Section::Artists => {
-                if let Some(Load::Ready(items)) = &self.collections.artists {
-                    uris.extend(cards(first..last).filter_map(|index| {
-                        items
-                            .get(index)
-                            .and_then(|card| medium(card.cover_uri.as_deref()))
-                    }));
+            Section::Playlists | Section::Albums | Section::Artists => {
+                uris.extend(self.shelf_covers());
+                let first_card = first.saturating_mul(columns);
+                let shown = (last - first).saturating_mul(columns);
+                match self.section {
+                    Section::Artists => {
+                        if let Some(all) = ready_arc(self.collections.artists.as_ref()) {
+                            uris.extend(
+                                all.liked
+                                    .iter()
+                                    .skip(first_card)
+                                    .take(shown)
+                                    .filter_map(|card| medium(card.cover_uri.as_deref())),
+                            );
+                        }
+                    }
+                    Section::Albums => {
+                        if let Some(all) = ready_arc(self.collections.albums.as_ref()) {
+                            uris.extend(
+                                all.liked
+                                    .iter()
+                                    .skip(first_card)
+                                    .take(shown)
+                                    .filter_map(|card| medium(card.cover_uri.as_deref())),
+                            );
+                        }
+                    }
+                    _ => {
+                        let items = self.collections.playlist_list().unwrap_or_default();
+                        uris.extend(
+                            items
+                                .iter()
+                                .skip(first_card)
+                                .take(shown)
+                                .filter_map(|card| medium(card.cover_uri.as_deref())),
+                        );
+                    }
                 }
             }
             _ => {}
@@ -578,7 +664,55 @@ impl Library {
                 Load::Loading(since) => loading_page(*since, now, turn),
                 Load::Failed(failure) => failed_page("Не удалось загрузить треки", failure),
             },
+            Page::TopArtists { load } => match load {
+                Load::Ready(top) => self.top_page(top, covers),
+                Load::Loading(since) => loading_page(*since, now, turn),
+                Load::Failed(failure) => failed_page("Не удалось собрать топ", failure),
+            },
         }
+    }
+
+    /// Весь топ исполнителей по истории прослушивания.
+    fn top_page<'a>(&'a self, top: &'a ListeningTop, covers: &'a Covers) -> Element<'a, App> {
+        let count = top.artists.len();
+        let subtitle = if count == 0 {
+            "История прослушивания пока пуста".to_owned()
+        } else {
+            format!(
+                "{count} {} · по истории прослушивания за {} {}",
+                plural(count, ["исполнитель", "исполнителя", "исполнителей"]),
+                top.days,
+                plural(top.days, ["день", "дня", "дней"]),
+            )
+        };
+        let header = column![
+            theme::line("Топ исполнителей", Style::Display, theme::TEXT_PRIMARY),
+            theme::line(subtitle, Style::Body, theme::TEXT_SECONDARY),
+        ]
+        .spacing(4);
+        let mut head = column![
+            Space::new().height(TOP_PAD),
+            back_row(),
+            Space::new().height(BACK_GAP),
+            container(header).height(COLLECTION_HEADER),
+            Space::new().height(HEADER_GAP),
+        ];
+        if count == 0 {
+            head = head.push(
+                container(theme::line(
+                    "Послушайте музыку — здесь появятся исполнители, которых вы слушаете чаще всего.",
+                    Style::Body,
+                    theme::TEXT_SECONDARY,
+                ))
+                .height(EMPTY_NOTE),
+            );
+        }
+        let (columns, side) = grid(self.panel_width);
+        self.scroller(self.body(), Some(head.into()), move |index| {
+            Some(cards_row(index, columns, side, &top.artists, |artist| {
+                top_artist_card(covers, artist, side)
+            }))
+        })
     }
 
     fn album_page<'a>(
@@ -807,92 +941,222 @@ impl Library {
 
     // ---------------------------------------------------------- коллекция
 
+    /// Полки раздела коллекции, которые есть что показать: топ месяца,
+    /// «Встречали в Моей волне», новые релизы, «Собираем для вас».
+    pub(super) fn shelves<'a>(&'a self) -> Vec<Shelf<'a>> {
+        let columns = self.grid_columns();
+        let mut shelves = Vec::new();
+        // Полка в `rows` рядов. Не влезла — «Показать все»; раскрытая —
+        // все ряды и «Свернуть». У топа месяца вместо этого «Весь топ».
+        let mut push = |id: ShelfId, title: &'static str, rows: usize, items: ShelfItems<'a>| {
+            let all = grid_rows(items.len(), columns);
+            if all == 0 {
+                return;
+            }
+            let expanded = self.collections.is_expanded(id);
+            let toggle = |caption| Some((caption, Lib(Message::ToggleShelf(id))));
+            let (rows, link) = match id {
+                ShelfId::Top => (
+                    rows.min(all),
+                    Some(("Весь топ", Lib(Message::Open(Target::TopArtists)))),
+                ),
+                _ if expanded => (all, toggle("Свернуть")),
+                _ if all > rows => (rows, toggle("Показать все")),
+                _ => (all, None),
+            };
+            shelves.push(Shelf {
+                title,
+                rows,
+                items,
+                link,
+            });
+        };
+        match self.section {
+            Section::Artists => {
+                if let Some(artists) = ready_arc(self.collections.artists.as_ref()) {
+                    push(
+                        ShelfId::Top,
+                        "Ваш топ месяца",
+                        1,
+                        ShelfItems::Top(&artists.top),
+                    );
+                    push(
+                        ShelfId::Met,
+                        "Встречали в Моей волне",
+                        1,
+                        ShelfItems::Artists(&artists.met),
+                    );
+                }
+            }
+            Section::Albums => {
+                if let Some(albums) = ready_arc(self.collections.albums.as_ref()) {
+                    push(
+                        ShelfId::Releases,
+                        "Новые релизы",
+                        RELEASE_ROWS,
+                        ShelfItems::Albums(&albums.releases),
+                    );
+                }
+            }
+            Section::Playlists => {
+                if let Some(playlists) = ready_arc(self.collections.playlists.as_ref()) {
+                    push(
+                        ShelfId::Personal,
+                        "Собираем для вас",
+                        1,
+                        ShelfItems::Playlists(&playlists.personal),
+                    );
+                }
+            }
+            _ => {}
+        }
+        shelves
+    }
+
+    /// Сколько карточек в основном списке раздела (сетка под полками).
+    fn collection_len(&self) -> usize {
+        match self.section {
+            Section::Artists => {
+                ready_arc(self.collections.artists.as_ref()).map_or(0, |all| all.liked.len())
+            }
+            Section::Albums => {
+                ready_arc(self.collections.albums.as_ref()).map_or(0, |all| all.liked.len())
+            }
+            Section::Playlists => self.collections.playlist_list().map_or(0, <[_]>::len),
+            _ => 0,
+        }
+    }
+
+    /// В разделе вообще ничего: ни полок, ни своего списка.
+    fn collection_empty(&self) -> bool {
+        let lists_empty = match self.section {
+            Section::Playlists => ready_arc(self.collections.playlists.as_ref())
+                .is_some_and(|all| all.own.is_empty() && all.liked.is_empty()),
+            _ => self.collection_len() == 0,
+        };
+        lists_empty && self.shelves().is_empty()
+    }
+
+    /// Высота блока над сеткой раздела коллекции.
+    fn collection_top(&self) -> f32 {
+        let row = self.grid_body(0.0, 0).row;
+        let shelves: f32 = self
+            .shelves()
+            .iter()
+            .map(|shelf| shelf_height(shelf.rows, row + shelf.extra()))
+            .sum();
+        let note = if self.collection_len() == 0 {
+            EMPTY_NOTE
+        } else {
+            0.0
+        };
+        COLLECTION_TOP + shelves + SECTION_TITLE + SHELF_TITLE_GAP + note
+    }
+
+    /// Обложки полок: они в блоке сверху и все на виду, пока он виден.
+    fn shelf_covers(&self) -> Vec<(Grade, &str)> {
+        if self.scroll_y > self.collection_top() {
+            return Vec::new();
+        }
+        let columns = self.grid_columns();
+        let mut uris = Vec::new();
+        for shelf in self.shelves() {
+            let shown = shelf.rows.saturating_mul(columns);
+            match shelf.items {
+                ShelfItems::Top(items) => uris.extend(
+                    items
+                        .iter()
+                        .take(shown)
+                        .filter_map(|top| medium(top.card.cover_uri.as_deref())),
+                ),
+                ShelfItems::Artists(items) => uris.extend(
+                    items
+                        .iter()
+                        .take(shown)
+                        .filter_map(|card| medium(card.cover_uri.as_deref())),
+                ),
+                ShelfItems::Albums(items) => uris.extend(
+                    items
+                        .iter()
+                        .take(shown)
+                        .filter_map(|card| medium(card.cover_uri.as_deref())),
+                ),
+                ShelfItems::Playlists(items) => uris.extend(
+                    items
+                        .iter()
+                        .take(shown)
+                        .filter_map(|card| medium(card.cover_uri.as_deref())),
+                ),
+            }
+        }
+        uris
+    }
+
     pub(super) fn collection_view<'a>(
         &'a self,
         covers: &'a Covers,
         turn: f32,
         now: Instant,
     ) -> Element<'a, App> {
-        let (columns, side) = grid(self.panel_width);
-        match self.section {
-            Section::Playlists => self.collection(
-                self.collections.playlists.as_ref(),
+        let (title, forms, empty) = match self.section {
+            Section::Playlists => (
                 "Плейлисты",
                 ["плейлист", "плейлиста", "плейлистов"],
-                "Здесь появятся ваши плейлисты и те, что вам понравились.",
-                (turn, now),
-                move |row, items| {
-                    cards_row(row, columns, side, items, |card| {
-                        playlist_card(covers, card, side)
-                    })
-                },
+                "Здесь появятся ваши плейлисты, понравившиеся и те, что сервис собирает для вас.",
             ),
-            Section::Albums => self.collection(
-                self.collections.albums.as_ref(),
+            Section::Albums => (
                 "Альбомы",
                 ["альбом", "альбома", "альбомов"],
                 "Отмечайте альбомы сердцем — они появятся здесь.",
-                (turn, now),
-                move |row, items| {
-                    cards_row(row, columns, side, items, |card| {
-                        album_card(covers, card, side)
-                    })
-                },
             ),
-            _ => self.collection(
-                self.collections.artists.as_ref(),
+            _ => (
                 "Исполнители",
                 ["исполнитель", "исполнителя", "исполнителей"],
-                "Отмечайте исполнителей сердцем — они появятся здесь.",
-                (turn, now),
-                move |row, items| {
-                    cards_row(row, columns, side, items, |card| {
-                        artist_card(covers, card, side)
-                    })
-                },
+                "Слушайте музыку и отмечайте исполнителей сердцем — они появятся здесь.",
             ),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn collection<'a, T>(
-        &'a self,
-        load: Option<&'a Load<std::sync::Arc<Vec<T>>>>,
-        title: &'a str,
-        forms: [&'static str; 3],
-        empty: &'a str,
-        (turn, now): (f32, Instant),
-        row: impl Fn(usize, &'a [T]) -> Element<'a, App> + 'a,
-    ) -> Element<'a, App> {
-        let items = match load {
-            None => return Space::new().into(),
-            Some(Load::Loading(since)) => return loading_grid(*since, now, turn),
-            Some(Load::Failed(failure)) => {
+        };
+        let failure = match self.section {
+            Section::Playlists => state_of(self.collections.playlists.as_ref()),
+            Section::Albums => state_of(self.collections.albums.as_ref()),
+            _ => state_of(self.collections.artists.as_ref()),
+        };
+        match failure {
+            State::Missing => return Space::new().into(),
+            State::Loading(since) => return loading_grid(since, now, turn),
+            State::Failed(failure) => {
                 return failure_block(
                     &format!("Не удалось загрузить «{title}»"),
                     failure,
                     Some(Lib(Message::RetryCollection)),
                 );
             }
-            Some(Load::Ready(items)) => items,
+            State::Ready => {}
+        }
+        let count = match self.section {
+            Section::Playlists => ready_arc(self.collections.playlists.as_ref())
+                .map_or(0, |all| all.own.len() + all.liked.len()),
+            _ => self.collection_len(),
+        };
+        let subtitle = match self.section {
+            Section::Artists if count > 0 => format!(
+                "{count} {} в коллекции",
+                plural(count, ["исполнитель", "исполнителя", "исполнителей"])
+            ),
+            _ => format!("{count} {}", plural(count, forms)),
         };
         let header = column![
             theme::line(title, Style::Display, theme::TEXT_PRIMARY),
-            theme::line(
-                format!("{} {}", items.len(), plural(items.len(), forms)),
-                Style::Body,
-                theme::TEXT_SECONDARY
-            ),
+            theme::line(subtitle, Style::Body, theme::TEXT_SECONDARY),
         ]
         .spacing(4);
-        let top = column![
+        let head = column![
             Space::new().height(TOP_PAD),
             container(header).height(COLLECTION_HEADER),
             Space::new().height(HEADER_GAP),
         ];
-        if items.is_empty() {
+        if self.collection_empty() {
             return column![
-                container(top).padding([0.0, PAGE_SIDE]),
+                container(head).padding([0.0, PAGE_SIDE]),
                 state_block(
                     widgets::badge(Icon::Heart, theme::TEXT_SECONDARY, theme::SURFACE_2),
                     "Здесь пока пусто",
@@ -907,10 +1171,114 @@ impl Library {
             ]
             .into();
         }
-        let items: &'a [T] = items;
+        let (columns, side) = grid(self.panel_width);
+        let row_height = self.grid_body(0.0, 0).row;
+        let mut top = head;
+        for shelf in self.shelves() {
+            top = top.push(self.shelf_view(&shelf, covers, columns, side, row_height));
+        }
+        top = top.push(self.collection_list_title());
+        top = top.push(Space::new().height(SHELF_TITLE_GAP));
+        if self.collection_len() == 0 {
+            let note = match (self.section, self.collections.playlist_tab) {
+                (Section::Playlists, PlaylistTab::Own) => {
+                    "Своих плейлистов пока нет — создайте их в приложении сервиса."
+                }
+                (Section::Playlists, PlaylistTab::Liked) => {
+                    "Отмечайте чужие плейлисты сердцем — они появятся здесь."
+                }
+                (Section::Albums, _) => "Отмечайте альбомы сердцем — они появятся здесь.",
+                _ => "Отмечайте исполнителей сердцем — они появятся здесь.",
+            };
+            top = top.push(
+                container(theme::line(note, Style::Body, theme::TEXT_SECONDARY)).height(EMPTY_NOTE),
+            );
+        }
         self.scroller(self.body(), Some(top.into()), move |index| {
-            Some(row(index, items))
+            Some(match self.section {
+                Section::Artists => {
+                    let items = ready_arc(self.collections.artists.as_ref())
+                        .map_or(&[][..], |all| all.liked.as_slice());
+                    cards_row(index, columns, side, items, |card| {
+                        artist_card(covers, card, side)
+                    })
+                }
+                Section::Albums => {
+                    let items = ready_arc(self.collections.albums.as_ref())
+                        .map_or(&[][..], |all| all.liked.as_slice());
+                    cards_row(index, columns, side, items, |card| {
+                        album_card(covers, card, side)
+                    })
+                }
+                _ => {
+                    let items = self.collections.playlist_list().unwrap_or_default();
+                    cards_row(index, columns, side, items, |card| {
+                        playlist_card(covers, card, side)
+                    })
+                }
+            })
         })
+    }
+
+    /// Заголовок сетки под полками; у плейлистов — вкладки.
+    fn collection_list_title(&self) -> Element<'_, App> {
+        if self.section != Section::Playlists {
+            return section_title("Вам понравились", None);
+        }
+        let (own, liked) = ready_arc(self.collections.playlists.as_ref())
+            .map_or((0, 0), |all| (all.own.len(), all.liked.len()));
+        let tab = self.collections.playlist_tab;
+        let tabs = row![
+            pill(
+                format!("Вы собрали · {own}"),
+                tab == PlaylistTab::Own,
+                Lib(Message::PlaylistTab(PlaylistTab::Own)),
+            ),
+            pill(
+                format!("Вам понравились · {liked}"),
+                tab == PlaylistTab::Liked,
+                Lib(Message::PlaylistTab(PlaylistTab::Liked)),
+            ),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        container(tabs)
+            .height(SECTION_TITLE)
+            .center_y(SECTION_TITLE)
+            .into()
+    }
+
+    /// Полка: заголовок и `rows` рядов карточек.
+    fn shelf_view<'a>(
+        &self,
+        shelf: &Shelf<'a>,
+        covers: &'a Covers,
+        columns: usize,
+        side: f32,
+        row_height: f32,
+    ) -> Element<'a, App> {
+        let mut block = column![
+            section_title(shelf.title, shelf.link.clone()),
+            Space::new().height(SHELF_TITLE_GAP)
+        ];
+        for index in 0..shelf.rows {
+            let cards = match shelf.items {
+                ShelfItems::Top(items) => cards_row(index, columns, side, items, |top| {
+                    top_artist_card(covers, top, side)
+                }),
+                ShelfItems::Artists(items) => cards_row(index, columns, side, items, |card| {
+                    artist_card(covers, card, side)
+                }),
+                ShelfItems::Albums(items) => cards_row(index, columns, side, items, |card| {
+                    album_card(covers, card, side)
+                }),
+                ShelfItems::Playlists(items) => cards_row(index, columns, side, items, |card| {
+                    personal_card(covers, card, side)
+                }),
+            };
+            block = block.push(container(cards).height(row_height + shelf.extra()));
+        }
+        block.push(Space::new().height(SHELF_AFTER)).into()
     }
 
     // ---------------------------------------------------------- поиск
@@ -1082,8 +1450,25 @@ fn ready_paged<T>(load: Option<&Load<Paged<T>>>) -> Option<&Paged<T>> {
     load.and_then(Load::ready)
 }
 
-fn ready_len<T>(load: Option<&Load<std::sync::Arc<Vec<T>>>>) -> usize {
-    load.and_then(Load::ready).map_or(0, |items| items.len())
+fn ready_arc<T>(load: Option<&Load<std::sync::Arc<T>>>) -> Option<&T> {
+    load?.ready().map(std::sync::Arc::as_ref)
+}
+
+/// Что с данными раздела: ещё не просили, грузятся, не пришли, есть.
+enum State<'a> {
+    Missing,
+    Loading(Instant),
+    Failed(&'a Failure),
+    Ready,
+}
+
+fn state_of<T>(load: Option<&Load<T>>) -> State<'_> {
+    match load {
+        None => State::Missing,
+        Some(Load::Loading(since)) => State::Loading(*since),
+        Some(Load::Failed(failure)) => State::Failed(failure),
+        Some(Load::Ready(_)) => State::Ready,
+    }
 }
 
 fn loading<T>(load: Option<&Load<T>>) -> bool {
@@ -1164,14 +1549,43 @@ pub(super) fn artist_links<'a>(
     linked(spans, style)
 }
 
+/// Исполнители-ссылки для полноэкранного плеера: длинный список
+/// переносится на следующие строки, а не обрезается.
+pub(super) fn artist_lines<'a>(
+    artists: &'a [ArtistRef],
+    style: Style,
+    color: Color,
+) -> Element<'a, App> {
+    let mut spans: Vec<Span<'a, App, iced::Font>> = Vec::with_capacity(artists.len() * 2);
+    for (index, artist) in artists.iter().enumerate() {
+        if index > 0 {
+            spans.push(span(", ").color(color));
+        }
+        let name = span(artist.name.as_str()).color(color);
+        spans.push(match &artist.id {
+            Some(id) => name.link(Lib(Message::Open(Target::Artist(id.clone())))),
+            None => name,
+        });
+    }
+    text_with_links(spans, style, Wrapping::WordOrGlyph)
+}
+
 /// Текст со ссылками в стиле `style`, одной строкой.
 fn linked<'a>(spans: Vec<Span<'a, App, iced::Font>>, style: Style) -> Element<'a, App> {
+    text_with_links(spans, style, Wrapping::None)
+}
+
+fn text_with_links<'a>(
+    spans: Vec<Span<'a, App, iced::Font>>,
+    style: Style,
+    wrapping: Wrapping,
+) -> Element<'a, App> {
     let (size, line, font) = style.metrics();
     rich_text(spans)
         .size(size)
         .line_height(iced::widget::text::LineHeight::Absolute(iced::Pixels(line)))
         .font(font)
-        .wrapping(Wrapping::None)
+        .wrapping(wrapping)
         .on_link_click(|message| message)
         .into()
 }
@@ -1369,12 +1783,21 @@ fn section_title<'a>(title: &'a str, link: Option<(&'a str, App)>) -> Element<'a
 
 /// Вкладка поиска — «таблетка».
 fn tab_pill<'a>(kind: SearchKind, selected: bool) -> Element<'a, App> {
+    pill(
+        kind.title().to_owned(),
+        selected,
+        Lib(Message::SearchTab(kind)),
+    )
+}
+
+/// Вкладка-«таблетка»: выбранная подсвечена.
+fn pill<'a>(label: String, selected: bool, message: App) -> Element<'a, App> {
     let color = if selected {
         theme::TEXT_PRIMARY
     } else {
         theme::TEXT_SECONDARY
     };
-    let pill = button(theme::line(kind.title(), Style::BodyStrong, color))
+    let pill = button(theme::line(label, Style::BodyStrong, color))
         .padding([8, 16])
         .style(move |_, status| button::Style {
             background: match (selected, status) {
@@ -1384,7 +1807,7 @@ fn tab_pill<'a>(kind: SearchKind, selected: bool) -> Element<'a, App> {
             border: Border::default().rounded(widgets::ROUND),
             ..button::Style::default()
         })
-        .on_press(Lib(Message::SearchTab(kind)));
+        .on_press(message);
     if selected {
         pill.into()
     } else {
@@ -1437,7 +1860,7 @@ fn card<'a>(
     cover: Element<'a, App>,
     side: f32,
     title: String,
-    subtitle: String,
+    subtitle: impl Into<Element<'a, App>>,
     open: Target,
 ) -> Element<'a, App> {
     let base = column![
@@ -1445,7 +1868,7 @@ fn card<'a>(
         Space::new().height(10),
         theme::line(title, Style::BodyStrong, theme::TEXT_PRIMARY),
         Space::new().height(2),
-        theme::line(subtitle, Style::Secondary, theme::TEXT_SECONDARY),
+        subtitle.into(),
     ]
     .width(side)
     .clip(true);
@@ -1505,7 +1928,7 @@ fn album_card<'a>(covers: &'a Covers, album: &'a AlbumCard, side: f32) -> Elemen
         ),
         side,
         album.display_title(),
-        parts.join(" · "),
+        caption(parts.join(" · ")),
         Target::Album(album.id.clone()),
     )
 }
@@ -1524,9 +1947,116 @@ fn artist_card<'a>(covers: &'a Covers, artist: &'a ArtistCard, side: f32) -> Ele
         ),
         side,
         artist.name.clone(),
-        "Исполнитель".to_owned(),
+        caption(artist_note(artist)),
         Target::Artist(artist.id.clone()),
     )
+}
+
+/// Подпись исполнителя: сколько у него треков, если сервис прислал.
+fn artist_note(artist: &ArtistCard) -> String {
+    match artist.tracks {
+        Some(tracks) if tracks > 0 => {
+            let tracks = usize::try_from(tracks).unwrap_or(usize::MAX);
+            format!("{tracks} {}", texts::tracks_word(tracks))
+        }
+        _ => "Исполнитель".to_owned(),
+    }
+}
+
+/// Исполнитель из топа месяца: место, сдвиг и сколько слушали
+/// («1 ▲ · 3,5 часа»).
+fn top_artist_card<'a>(covers: &'a Covers, top: &'a TopArtist, side: f32) -> Element<'a, App> {
+    let mut line = row![].spacing(4).align_y(Alignment::Center);
+    if let Some(position) = top.position {
+        line = line.push(theme::line(
+            position.to_string(),
+            Style::CaptionStrong,
+            theme::TEXT_PRIMARY,
+        ));
+    }
+    let (mark, color, hint) = match top.trend {
+        Some(Trend::Up) => (Icon::TrendUp, theme::GROWTH, "Поднялся в топе"),
+        Some(Trend::Down) => (Icon::TrendDown, theme::ERROR, "Опустился в топе"),
+        Some(Trend::New) => (Icon::TrendNew, theme::accent(), "Новый в топе"),
+        Some(Trend::Same) | None => (Icon::TrendSame, theme::TEXT_TERTIARY, "Место не изменилось"),
+    };
+    if top.trend.is_some() {
+        line = line.push(widgets::with_tooltip(
+            icon(mark, 10.0, color),
+            hint,
+            tooltip::Position::Top,
+        ));
+    }
+    if let Some(listened) = texts::listened(top.listened) {
+        let time = theme::line(
+            format!("· {listened}"),
+            Style::Secondary,
+            theme::TEXT_SECONDARY,
+        );
+        // В топе по истории ещё и сколько раз слушали — в подсказке.
+        line = match top.plays {
+            Some(plays) => line.push(widgets::with_tooltip(
+                time,
+                format!("{plays} {}", texts::plays_word(plays)),
+                tooltip::Position::Top,
+            )),
+            None => line.push(time),
+        };
+    }
+    let artist = &top.card;
+    card(
+        widgets::cover(
+            art(
+                covers,
+                Grade::Medium,
+                artist.cover_uri.as_deref(),
+                &artist.id,
+            ),
+            side,
+            side / 2.0,
+        ),
+        side,
+        artist.name.clone(),
+        container(line).height(18).center_y(18),
+        Target::Artist(artist.id.clone()),
+    )
+}
+
+/// Плейлист «Собираем для вас»: описание в две строки вместо автора.
+fn personal_card<'a>(
+    covers: &'a Covers,
+    playlist: &'a PlaylistCard,
+    side: f32,
+) -> Element<'a, App> {
+    let Some(note) = &playlist.note else {
+        return playlist_card(covers, playlist, side);
+    };
+    let seed = format!("{}:{}", playlist.owner, playlist.kind);
+    card(
+        widgets::cover(
+            art(covers, Grade::Medium, playlist.cover_uri.as_deref(), &seed),
+            side,
+            12.0,
+        ),
+        side,
+        playlist.title.clone(),
+        container(theme::label(
+            note.clone(),
+            Style::Secondary,
+            theme::TEXT_SECONDARY,
+        ))
+        .height(18.0 + NOTE_LINE)
+        .clip(true),
+        Target::Playlist {
+            owner: playlist.owner.clone(),
+            kind: playlist.kind.clone(),
+        },
+    )
+}
+
+/// Обычная подпись под карточкой.
+fn caption<'a>(text: String) -> Element<'a, App> {
+    theme::line(text, Style::Secondary, theme::TEXT_SECONDARY).into()
 }
 
 fn playlist_card<'a>(
@@ -1535,7 +2065,10 @@ fn playlist_card<'a>(
     side: f32,
 ) -> Element<'a, App> {
     let mut parts = Vec::new();
-    if let Some(owner) = &playlist.owner_name {
+    if let Some(note) = &playlist.note {
+        parts.push(note.clone());
+    }
+    if let Some(owner) = playlist.owner_name.as_ref().filter(|_| parts.is_empty()) {
         parts.push(owner.clone());
     }
     if let Some(count) = playlist.track_count {
@@ -1551,7 +2084,7 @@ fn playlist_card<'a>(
         ),
         side,
         playlist.title.clone(),
-        parts.join(" · "),
+        caption(parts.join(" · ")),
         Target::Playlist {
             owner: playlist.owner.clone(),
             kind: playlist.kind.clone(),

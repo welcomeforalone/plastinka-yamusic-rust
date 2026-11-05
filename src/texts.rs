@@ -7,6 +7,14 @@ pub fn tracks_word(count: usize) -> &'static str {
     plural(count, ["трек", "трека", "треков"])
 }
 
+/// «прослушивание» в нужной форме: топ по истории.
+pub fn plays_word(count: u32) -> &'static str {
+    plural(
+        usize::try_from(count).unwrap_or(usize::MAX),
+        ["прослушивание", "прослушивания", "прослушиваний"],
+    )
+}
+
 /// Форма слова для числа: [1, 2–4, 5–20].
 pub fn plural(count: usize, forms: [&'static str; 3]) -> &'static str {
     let [one, few, many] = forms;
@@ -27,6 +35,33 @@ pub fn total_duration(total: Duration) -> String {
         (hours, 0) => format!("{hours} ч"),
         (hours, minutes) => format!("{hours} ч {minutes} мин"),
     }
+}
+
+/// Сколько слушали исполнителя, как в топе месяца: «3,5 часа», «2 часа»,
+/// «40 минут». Часы округляются до получаса. Ноль — `None`.
+pub fn listened(total: Duration) -> Option<String> {
+    let seconds = total.as_secs();
+    if seconds == 0 {
+        return None;
+    }
+    let halves = seconds.saturating_add(900) / 1800;
+    if halves < 2 {
+        let minutes = (seconds.saturating_add(30) / 60).max(1);
+        let word = plural(count(minutes), ["минута", "минуты", "минут"]);
+        return Some(format!("{minutes} {word}"));
+    }
+    let hours = halves / 2;
+    Some(if halves.is_multiple_of(2) {
+        format!("{hours} {}", plural(count(hours), ["час", "часа", "часов"]))
+    } else {
+        // С дробью — «часа»: «1,5 часа», «21,5 часа».
+        format!("{hours},5 часа")
+    })
+}
+
+/// Число для [`plural`]: огромное — как «много».
+fn count(value: u64) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
 }
 
 /// Время `м:сс` для плеера.
@@ -86,6 +121,22 @@ mod tests {
         assert_eq!(clock(0), "0:00");
         assert_eq!(clock(467), "7:47");
         assert_eq!(clock(3725), "1:02:05");
+    }
+
+    #[test]
+    fn listening_time_reads_like_the_top() {
+        let hours = |seconds| listened(Duration::from_secs(seconds));
+        assert_eq!(hours(0), None);
+        assert_eq!(hours(13_110).as_deref(), Some("3,5 часа"));
+        assert_eq!(hours(10_747).as_deref(), Some("3 часа"));
+        assert_eq!(hours(8_823).as_deref(), Some("2,5 часа"));
+        assert_eq!(hours(7_789).as_deref(), Some("2 часа"));
+        assert_eq!(hours(3_600).as_deref(), Some("1 час"));
+        assert_eq!(hours(5 * 3600).as_deref(), Some("5 часов"));
+        assert_eq!(hours(2_400).as_deref(), Some("40 минут"));
+        assert_eq!(hours(61).as_deref(), Some("1 минута"));
+        assert_eq!(hours(10).as_deref(), Some("1 минута"));
+        assert!(hours(u64::MAX).is_some());
     }
 
     #[test]

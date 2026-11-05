@@ -33,6 +33,8 @@ pub const TEXT_SECONDARY: Color = rgb(0xA8A8A8);
 pub const TEXT_TERTIARY: Color = rgb(0x8A8A8A);
 pub const TEXT_DISABLED: Color = rgb(0x5A5A5A);
 pub const ERROR: Color = rgb(0xFF6B6B);
+/// Рост в топе месяца.
+pub const GROWTH: Color = rgb(0x4CD07D);
 pub const ERROR_SOFT: Color = rgba(0xFF6B6B, 0.14);
 pub const ERROR_HOVER: Color = rgba(0xFF6B6B, 0.24);
 pub const ERROR_PRESSED: Color = rgba(0xFF6B6B, 0.34);

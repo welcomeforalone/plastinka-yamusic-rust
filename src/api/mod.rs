@@ -17,10 +17,11 @@ pub use account::{
     Account, AccountStatus, Date, PlaybackPermit, PlusDetails, Subscription, fetch_status,
 };
 pub use catalog::{
-    ARTIST_TRACKS_PAGE, Album, AlbumCard, AlbumKind, Artist, ArtistCard, Found, MyPlaylists, Page,
-    Playlist, PlaylistCard, SEARCH_LAST_PAGE, SearchKind, SearchResult, compact_number,
-    fetch_album, fetch_artist, fetch_artist_tracks, fetch_liked_albums, fetch_liked_artists,
-    fetch_my_playlists, fetch_playlist, search, total_duration,
+    ARTIST_TRACKS_PAGE, Album, AlbumCard, AlbumKind, Artist, ArtistCard, Found, ListeningTop,
+    MyAlbums, MyArtists, MyPlaylists, Page, Playlist, PlaylistCard, SEARCH_LAST_PAGE, SearchKind,
+    SearchResult, TopArtist, Trend, compact_number, fetch_album, fetch_artist, fetch_artist_tracks,
+    fetch_listening_top, fetch_my_albums, fetch_my_artists, fetch_my_playlists, fetch_playlist,
+    search, total_duration,
 };
 pub use stream::{StreamError, StreamSource, fetch_stream_source};
 pub use tracks::{

@@ -245,7 +245,7 @@ pub fn icon_button<'a>(
 /// Подсказка при наведении.
 pub fn with_tooltip<'a>(
     content: impl Into<Element<'a, Message>>,
-    tip: &'a str,
+    tip: impl iced::widget::text::IntoFragment<'a>,
     position: tooltip::Position,
 ) -> Element<'a, Message> {
     tooltip(

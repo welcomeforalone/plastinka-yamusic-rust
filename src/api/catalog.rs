@@ -6,6 +6,7 @@
 //! и без токена, поэтому его 403 — «нет доступа», а не «войдите заново».
 //! Подробности в `docs/api/stage-7.md`.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use reqwest::StatusCode;
@@ -30,6 +31,14 @@ const ARTIST_ALBUMS_PAGE: u32 = 100;
 const ARTIST_ALBUMS_PAGES: u32 = 10;
 /// `kind` плейлиста «Мне нравится»: у него свой раздел.
 const LIKED_PLAYLIST_KIND: &str = "3";
+/// Сколько просить в блоках «Встречали в Моей волне», «Новые релизы» и
+/// «Собираем для вас». Сервис может прислать меньше.
+const MET_ARTISTS: u32 = 16;
+const NEW_RELEASES: u32 = 30;
+const PERSONAL_PLAYLISTS: u32 = 10;
+/// Сколько треков истории просить с полными данными (исполнители,
+/// длительность). У остальных только идентификаторы, в топ они не идут.
+const HISTORY_MODELS: u32 = 5000;
 
 // ------------------------------------------------------------- модель
 
@@ -109,6 +118,67 @@ pub struct PlaylistCard {
     pub owner_name: Option<String>,
     pub track_count: Option<u32>,
     pub cover_uri: Option<String>,
+    /// Короткое описание для карточки: есть у плейлистов «Собираем для
+    /// вас» («Звучит по-вашему каждый день»).
+    pub note: Option<String>,
+}
+
+/// Как исполнитель сдвинулся в топе месяца.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trend {
+    Up,
+    Down,
+    Same,
+    New,
+}
+
+impl Trend {
+    fn from_value(value: Option<&Value>) -> Option<Self> {
+        match value.and_then(Value::as_str)? {
+            "up" => Some(Self::Up),
+            "down" => Some(Self::Down),
+            "same" => Some(Self::Same),
+            "new" => Some(Self::New),
+            _ => None,
+        }
+    }
+}
+
+/// Исполнитель из топа: место, сдвиг и сколько его слушали.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopArtist {
+    pub card: ArtistCard,
+    pub position: Option<u32>,
+    pub trend: Option<Trend>,
+    pub listened: Duration,
+    /// Сколько раз слушали: есть только в топе по истории.
+    pub plays: Option<u32>,
+}
+
+/// Полный топ исполнителей по истории прослушивания. Топ месяца у сервиса —
+/// не больше пяти, история — все прослушанные за последние дни.
+#[derive(Debug, Clone, Default)]
+pub struct ListeningTop {
+    /// За сколько дней история.
+    pub days: usize,
+    pub artists: Vec<TopArtist>,
+}
+
+/// Раздел «Исполнители»: топ месяца, встреченные в «Моей волне» и
+/// понравившиеся (недавние первыми). Топ и «Моя волна» — дополнения: если
+/// их не прислали, раздел всё равно показываем.
+#[derive(Debug, Clone, Default)]
+pub struct MyArtists {
+    pub top: Vec<TopArtist>,
+    pub met: Vec<ArtistCard>,
+    pub liked: Vec<ArtistCard>,
+}
+
+/// Раздел «Альбомы»: новые релизы для пользователя и понравившиеся.
+#[derive(Debug, Clone, Default)]
+pub struct MyAlbums {
+    pub releases: Vec<AlbumCard>,
+    pub liked: Vec<AlbumCard>,
 }
 
 /// Альбом с треками (диски склеены по порядку).
@@ -202,11 +272,14 @@ pub struct SearchResult {
     pub corrected: Option<String>,
 }
 
-/// Плейлисты пользователя: свои и понравившиеся. `partial` — один из двух
-/// списков получить не удалось.
-#[derive(Debug, Clone)]
+/// Раздел «Плейлисты»: собранные сервисом для пользователя («Плейлист
+/// дня», «Дежавю», «Премьера»), свои и понравившиеся. `partial` — свои или
+/// понравившиеся получить не удалось.
+#[derive(Debug, Clone, Default)]
 pub struct MyPlaylists {
-    pub playlists: Vec<PlaylistCard>,
+    pub personal: Vec<PlaylistCard>,
+    pub own: Vec<PlaylistCard>,
+    pub liked: Vec<PlaylistCard>,
     pub partial: Option<String>,
 }
 
@@ -239,6 +312,16 @@ enum Request {
     LikedPlaylists(u64),
     LikedAlbums(u64),
     LikedArtists(u64),
+    /// Топ исполнителей месяца.
+    TopArtists,
+    /// «Встречали в Моей волне».
+    MetArtists,
+    /// Новые релизы для пользователя.
+    NewReleases,
+    /// «Собираем для вас»: плейлист дня, «Дежавю», «Премьера».
+    PersonalPlaylists,
+    /// История прослушивания по дням.
+    History,
 }
 
 /// Кто отвечает: каталог (работает и без токена) или коллекция
@@ -255,7 +338,8 @@ impl Request {
             Self::MyPlaylists(_)
             | Self::LikedPlaylists(_)
             | Self::LikedAlbums(_)
-            | Self::LikedArtists(_) => Scope::Collection,
+            | Self::LikedArtists(_)
+            | Self::History => Scope::Collection,
             _ => Scope::Catalog,
         }
     }
@@ -300,16 +384,46 @@ impl Request {
             ),
             Self::LikedArtists(uid) => (
                 format!("/users/{uid}/likes/artists"),
-                vec![("with-timestamps", "false".to_owned())],
+                vec![("with-timestamps", "true".to_owned())],
+            ),
+            Self::TopArtists => ("/personal/top/artists/month".to_owned(), Vec::new()),
+            Self::MetArtists => (
+                "/landing-blocks/artists".to_owned(),
+                vec![("count", MET_ARTISTS.to_string())],
+            ),
+            Self::NewReleases => (
+                "/landing-blocks/new-releases".to_owned(),
+                vec![("count", NEW_RELEASES.to_string())],
+            ),
+            Self::PersonalPlaylists => (
+                "/landing-blocks/personal-playlists".to_owned(),
+                vec![("count", PERSONAL_PLAYLISTS.to_string())],
+            ),
+            Self::History => (
+                "/music-history".to_owned(),
+                vec![("fullModelsCount", HISTORY_MODELS.to_string())],
             ),
         }
+    }
+
+    /// Новые адреса (`personal`, `landing-blocks`) отвечают объектом без
+    /// обёртки `{"result":…}`.
+    fn bare(&self) -> bool {
+        matches!(
+            self,
+            Self::TopArtists | Self::MetArtists | Self::NewReleases | Self::PersonalPlaylists
+        )
     }
 }
 
 /// Отправляет запрос и возвращает `result` ответа.
 async fn fetch(http: &reqwest::Client, token: &str, request: &Request) -> Result<Value, ApiError> {
     let (status, body) = send(http, token, request).await?;
-    envelope(request.scope(), status, &body)
+    if request.bare() {
+        bare_envelope(status, &body)
+    } else {
+        envelope(request.scope(), status, &body)
+    }
 }
 
 async fn send(
@@ -351,6 +465,25 @@ fn envelope(scope: Scope, status: StatusCode, body: &str) -> Result<Value, ApiEr
         .get_mut("result")
         .map(Value::take)
         .ok_or(ApiError::InvalidResponse)
+}
+
+/// Ответ без обёртки: сам объект. Обёртку `result`, если она всё же есть,
+/// снимаем. Коды — как у каталога.
+fn bare_envelope(status: StatusCode, body: &str) -> Result<Value, ApiError> {
+    if status == StatusCode::NOT_FOUND || status == StatusCode::GONE {
+        return Err(ApiError::NotFound);
+    }
+    check_status(status)?;
+    let mut value: Value = serde_json::from_str(body).map_err(|_| ApiError::InvalidResponse)?;
+    if !value.is_object() {
+        return Err(ApiError::InvalidResponse);
+    }
+    Ok(
+        match value.get_mut("result").filter(|result| result.is_object()) {
+            Some(result) => result.take(),
+            None => value,
+        },
+    )
 }
 
 // ------------------------------------------------------------- методы
@@ -485,20 +618,22 @@ async fn post_batch(
     tracks::post_tracks(http, token, ids).await
 }
 
-/// Свои плейлисты пользователя и понравившиеся чужие. Не пришёл один из
-/// списков — второй всё равно показываем.
+/// Раздел «Плейлисты». Свои и понравившиеся — основное: не пришли оба —
+/// ошибка, не пришёл один — второй всё равно показываем. «Собираем для
+/// вас» — дополнение, его ошибка раздел не портит.
 pub async fn fetch_my_playlists(
     http: &reqwest::Client,
     token: &str,
     uid: u64,
 ) -> Result<MyPlaylists, ApiError> {
     let (own_request, liked_request) = (Request::MyPlaylists(uid), Request::LikedPlaylists(uid));
-    let (own, liked) = tokio::join!(
+    let (own, liked, personal) = tokio::join!(
         fetch(http, token, &own_request),
         fetch(http, token, &liked_request),
+        fetch(http, token, &Request::PersonalPlaylists),
     );
     let own = own.and_then(|value| list_of(&value, "playlist", playlist_card));
-    let liked = liked.and_then(|value| list_of(&value, "playlist", playlist_card));
+    let liked = liked.and_then(|value| recent_first(&value, "playlist", playlist_card));
     match (own, liked) {
         (Err(err), Err(_)) => Err(err),
         (Err(ApiError::Unauthorized), _) | (_, Err(ApiError::Unauthorized)) => {
@@ -512,42 +647,81 @@ pub async fn fetch_my_playlists(
                 )),
                 _ => None,
             };
-            let mut playlists: Vec<PlaylistCard> = own
+            let own: Vec<PlaylistCard> = own
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|card| card.kind != LIKED_PLAYLIST_KIND)
                 .collect();
-            for card in liked.unwrap_or_default() {
-                let duplicate = playlists
-                    .iter()
-                    .any(|own| own.owner == card.owner && own.kind == card.kind);
-                if !duplicate {
-                    playlists.push(card);
-                }
-            }
-            Ok(MyPlaylists { playlists, partial })
+            let liked = liked
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|card| {
+                    !own.iter()
+                        .any(|mine| mine.owner == card.owner && mine.kind == card.kind)
+                })
+                .collect();
+            Ok(MyPlaylists {
+                personal: personal
+                    .map(|value| personal_playlists(&value))
+                    .unwrap_or_default(),
+                own,
+                liked,
+                partial,
+            })
         }
     }
 }
 
-/// Понравившиеся альбомы.
-pub async fn fetch_liked_albums(
+/// Раздел «Альбомы»: понравившиеся (недавние первыми) и новые релизы.
+/// Релизы — дополнение: их ошибка раздел не портит.
+pub async fn fetch_my_albums(
     http: &reqwest::Client,
     token: &str,
     uid: u64,
-) -> Result<Vec<AlbumCard>, ApiError> {
-    let result = fetch(http, token, &Request::LikedAlbums(uid)).await?;
-    list_of(&result, "album", album_card)
+) -> Result<MyAlbums, ApiError> {
+    let liked_request = Request::LikedAlbums(uid);
+    let (liked, releases) = tokio::join!(
+        fetch(http, token, &liked_request),
+        fetch(http, token, &Request::NewReleases),
+    );
+    Ok(MyAlbums {
+        liked: recent_first(&liked?, "album", album_card)?,
+        releases: releases
+            .map(|value| new_releases(&value))
+            .unwrap_or_default(),
+    })
 }
 
-/// Понравившиеся исполнители.
-pub async fn fetch_liked_artists(
+/// Раздел «Исполнители»: понравившиеся (недавние первыми), топ месяца и
+/// «Встречали в Моей волне». Топ и волна — дополнения.
+pub async fn fetch_my_artists(
     http: &reqwest::Client,
     token: &str,
     uid: u64,
-) -> Result<Vec<ArtistCard>, ApiError> {
-    let result = fetch(http, token, &Request::LikedArtists(uid)).await?;
-    list_of(&result, "artist", artist_card)
+) -> Result<MyArtists, ApiError> {
+    let liked_request = Request::LikedArtists(uid);
+    let (liked, top, met) = tokio::join!(
+        fetch(http, token, &liked_request),
+        fetch(http, token, &Request::TopArtists),
+        fetch(http, token, &Request::MetArtists),
+    );
+    Ok(MyArtists {
+        liked: recent_first(&liked?, "artist", artist_card)?,
+        top: top.map(|value| top_artists(&value)).unwrap_or_default(),
+        met: met.map(|value| met_artists(&value)).unwrap_or_default(),
+    })
+}
+
+/// Полный топ исполнителей по истории прослушивания.
+pub async fn fetch_listening_top(
+    http: &reqwest::Client,
+    token: &str,
+) -> Result<ListeningTop, ApiError> {
+    let value = fetch(http, token, &Request::History).await?;
+    if !value.is_object() {
+        return Err(ApiError::InvalidResponse);
+    }
+    Ok(listening_top(&value))
 }
 
 /// Идентификатор для адреса: только число. Иначе — «не найдено», запроса
@@ -612,6 +786,174 @@ fn list_of<T>(
             parse(inner.unwrap_or(item))
         })
         .collect())
+}
+
+/// Список коллекции с отметкой `timestamp` (когда отметили): недавние
+/// первыми. Без отметки — в конце, в порядке сервиса. Элемент — сам объект
+/// или обёртка, как у [`list_of`].
+fn recent_first<T>(
+    value: &Value,
+    wrapper: &str,
+    parse: impl Fn(&Value) -> Option<T>,
+) -> Result<Vec<T>, ApiError> {
+    let items = value.as_array().ok_or(ApiError::InvalidResponse)?;
+    let mut dated: Vec<(Option<&str>, T)> = items
+        .iter()
+        .filter_map(|item| {
+            let inner = item.get(wrapper).filter(|inner| inner.is_object());
+            let stamp = item.get("timestamp").and_then(Value::as_str);
+            parse(inner.unwrap_or(item)).map(|parsed| (stamp, parsed))
+        })
+        .collect();
+    // Отметки в одном формате ISO 8601 с одним поясом, поэтому сравниваются
+    // как строки. Сортировка устойчивая: равные остаются в порядке сервиса.
+    dated.sort_by(|(a, _), (b, _)| b.cmp(a));
+    Ok(dated.into_iter().map(|(_, item)| item).collect())
+}
+
+/// Массив `key` из объекта ответа; не массив — пусто.
+fn items_of<'a>(value: &'a Value, key: &str) -> &'a [Value] {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+}
+
+/// Топ месяца: `{"artists":[{"artist":…,"listenTimeSeconds":…,"top":…}]}`.
+fn top_artists(value: &Value) -> Vec<TopArtist> {
+    items_of(value, "artists")
+        .iter()
+        .filter_map(|item| {
+            let top = item.get("top");
+            Some(TopArtist {
+                card: artist_card(item.get("artist")?)?,
+                position: count_of(top.and_then(|top| top.get("position"))),
+                trend: Trend::from_value(top.and_then(|top| top.get("progress"))),
+                listened: Duration::from_secs(
+                    item.get("listenTimeSeconds")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                ),
+                plays: None,
+            })
+        })
+        .collect()
+}
+
+/// Полный топ по истории: `{"historyTabs":[{"date","items":[{"context",
+/// "tracks":[{"data":{"fullModel":трек}}]}]}]}`. Время — сумма длительностей
+/// прослушанных треков: история не говорит, дослушан ли трек. Места — по
+/// времени, при равенстве — по числу прослушиваний, дальше — кого история
+/// показала раньше. «Сборники» (`various`) в топ не идут.
+fn listening_top(value: &Value) -> ListeningTop {
+    struct Tally {
+        card: ArtistCard,
+        plays: u32,
+        millis: u64,
+        order: usize,
+    }
+    let tabs = items_of(value, "historyTabs");
+    let mut tally: HashMap<String, Tally> = HashMap::new();
+    let models = tabs
+        .iter()
+        .flat_map(|tab| items_of(tab, "items"))
+        .flat_map(|item| items_of(item, "tracks"))
+        .filter_map(|track| track.get("data")?.get("fullModel"));
+    for model in models {
+        let millis = model.get("durationMs").and_then(Value::as_u64).unwrap_or(0);
+        let mut counted: Vec<String> = Vec::new();
+        let artists = items_of(model, "artists")
+            .iter()
+            .filter(|artist| artist.get("various").and_then(Value::as_bool) != Some(true))
+            .filter_map(artist_card);
+        for card in artists {
+            // Один исполнитель дважды в треке — одно прослушивание.
+            if counted.contains(&card.id) {
+                continue;
+            }
+            counted.push(card.id.clone());
+            let order = tally.len();
+            let entry = tally.entry(card.id.clone()).or_insert(Tally {
+                card,
+                plays: 0,
+                millis: 0,
+                order,
+            });
+            entry.plays = entry.plays.saturating_add(1);
+            entry.millis = entry.millis.saturating_add(millis);
+        }
+    }
+    let mut ranked: Vec<Tally> = tally.into_values().collect();
+    ranked.sort_by(|a, b| {
+        b.millis
+            .cmp(&a.millis)
+            .then(b.plays.cmp(&a.plays))
+            .then(a.order.cmp(&b.order))
+    });
+    ListeningTop {
+        days: tabs.len(),
+        artists: ranked
+            .into_iter()
+            .zip(1u32..)
+            .map(|(tally, place)| TopArtist {
+                card: tally.card,
+                position: Some(place),
+                trend: None,
+                listened: Duration::from_millis(tally.millis),
+                plays: Some(tally.plays),
+            })
+            .collect(),
+    }
+}
+
+/// «Встречали в Моей волне»: `{"items":[{"data":{"artist":…}}]}`.
+fn met_artists(value: &Value) -> Vec<ArtistCard> {
+    items_of(value, "items")
+        .iter()
+        .filter_map(|item| artist_card(item.get("data")?.get("artist")?))
+        .collect()
+}
+
+/// Новые релизы: `{"newReleases":[{"album":…,"artists":[…],"releaseDate":…}]}`.
+/// У альбома здесь `albumType` и `cover.uri`, исполнители — рядом с ним.
+fn new_releases(value: &Value) -> Vec<AlbumCard> {
+    items_of(value, "newReleases")
+        .iter()
+        .filter_map(|item| {
+            let album = item.get("album")?;
+            let year = item
+                .get("releaseDate")
+                .and_then(Value::as_str)
+                .and_then(|date| date.get(..4))
+                .and_then(|year| year.parse::<u32>().ok());
+            Some(AlbumCard {
+                id: album.get("id").and_then(numeric_id)?,
+                title: text_of(album, "title")?,
+                version: text_of(album, "version"),
+                year,
+                kind: AlbumKind::from_value(album.get("albumType").or_else(|| album.get("type"))),
+                artists: parse_artist_refs(item.get("artists").or_else(|| album.get("artists"))),
+                cover_uri: cover_of(album.get("cover").and_then(|cover| cover.get("uri")))
+                    .or_else(|| cover_of(album.get("coverUri"))),
+                track_count: None,
+                available: true,
+            })
+        })
+        .collect()
+}
+
+/// «Собираем для вас»: `{"items":[{"data":{"playlist":…,"description":…}}]}`.
+fn personal_playlists(value: &Value) -> Vec<PlaylistCard> {
+    items_of(value, "items")
+        .iter()
+        .filter_map(|item| {
+            let data = item.get("data")?;
+            let mut card = playlist_card(data.get("playlist")?)?;
+            card.note = text_of(data, "description");
+            Some(card)
+        })
+        .collect()
 }
 
 fn text_of(value: &Value, key: &str) -> Option<String> {
@@ -690,6 +1032,7 @@ fn playlist_card(value: &Value) -> Option<PlaylistCard> {
             .and_then(|owner| text_of(owner, "name").or_else(|| text_of(owner, "login"))),
         track_count: count_of(value.get("trackCount")),
         cover_uri,
+        note: None,
     })
 }
 
@@ -854,7 +1197,171 @@ mod fixtures {
             Request::LikedPlaylists(_) => liked_playlists(empty),
             Request::LikedAlbums(_) => liked_albums(empty, many),
             Request::LikedArtists(_) => liked_artists(empty),
+            // Новые адреса отвечают без обёртки `result`.
+            Request::TopArtists => return Some(bare(top_artists(empty))),
+            Request::MetArtists => return Some(bare(met_artists(empty))),
+            Request::NewReleases => return Some(bare(new_releases(empty))),
+            Request::PersonalPlaylists => return Some(bare(personal_playlists(empty))),
+            Request::History => history(empty, many),
         }))
+    }
+
+    fn bare(value: Value) -> (StatusCode, String) {
+        (StatusCode::OK, value.to_string())
+    }
+
+    fn top_artists(empty: bool) -> Value {
+        let trends = ["same", "up", "down", "new"];
+        let artists: Vec<Value> = if empty {
+            Vec::new()
+        } else {
+            ARTISTS
+                .iter()
+                .zip(1u64..)
+                .zip(trends)
+                .map(|(((id, name), place), trend)| {
+                    json!({
+                        "artist": artist_value(id, name),
+                        "listenTimeSeconds": 13_110 / place,
+                        "top": { "position": place, "progress": trend },
+                    })
+                })
+                .collect()
+        };
+        json!({ "artists": artists })
+    }
+
+    /// История за 10 дней: исполнители из `ARTISTS` (чем выше в списке, тем
+    /// чаще) и «из волны»; плюс трек без данных, «сборник» и исполнитель,
+    /// записанный в треке дважды. `many` — ещё 300 исполнителей.
+    fn history(empty: bool, many: bool) -> Value {
+        if empty {
+            return json!({ "historyTabs": [] });
+        }
+        let model = |id: u64, artists: Vec<Value>| {
+            json!({ "type": "track", "data": {
+                "itemId": { "trackId": id.to_string() },
+                "fullModel": {
+                    "id": id.to_string(),
+                    "title": format!("Трек {id}"),
+                    "durationMs": 200_000,
+                    "artists": artists,
+                },
+            }})
+        };
+        let mut tabs = Vec::new();
+        for day in 0..10u64 {
+            let mut tracks = Vec::new();
+            for (index, (id, name)) in (0u64..).zip(ARTISTS) {
+                for play in 0..(4 - index) {
+                    tracks.push(model(
+                        day * 100 + index * 10 + play,
+                        vec![artist_value(id, name)],
+                    ));
+                }
+            }
+            let wave = (2000 + day % 6).to_string();
+            tracks.push(model(
+                day * 100 + 90,
+                vec![artist_value(&wave, &format!("Из волны {wave}"))],
+            ));
+            tracks.push(json!({ "type": "track", "data": { "itemId": { "trackId": "1" } } }));
+            tracks.push(model(
+                day * 100 + 91,
+                vec![json!({ "id": 171, "name": "Various artists", "various": true })],
+            ));
+            if let Some((id, name)) = ARTISTS.get(1) {
+                tracks.push(model(
+                    day * 100 + 92,
+                    vec![artist_value(id, name), artist_value(id, name)],
+                ));
+            }
+            tabs.push(json!({
+                "date": format!("2026-11-{:02}", 10 - day),
+                "items": [{ "context": { "type": "wave" }, "tracks": tracks }],
+            }));
+        }
+        if many {
+            let tracks: Vec<Value> = (0..300u64)
+                .map(|n| {
+                    let id = (3000 + n).to_string();
+                    model(9000 + n, vec![artist_value(&id, &format!("Ещё {n}"))])
+                })
+                .collect();
+            tabs.push(json!({ "date": "2026-10-31", "items": [{ "tracks": tracks }] }));
+        }
+        json!({ "historyTabs": tabs })
+    }
+
+    fn met_artists(empty: bool) -> Value {
+        let items: Vec<Value> = if empty {
+            Vec::new()
+        } else {
+            (0..8u64)
+                .map(|n| {
+                    let id = (2000 + n).to_string();
+                    json!({
+                        "type": "artist_item",
+                        "data": { "artist": artist_value(&id, &format!("Из волны {n}")) },
+                    })
+                })
+                .chain([json!({ "type": "artist_item", "data": {} })])
+                .collect()
+        };
+        json!({ "items": items })
+    }
+
+    fn new_releases(empty: bool) -> Value {
+        let items: Vec<Value> = if empty {
+            Vec::new()
+        } else {
+            (0..12u64)
+                .map(|n| {
+                    let id = 40_000 + n;
+                    json!({
+                        "album": {
+                            "id": id,
+                            "title": format!("Новинка {n}"),
+                            "albumType": if n % 2 == 0 { "single" } else { "album" },
+                            "cover": { "uri": format!("avatars.example/r{id}/%%") },
+                        },
+                        "artists": [artist_ref(n)],
+                        "releaseDate": "2026-10-29T21:00:00+00:00",
+                    })
+                })
+                .collect()
+        };
+        json!({ "newReleases": items })
+    }
+
+    fn personal_playlists(empty: bool) -> Value {
+        let items: Vec<Value> = if empty {
+            Vec::new()
+        } else {
+            [
+                ("Плейлист дня", "Звучит по-вашему каждый день"),
+                ("Дежавю", "Знакомит с тем, что вы ещё не слушали"),
+                ("Премьера", "Открывает вам главные новинки"),
+            ]
+            .iter()
+            .zip(0u64..)
+            .map(|((title, note), n)| {
+                json!({
+                    "type": "personal_playlist_item",
+                    "data": {
+                        "playlist": {
+                            "uid": 503_646_255,
+                            "kind": 152_216_765 + n,
+                            "title": title,
+                            "cover": { "uri": format!("avatars.example/pp{n}/%%") },
+                        },
+                        "description": note,
+                    },
+                })
+            })
+            .collect()
+        };
+        json!({ "items": items })
     }
 
     /// Ответ `POST /tracks` для треков без данных в плейлисте.
@@ -1135,10 +1642,20 @@ mod fixtures {
         if empty {
             return json!([]);
         }
+        // Недавно отмеченный не первый в ответе: окно ставит его первым.
+        let stamps = [
+            "2024-02-19T08:28:09+00:00",
+            "2026-11-05T14:58:52+00:00",
+            "2025-06-01T10:00:00+00:00",
+            "2024-04-13T11:46:38+00:00",
+        ];
         Value::Array(
             ARTISTS
                 .iter()
-                .map(|(id, name)| artist_value(id, name))
+                .zip(stamps)
+                .map(|((id, name), stamp)| {
+                    json!({ "timestamp": stamp, "artist": artist_value(id, name) })
+                })
                 .collect(),
         )
     }
@@ -1358,6 +1875,140 @@ mod tests {
         assert_eq!(ids, ["5", "6", "7"]);
         assert!(matches!(
             list_of(&serde_json::json!({}), "album", album_card),
+            Err(ApiError::InvalidResponse)
+        ));
+    }
+
+    fn bare_sample(request: &Request) -> Value {
+        let (status, body) = fixtures::reply("sample", request).unwrap();
+        bare_envelope(status, &body).unwrap()
+    }
+
+    #[test]
+    fn top_artists_carry_place_trend_and_time() {
+        let top = top_artists(&bare_sample(&Request::TopArtists));
+        assert_eq!(top.len(), 4);
+        assert_eq!(top[0].card.name, "Король и Шут");
+        assert_eq!(top[0].position, Some(1));
+        assert_eq!(top[0].trend, Some(Trend::Same));
+        assert_eq!(top[1].trend, Some(Trend::Up));
+        assert_eq!(top[3].trend, Some(Trend::New));
+        assert_eq!(top[0].listened, Duration::from_secs(13_110));
+        // Ответ, как у сервиса: числовые id, без обёртки `result`.
+        let live = serde_json::json!({"artists":[
+            {"artist":{"id":36825,"name":"Radiohead","cover":{"uri":"avatars.example/x/%%"}},
+             "listenTimeSeconds":13110,"top":{"position":1,"progress":"same"}},
+            {"artist":{"name":"без id"},"listenTimeSeconds":5},
+            {"artist":{"id":9,"name":"Без места"},"top":{"progress":"???"}}]});
+        let top = top_artists(&live);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].card.id, "36825");
+        assert_eq!(top[1].position, None);
+        assert_eq!(top[1].trend, None);
+        assert_eq!(top[1].listened, Duration::ZERO);
+        assert!(top_artists(&serde_json::json!({"artists":"нет"})).is_empty());
+    }
+
+    #[test]
+    fn listening_top_counts_history() {
+        let (status, body) = fixtures::reply("sample", &Request::History).unwrap();
+        let top = listening_top(&envelope(Scope::Collection, status, &body).unwrap());
+        assert_eq!(top.days, 10);
+        // Четыре исполнителя из `ARTISTS` и шесть «из волны»; «сборник» и
+        // трек без данных не считаются.
+        assert_eq!(top.artists.len(), 10);
+        let first = &top.artists[0];
+        assert_eq!(first.card.name, "Король и Шут");
+        assert_eq!(first.position, Some(1));
+        assert_eq!(first.plays, Some(40));
+        assert_eq!(first.listened, Duration::from_secs(40 * 200));
+        // Tame Impala: 3 трека в день и трек, где он записан дважды, — 40,
+        // как у первого; при равенстве выше тот, кто в истории раньше.
+        assert_eq!(top.artists[1].card.name, "Tame Impala");
+        assert_eq!(top.artists[1].plays, Some(40));
+        assert_eq!(top.artists[2].plays, Some(20));
+        assert!(top.artists.iter().all(|artist| artist.card.id != "171"));
+        let places: Vec<_> = top.artists.iter().filter_map(|a| a.position).collect();
+        assert_eq!(places, (1..=10).collect::<Vec<u32>>());
+
+        let empty = fixtures::reply("empty", &Request::History).unwrap();
+        let empty = listening_top(&envelope(Scope::Collection, empty.0, &empty.1).unwrap());
+        assert_eq!((empty.days, empty.artists.len()), (0, 0));
+        // Мусор вместо дней и треков — пустой топ, не паника.
+        let junk = serde_json::json!({"historyTabs":[1,{"items":"x"},{"items":[{"tracks":[
+            {"data":{"fullModel":{"durationMs":-5,"artists":[{"id":"x"},{"id":7,"name":"Ок"}]}}},
+            {"data":{"fullModel":{"durationMs":18446744073709551615u64,"artists":[{"id":7,"name":"Ок"}]}}}
+        ]}]}]});
+        let junk = listening_top(&junk);
+        assert_eq!(junk.days, 3);
+        assert_eq!(junk.artists.len(), 1);
+        assert_eq!(junk.artists[0].plays, Some(2));
+    }
+
+    #[test]
+    fn landing_blocks_are_parsed() {
+        let met = met_artists(&bare_sample(&Request::MetArtists));
+        assert_eq!(met.len(), 8, "элемент без исполнителя пропущен");
+        let releases = new_releases(&bare_sample(&Request::NewReleases));
+        assert_eq!(releases.len(), 12);
+        assert_eq!(releases[0].kind, AlbumKind::Single);
+        assert_eq!(releases[1].kind, AlbumKind::Album);
+        assert_eq!(releases[0].year, Some(2026));
+        assert_eq!(
+            releases[0].cover_uri.as_deref(),
+            Some("avatars.example/r40000/%%")
+        );
+        assert_eq!(releases[0].artists[0].name, "Король и Шут");
+        let personal = personal_playlists(&bare_sample(&Request::PersonalPlaylists));
+        assert_eq!(personal.len(), 3);
+        assert_eq!(personal[0].title, "Плейлист дня");
+        assert_eq!(
+            personal[0].note.as_deref(),
+            Some("Звучит по-вашему каждый день")
+        );
+        assert_eq!(personal[0].owner, "503646255");
+    }
+
+    #[test]
+    fn bare_answers_accept_both_shapes() {
+        let plain = bare_envelope(StatusCode::OK, r#"{"items":[]}"#).unwrap();
+        assert!(plain.get("items").is_some());
+        let wrapped = bare_envelope(StatusCode::OK, r#"{"result":{"items":[1]}}"#).unwrap();
+        assert_eq!(wrapped["items"][0], 1);
+        for bad in ["[]", "<html>", "\"text\""] {
+            assert!(matches!(
+                bare_envelope(StatusCode::OK, bad),
+                Err(ApiError::InvalidResponse)
+            ));
+        }
+        assert!(matches!(
+            bare_envelope(StatusCode::NOT_FOUND, ""),
+            Err(ApiError::NotFound)
+        ));
+        assert!(bare_envelope(StatusCode::SERVICE_UNAVAILABLE, "").is_err());
+    }
+
+    #[test]
+    fn liked_lists_put_recent_first() {
+        let liked =
+            recent_first(&sample(&Request::LikedArtists(42)), "artist", artist_card).unwrap();
+        let names: Vec<&str> = liked.iter().map(|card| card.name.as_str()).collect();
+        assert_eq!(names[0], "Tame Impala");
+        assert_eq!(names[1], "Оркестр");
+        assert_eq!(names[3], "Король и Шут");
+        // Без отметки — в конце, равные — в порядке сервиса.
+        let mixed = serde_json::json!([{"id":1,"title":"A"},
+            {"timestamp":"2025-01-01T00:00:00+00:00","album":{"id":2,"title":"B"}},
+            {"timestamp":"2025-01-01T00:00:00+00:00","album":{"id":3,"title":"C"}},
+            {"timestamp":"2026-01-01T00:00:00+00:00","album":{"id":4,"title":"D"}}]);
+        let ids: Vec<String> = recent_first(&mixed, "album", album_card)
+            .unwrap()
+            .into_iter()
+            .map(|album| album.id)
+            .collect();
+        assert_eq!(ids, ["4", "2", "3", "1"]);
+        assert!(matches!(
+            recent_first(&serde_json::json!({}), "album", album_card),
             Err(ApiError::InvalidResponse)
         ));
     }

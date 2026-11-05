@@ -32,8 +32,16 @@ pub const CATALOG_SEARCH_ID: &str = "catalog-search";
 pub enum Target {
     Album(String),
     Artist(String),
-    Playlist { owner: String, kind: String },
-    ArtistTracks { id: String, name: String },
+    Playlist {
+        owner: String,
+        kind: String,
+    },
+    ArtistTracks {
+        id: String,
+        name: String,
+    },
+    /// Полный топ исполнителей по истории прослушивания.
+    TopArtists,
 }
 
 /// Данные загружаются, пришли или не пришли.
@@ -143,6 +151,9 @@ pub enum Page {
         name: String,
         load: Load<Paged<Track>>,
     },
+    TopArtists {
+        load: Load<api::ListeningTop>,
+    },
 }
 
 /// Запись в стопке: страница, её номер и прокрутка, когда с неё ушли.
@@ -161,22 +172,67 @@ pub enum Loaded {
     Playlist(Result<api::Playlist, Failure>),
     Artist(Result<api::Artist, Failure>),
     Tracks(Result<api::Page<Track>, Failure>),
+    Top(Result<api::ListeningTop, Failure>),
 }
 
 /// Что пришло для раздела коллекции.
 #[derive(Clone)]
 pub enum Collected {
     Playlists(Result<api::MyPlaylists, Failure>),
-    Albums(Result<Vec<AlbumCard>, Failure>),
-    Artists(Result<Vec<ArtistCard>, Failure>),
+    Albums(Result<api::MyAlbums, Failure>),
+    Artists(Result<api::MyArtists, Failure>),
+}
+
+/// Вкладка списка в разделе «Плейлисты».
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlaylistTab {
+    #[default]
+    Own,
+    Liked,
 }
 
 /// Коллекция: загружается при первом открытии раздела.
 #[derive(Default)]
 pub struct Collections {
-    pub playlists: Option<Load<Arc<Vec<PlaylistCard>>>>,
-    pub albums: Option<Load<Arc<Vec<AlbumCard>>>>,
-    pub artists: Option<Load<Arc<Vec<ArtistCard>>>>,
+    pub playlists: Option<Load<Arc<api::MyPlaylists>>>,
+    pub albums: Option<Load<Arc<api::MyAlbums>>>,
+    pub artists: Option<Load<Arc<api::MyArtists>>>,
+    pub playlist_tab: PlaylistTab,
+    /// Полки, раскрытые целиком.
+    pub expanded: Vec<ShelfId>,
+}
+
+/// Полка раздела коллекции.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShelfId {
+    Top,
+    Met,
+    Releases,
+    Personal,
+}
+
+impl Collections {
+    pub fn is_expanded(&self, shelf: ShelfId) -> bool {
+        self.expanded.contains(&shelf)
+    }
+
+    /// Раскрыть полку или свернуть обратно.
+    pub fn toggle(&mut self, shelf: ShelfId) {
+        if self.is_expanded(shelf) {
+            self.expanded.retain(|open| *open != shelf);
+        } else {
+            self.expanded.push(shelf);
+        }
+    }
+
+    /// Плейлисты выбранной вкладки.
+    pub fn playlist_list(&self) -> Option<&[PlaylistCard]> {
+        let playlists = self.playlists.as_ref()?.ready()?;
+        Some(match self.playlist_tab {
+            PlaylistTab::Own => &playlists.own,
+            PlaylistTab::Liked => &playlists.liked,
+        })
+    }
 }
 
 /// Поиск по каталогу.
@@ -315,8 +371,11 @@ impl Library {
         if let Some(entry) = self.stack.last_mut()
             && same_target(&entry.page, &target)
         {
-            if autoplay && entry.page_ready() {
-                return Task::done(Message::PlayList(entry_key(entry)));
+            if autoplay
+                && entry.page_ready()
+                && let Some(key) = entry_key(entry)
+            {
+                return Task::done(Message::PlayList(key));
             }
             entry.autoplay |= autoplay;
             return Task::none();
@@ -341,6 +400,9 @@ impl Library {
             Target::ArtistTracks { id, name } => Page::ArtistTracks {
                 id: id.clone(),
                 name: name.clone(),
+                load: Load::Loading(now),
+            },
+            Target::TopArtists => Page::TopArtists {
                 load: Load::Loading(now),
             },
         };
@@ -428,6 +490,7 @@ impl Library {
                 Target::Artist(_) => Loaded::Artist(Err(failure)),
                 Target::Playlist { .. } => Loaded::Playlist(Err(failure)),
                 Target::ArtistTracks { .. } => Loaded::Tracks(Err(failure)),
+                Target::TopArtists => Loaded::Top(Err(failure)),
             };
             return Task::done(Message::PageLoaded(serial, page, loaded));
         };
@@ -454,6 +517,11 @@ impl Library {
                     ),
                     Target::ArtistTracks { id, .. } => Loaded::Tracks(
                         api::fetch_artist_tracks(&http, token, &id, page)
+                            .await
+                            .map_err(Failure::from),
+                    ),
+                    Target::TopArtists => Loaded::Top(
+                        api::fetch_listening_top(&http, token)
                             .await
                             .map_err(Failure::from),
                     ),
@@ -485,6 +553,7 @@ impl Library {
                 paged.next
             }
             Page::ArtistTracks { load, .. } => reload(load, now),
+            Page::TopArtists { load } => reload(load, now),
         };
         self.load_target(serial, &target, page, http)
     }
@@ -501,7 +570,8 @@ impl Library {
             Loaded::Album(Err(failure))
             | Loaded::Playlist(Err(failure))
             | Loaded::Artist(Err(failure))
-            | Loaded::Tracks(Err(failure)) => failure.kind == FailureKind::Unauthorized,
+            | Loaded::Tracks(Err(failure))
+            | Loaded::Top(Err(failure)) => failure.kind == FailureKind::Unauthorized,
             _ => false,
         };
         if unauthorized {
@@ -558,13 +628,19 @@ impl Library {
                 }
                 (load, Err(failure)) => *load = Load::Failed(failure),
             },
+            (Page::TopArtists { load }, Loaded::Top(result)) => {
+                *load = match result {
+                    Ok(top) => Load::Ready(top),
+                    Err(failure) => Load::Failed(failure),
+                };
+            }
             _ => {}
         }
         let autoplay = std::mem::take(&mut entry.autoplay) && entry.page_ready();
         let key = entry_key(entry);
         if let Some(tracks) = grown
             && let Some(queue) = &mut self.queue
-            && queue.key == key
+            && key.as_ref() == Some(&queue.key)
         {
             queue.extend(tracks, &mut self.rng);
         }
@@ -573,7 +649,7 @@ impl Library {
                 "Не удалось догрузить треки: {text}"
             )))
         });
-        if autoplay {
+        if autoplay && let Some(key) = key {
             effect = self.play_list(key, false).or(effect);
         }
         (self.more(http), effect)
@@ -618,12 +694,12 @@ impl Library {
                             .map_err(Failure::from),
                     ),
                     Section::Albums => Collected::Albums(
-                        api::fetch_liked_albums(&http, token, uid)
+                        api::fetch_my_albums(&http, token, uid)
                             .await
                             .map_err(Failure::from),
                     ),
                     _ => Collected::Artists(
-                        api::fetch_liked_artists(&http, token, uid)
+                        api::fetch_my_artists(&http, token, uid)
                             .await
                             .map_err(Failure::from),
                     ),
@@ -645,7 +721,14 @@ impl Library {
             }
             Collected::Playlists(result) => {
                 let (load, partial) = match result {
-                    Ok(found) => (Load::Ready(Arc::new(found.playlists)), found.partial),
+                    Ok(mut found) => {
+                        let partial = found.partial.take();
+                        // Своих нет, а понравившиеся есть — сразу их вкладка.
+                        if found.own.is_empty() && !found.liked.is_empty() {
+                            self.collections.playlist_tab = PlaylistTab::Liked;
+                        }
+                        (Load::Ready(Arc::new(found)), partial)
+                    }
                     Err(failure) => (Load::Failed(failure), None),
                 };
                 self.collections.playlists = Some(load);
@@ -904,6 +987,7 @@ impl Library {
                 Page::Playlist { load, .. } => load.ready().map(|playlist| playlist.tracks.clone()),
                 Page::Artist { load, .. } => load.ready().map(|artist| artist.popular.clone()),
                 Page::ArtistTracks { load, .. } => load.ready().map(|paged| paged.items.clone()),
+                Page::TopArtists { .. } => None,
             }
         };
         match key {
@@ -976,18 +1060,20 @@ impl Entry {
             Page::Playlist { load, .. } => load.ready().is_some(),
             Page::Artist { load, .. } => load.ready().is_some(),
             Page::ArtistTracks { load, .. } => load.ready().is_some(),
+            Page::TopArtists { load } => load.ready().is_some(),
         }
     }
 }
 
-/// Ключ списка треков страницы.
-pub fn entry_key(entry: &Entry) -> ListKey {
-    match entry.page {
+/// Ключ списка треков страницы. У топа исполнителей треков нет.
+pub fn entry_key(entry: &Entry) -> Option<ListKey> {
+    Some(match entry.page {
         Page::Album { .. } => ListKey::Album(entry.serial),
         Page::Playlist { .. } => ListKey::Playlist(entry.serial),
         Page::Artist { .. } => ListKey::ArtistPopular(entry.serial),
         Page::ArtistTracks { .. } => ListKey::ArtistTracks(entry.serial),
-    }
+        Page::TopArtists { .. } => return None,
+    })
 }
 
 fn entry_target(page: &Page) -> Target {
@@ -1002,6 +1088,7 @@ fn entry_target(page: &Page) -> Target {
             id: id.clone(),
             name: name.clone(),
         },
+        Page::TopArtists { .. } => Target::TopArtists,
     }
 }
 

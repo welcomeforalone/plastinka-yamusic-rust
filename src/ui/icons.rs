@@ -44,6 +44,11 @@ pub enum Icon {
     Settings,
     Shuffle,
     Spinner,
+    /// Сдвиг в топе: вверх, вниз, новый.
+    TrendDown,
+    TrendNew,
+    TrendSame,
+    TrendUp,
     Volume,
     VolumeLow,
     VolumeMute,
@@ -100,6 +105,11 @@ impl Icon {
             Self::Settings => file!("settings"),
             Self::Shuffle => file!("shuffle"),
             Self::Spinner => file!("spinner"),
+            // Свои простые фигуры: треугольники, черта и точка.
+            Self::TrendDown => include_bytes!("../../assets/icons/trend-down.svg"),
+            Self::TrendNew => include_bytes!("../../assets/icons/trend-new.svg"),
+            Self::TrendSame => include_bytes!("../../assets/icons/trend-same.svg"),
+            Self::TrendUp => include_bytes!("../../assets/icons/trend-up.svg"),
             Self::Volume => file!("volume"),
             Self::VolumeLow => file!("volume-low"),
             Self::VolumeMute => file!("volume-mute"),
