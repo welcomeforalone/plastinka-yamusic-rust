@@ -26,20 +26,24 @@ const IDLE: Duration = Duration::from_millis(20);
 const UNREADABLE: &str = "не удалось прочитать звук: формат не поддерживается или файл повреждён";
 
 /// Декодирует сеанс до его остановки. Источник звука добавляет в `mixer`
-/// сам, когда узнаёт каналы и частоту.
-pub fn run(shared: Arc<Shared>, mixer: Mixer) {
-    let with_output = decode(&shared, &mixer);
+/// сам, когда узнаёт каналы и частоту. `extension` — расширение своего
+/// файла; без него поток считается MP3.
+pub fn run(shared: Arc<Shared>, mixer: Mixer, extension: Option<String>) {
+    let with_output = decode(&shared, &mixer, extension.as_deref());
     shared.decoder_exited(with_output);
 }
 
 /// Возвращает, был ли создан источник звука.
-fn decode(shared: &Arc<Shared>, mixer: &Mixer) -> bool {
+fn decode(shared: &Arc<Shared>, mixer: &Mixer, extension: Option<&str>) -> bool {
     let Some(reader) = Reader::open(shared.buffer.clone()) else {
         return false;
     };
     let stream = MediaSourceStream::new(Box::new(reader), MediaSourceStreamOptions::default());
     let mut hint = Hint::new();
-    hint.with_extension("mp3").mime_type("audio/mpeg");
+    match extension {
+        Some(extension) => hint.with_extension(extension),
+        None => hint.with_extension("mp3").mime_type("audio/mpeg"),
+    };
     let options = FormatOptions {
         enable_gapless: false,
         ..FormatOptions::default()

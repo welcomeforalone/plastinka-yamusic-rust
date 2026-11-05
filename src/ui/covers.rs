@@ -45,7 +45,13 @@ const MAX_IN_FLIGHT: usize = 6;
 /// Больше картинка 300×300 не бывает; всё крупнее — не обложка.
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 /// Откуда можно брать обложки.
-const ALLOWED_HOSTS: [&str; 2] = ["avatars.yandex.net", "avatars.mds.yandex.net"];
+/// `t2.genius.com` — обложки из списка FckCensor (только картинки, те же
+/// ограничения размера).
+const ALLOWED_HOSTS: [&str; 3] = [
+    "avatars.yandex.net",
+    "avatars.mds.yandex.net",
+    "t2.genius.com",
+];
 
 enum Entry {
     Loading,

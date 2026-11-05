@@ -9,6 +9,7 @@
 
 mod browse;
 mod pages;
+mod plugins;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -18,7 +19,7 @@ use iced::widget::{
     Space, button, center, column, container, hover, mouse_area, row, scrollable, slider,
     text_input, toggler, tooltip,
 };
-use iced::{Alignment, Border, Color, Element, Length, Padding, Subscription, Task, mouse};
+use iced::{Alignment, Border, Color, Element, Length, Padding, Point, Subscription, Task, mouse};
 
 use super::Message as App;
 use super::Message::Library as Lib;
@@ -35,6 +36,9 @@ use super::widgets::{self, CoverArt, Kind, Size};
 use super::{Dialog, Failure, FailureKind, Moment, Prefs, Zoom};
 use crate::api::{self, AccountStatus, PlaybackPermit, SearchKind, Track};
 use crate::player::{self as audio, Command, PlayError};
+use crate::plugins::PluginSettings;
+use crate::plugins::fckcensor::{Censor, Decision};
+use crate::plugins::slopless::Slop;
 use crate::storage::config;
 use crate::storage::token::StoredToken;
 use crate::texts::{self, sentence};
@@ -42,6 +46,8 @@ use iced::animation::Animation;
 use iced::time::Instant;
 pub use pages::Target;
 use pages::{Collected, Collections, Entry, Loaded, PlaylistTab, SearchState, ShelfId};
+pub use plugins::Msg as PluginMsg;
+use plugins::{PluginIo, Replace, TrackMenu};
 
 /// Высота строки трека.
 const ROW: f32 = 56.0;
@@ -223,6 +229,8 @@ pub enum Message {
     /// Открыть или закрыть полноэкранный плеер.
     Fullscreen(bool),
     Audio(audio::Event),
+    /// Плагины: загрузка данных, меню трека, замены.
+    Plugin(plugins::Msg),
     Noop,
 }
 
@@ -320,6 +328,21 @@ pub struct Library {
     query: String,
     haystacks: Vec<String>,
     shown: Option<Vec<usize>>,
+    /// Соединение для запросов, которые окно запускает само (плагины).
+    http: Option<reqwest::Client>,
+    plugins: PluginSettings,
+    censor: Censor,
+    slop: Slop,
+    io: PluginIo,
+    /// Задачи, которые набрались за одно сообщение (поиск версии без
+    /// цензуры, «Не нравится»): уходят вместе с ответом.
+    tasks: Vec<Task<Message>>,
+    /// Где последний раз нажали мышь: там открывается меню трека.
+    pointer: Point,
+    menu: Option<TrackMenu>,
+    replace: Option<Replace>,
+    /// Трек, который включили вручную: Slopless его не пропускает.
+    chosen: Option<String>,
 }
 
 /// Анимации плеера.
@@ -374,6 +397,7 @@ impl Library {
         permit: PlaybackPermit,
         window_height: f32,
         http: Option<&reqwest::Client>,
+        plugins: &PluginSettings,
     ) -> (Self, Task<Message>) {
         // Плеер создаётся только здесь и только с пропуском подписки.
         let engine = match http {
@@ -428,9 +452,20 @@ impl Library {
             query: String::new(),
             haystacks: Vec::new(),
             shown: None,
+            http: http.cloned(),
+            plugins: PluginSettings::default(),
+            censor: Censor::default(),
+            slop: Slop::default(),
+            io: PluginIo::default(),
+            tasks: Vec::new(),
+            pointer: Point::ORIGIN,
+            menu: None,
+            replace: None,
+            chosen: None,
         };
         let task = library.load_likes(http);
-        (library, task)
+        let plugins = library.plugins_changed(plugins);
+        (library, Task::batch([task, plugins]))
     }
 
     pub fn token(&self) -> Arc<StoredToken> {
@@ -537,7 +572,8 @@ impl Library {
         if !self.fullscreen.value() {
             return None;
         }
-        self.current().and_then(|track| track.cover_uri.as_deref())
+        self.current_shown()
+            .and_then(|track| track.cover_uri.as_deref())
     }
 
     /// Нужны ли кадры визуализатору: играет звук или столбики опускаются.
@@ -650,11 +686,39 @@ impl Library {
         message: Message,
         http: Option<&reqwest::Client>,
     ) -> (Task<Message>, Option<Effect>) {
+        // Пришли новые треки — FckCensor запоминает их подмены.
+        let lists = matches!(
+            message,
+            Message::LikesLoaded(_)
+                | Message::PageLoaded(..)
+                | Message::SearchLoaded(..)
+                | Message::Plugin(
+                    PluginMsg::CensorDisk(_)
+                        | PluginMsg::CensorRefreshed(_)
+                        | PluginMsg::AlbumVolumes(..)
+                )
+        );
+        let (task, effect) = self.handle(message, http);
+        if lists {
+            self.note_all();
+        }
+        let pump = self.pump();
+        let queued = Task::batch(std::mem::take(&mut self.tasks));
+        (Task::batch([task, pump, queued]), effect)
+    }
+
+    fn handle(
+        &mut self,
+        message: Message,
+        http: Option<&reqwest::Client>,
+    ) -> (Task<Message>, Option<Effect>) {
         let effect = match message {
             Message::Nav(section) => return (self.nav(section, http), None),
             Message::Open(target) => {
                 // Из полноэкранного плеера (щелчок по исполнителю) — к
-                // странице: плеер сворачивается.
+                // странице: плеер сворачивается. Из меню трека — меню
+                // закрывается.
+                self.menu = None;
                 self.close_fullscreen();
                 return (self.open(target, false, http), None);
             }
@@ -788,7 +852,10 @@ impl Library {
                     && let Some(queue) = &mut self.queue
                 {
                     let current = queue.current;
-                    queue.shuffle(Some(current), &mut self.rng);
+                    let censor = self.plugins.fckcensor.then_some(&self.censor);
+                    queue.shuffle(Some(current), &mut self.rng, &|track| {
+                        plugins::playable(censor, track)
+                    });
                 }
                 None
             }
@@ -853,6 +920,7 @@ impl Library {
                 None
             }
             Message::Audio(event) => self.audio_event(event),
+            Message::Plugin(msg) => return self.plugin_update(msg),
             Message::Noop => None,
         };
         (Task::none(), effect)
@@ -860,19 +928,47 @@ impl Library {
 
     /// Запускает трек `index` очереди с секунды `from`.
     fn start(&mut self, index: usize, from: f32) -> Option<Effect> {
-        let queue = self.queue.as_mut()?;
-        let track = queue.get(index)?.clone();
-        let track_id = queue::sound_id(&track)?;
-        queue.current = index;
+        self.start_toward(index, from, true)
+    }
+
+    /// Запускает трек `index`. ИИ-треки (Slopless с автопропуском)
+    /// пропускаются в сторону `forward`.
+    fn start_toward(&mut self, index: usize, from: f32, forward: bool) -> Option<Effect> {
+        let mut index = index;
+        for _ in 0..plugins::MAX_AI_SKIPS {
+            let track = self.queue.as_ref()?.get(index)?.clone();
+            if !self.skip_as_ai(&track) {
+                return self.launch(index, track, from);
+            }
+            self.dislike_ai(&track);
+            index = self
+                .neighbour(index, forward)
+                .filter(|next| *next != index)?;
+        }
+        Some(Effect::Toast(
+            "Дальше в очереди только ИИ-треки: Slopless их пропускает".to_owned(),
+        ))
+    }
+
+    /// Запускает трек `track` (место `index` в очереди) с секунды `from`.
+    fn launch(&mut self, index: usize, track: Track, from: f32) -> Option<Effect> {
+        let decision = self.decide(&track);
+        if decision == Decision::Silent {
+            return None;
+        }
+        if let Some(queue) = &mut self.queue {
+            queue.current = index;
+        }
         let now = Instant::now();
+        let shown = self.shown(&track).clone();
         let changed = self
             .motion
             .cover_now
             .as_ref()
-            .is_none_or(|shown| shown.id != track.id);
+            .is_none_or(|old| old.id != shown.id || old.cover_uri != shown.cover_uri);
         if changed {
             // Обложка прежнего трека тает под новой.
-            self.motion.cover_from = self.motion.cover_now.replace(track);
+            self.motion.cover_from = self.motion.cover_now.replace(shown);
             self.motion.cover_fade = anim::entering(anim::COVER, now);
         }
         self.motion.pulse = anim::entering(anim::PANEL, now);
@@ -886,22 +982,25 @@ impl Library {
         player.sounded = false;
         player.session = player.session.wrapping_add(1);
         player.seeks = 0;
-        let command = Command::Play {
-            id: self.player.session,
-            track_id,
-            start: seconds(from),
-        };
-        match &self.engine {
-            Ok(engine) => {
-                engine.send(command);
-                None
-            }
-            Err(text) => {
-                let text = sentence(&format!("Не удалось включить звук: {text}"));
-                self.halt();
-                Some(Effect::Toast(text))
-            }
+        if let Err(text) = &self.engine {
+            let text = sentence(&format!("Не удалось включить звук: {text}"));
+            self.halt();
+            return Some(Effect::Toast(text));
         }
+        match decision {
+            Decision::Play(sound) => self.send(Command::Play {
+                id: self.player.session,
+                sound,
+                start: seconds(from),
+            }),
+            Decision::Search => {
+                // Прежний трек замолкает, пока ищем версию без цензуры.
+                self.send(Command::Stop);
+                self.search_explicit(&track);
+            }
+            Decision::Silent => {}
+        }
+        None
     }
 
     /// Трек остановлен: после конца или ошибки его надо запускать заново.
@@ -989,7 +1088,10 @@ impl Library {
             return Some(Effect::Relogin);
         }
         let index = self.queue.as_ref()?.current;
-        let title = self.current().map(Track::display_title).unwrap_or_default();
+        let title = self
+            .current_shown()
+            .map(Track::display_title)
+            .unwrap_or_default();
         // С самим треком беда — пробуем следующий, но не бесконечно.
         if error.track_specific() && self.player.skipped < MAX_SKIPS {
             let next = self.neighbour(index, true).filter(|next| *next != index);
@@ -1014,15 +1116,18 @@ impl Library {
     /// Соседний трек и его запуск.
     fn step(&mut self, from: usize, forward: bool) -> Option<Effect> {
         let next = self.neighbour(from, forward)?;
-        self.start(next, 0.0)
+        self.start_toward(next, 0.0, forward)
     }
 
     /// Соседний доступный трек очереди с учётом перемешивания и повтора.
     fn neighbour(&mut self, from: usize, forward: bool) -> Option<usize> {
         let (shuffle, wrap) = (self.player.shuffle, self.player.repeat == Repeat::All);
+        let censor = self.plugins.fckcensor.then_some(&self.censor);
         self.queue
             .as_mut()?
-            .neighbour(from, forward, shuffle, wrap, &mut self.rng)
+            .neighbour(from, forward, shuffle, wrap, &mut self.rng, &|track| {
+                plugins::playable(censor, track)
+            })
     }
 
     // ------------------------------------------------------------ вид
@@ -1104,7 +1209,7 @@ impl Library {
         if shown <= 0.0 {
             return None;
         }
-        let track = self.current();
+        let track = self.current_shown();
         let big = track.and_then(|track| covers.big(track.cover_uri.as_deref(), now));
         let small = track.map(|track| cover_art(covers, track));
 
@@ -1532,6 +1637,7 @@ impl Library {
             column![
                 theme::line("Настройки", Style::Display, theme::TEXT_PRIMARY),
                 section_block("Внешний вид", appearance(prefs)),
+                section_block("Плагины", self.plugins_block()),
                 section_block("Аккаунт", account_card.into()),
                 section_block("О программе", about_block()),
             ]
@@ -1561,7 +1667,7 @@ impl Library {
         fullscreen: bool,
     ) -> Element<'a, App> {
         let player = &self.player;
-        let track = self.current();
+        let track = self.current_shown();
         let has_track = track.is_some();
         let liked = track.is_some_and(|track| self.liked.contains(&track.id));
         let on = |message: Message| has_track.then_some(Lib(message));
@@ -1648,10 +1754,16 @@ impl Library {
             .clip(true)
             .into()
         };
-        let now_playing = row![cover, texts]
-            .spacing(12)
-            .align_y(Alignment::Center)
-            .width(Length::FillPortion(if compact { 3 } else { 1 }));
+        // Правый щелчок по названию — меню трека.
+        let now_playing = mouse_area(
+            row![cover, texts]
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .width(Length::Fill),
+        )
+        .on_right_press(Lib(Message::Plugin(PluginMsg::PlayerMenu)));
+        let now_playing =
+            container(now_playing).width(Length::FillPortion(if compact { 3 } else { 1 }));
 
         let glyph_color = if has_track {
             theme::on_accent()
@@ -1783,7 +1895,18 @@ impl Library {
         } else {
             VOLUME_WIDTH
         };
-        extras = extras.push(widgets::icon_button(Icon::Lyrics, Size::S, false, None));
+        extras = extras
+            .push(widgets::with_tooltip(
+                widgets::icon_button(
+                    Icon::More,
+                    Size::S,
+                    false,
+                    on(Message::Plugin(PluginMsg::PlayerMenu)),
+                ),
+                "Меню трека",
+                tooltip::Position::Top,
+            ))
+            .push(widgets::icon_button(Icon::Lyrics, Size::S, false, None));
         if !compact {
             extras = extras
                 .push(widgets::icon_button(Icon::Queue, Size::S, false, None))
@@ -2032,8 +2155,36 @@ fn appearance<'a>(prefs: &Prefs) -> Element<'a, App> {
     .spacing(6)
     .align_y(Alignment::Center);
 
-    let visualizer = toggler(prefs.visualizer)
-        .on_toggle(|_| App::ToggleVisualizer)
+    let visualizer = switch(prefs.visualizer, |_| App::ToggleVisualizer);
+
+    container(column![
+        setting_row(
+            "Акцент",
+            format!("{} — кнопки, выбранный трек, ползунки", current.title()),
+            swatches.into(),
+        ),
+        widgets::divider(),
+        setting_row(
+            "Масштаб",
+            "Ctrl + = и Ctrl + − меняют масштаб, Ctrl + 0 — 100 %".to_owned(),
+            zoom.into(),
+        ),
+        widgets::divider(),
+        setting_row(
+            "Визуализатор",
+            "Спектр звука под плеером".to_owned(),
+            visualizer,
+        ),
+    ])
+    .width(Length::Fill)
+    .style(|_| card_style())
+    .into()
+}
+
+/// Переключатель настройки в цветах акцента.
+fn switch<'a>(on: bool, on_toggle: impl Fn(bool) -> App + 'a) -> Element<'a, App> {
+    toggler(on)
+        .on_toggle(on_toggle)
         .size(22)
         .style(|_, status| {
             let (on, hovered) = match status {
@@ -2063,30 +2214,8 @@ fn appearance<'a>(prefs: &Prefs) -> Element<'a, App> {
                 border_radius: None,
                 padding_ratio: 0.12,
             }
-        });
-
-    container(column![
-        setting_row(
-            "Акцент",
-            format!("{} — кнопки, выбранный трек, ползунки", current.title()),
-            swatches.into(),
-        ),
-        widgets::divider(),
-        setting_row(
-            "Масштаб",
-            "Ctrl + = и Ctrl + − меняют масштаб, Ctrl + 0 — 100 %".to_owned(),
-            zoom.into(),
-        ),
-        widgets::divider(),
-        setting_row(
-            "Визуализатор",
-            "Спектр звука под плеером".to_owned(),
-            visualizer.into(),
-        ),
-    ])
-    .width(Length::Fill)
-    .style(|_| card_style())
-    .into()
+        })
+        .into()
 }
 
 /// Белая или чёрная галочка на образце акцента.

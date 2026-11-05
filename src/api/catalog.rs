@@ -1461,8 +1461,26 @@ mod fixtures {
         let (section, items, total) = match kind {
             SearchKind::Tracks => {
                 let total = if many { MANY_FOUND } else { 7 };
-                let items: Vec<Value> = (base..(base + 20).min(total))
-                    .map(|n| track(500_000 + n, "Найденный трек", 10_101))
+                // Версия без цензуры для автопоиска FckCensor
+                // (`PLASTINKA_TEST_PLUGINS`): трек «Дурак и молния» из примера.
+                let explicit = (page == 0 && text.to_lowercase().contains("молния")).then(|| {
+                    json!({
+                        "id": "600001",
+                        "title": "Дурак и молния",
+                        "contentWarning": "explicit",
+                        "available": true,
+                        "durationMs": 115_000,
+                        "coverUri": "avatars.example/abc/%%",
+                        "artists": [{ "id": 41052, "name": "Король и Шут" }],
+                        "albums": [{ "id": 10101, "title": "Камнем по голове" }],
+                    })
+                });
+                let items: Vec<Value> = explicit
+                    .into_iter()
+                    .chain(
+                        (base..(base + 20).min(total))
+                            .map(|n| track(500_000 + n, "Найденный трек", 10_101)),
+                    )
                     .chain((page == 0).then(|| json!({ "title": "без id" })))
                     .collect();
                 ("tracks", items, total)

@@ -17,8 +17,8 @@ use super::pages::{
     AlbumView, ArtistView, Entry, Load, Page, Paged, PlaylistTab, PlaylistView, ShelfId, Target,
 };
 use super::{
-    App, LIST_BOTTOM, LIST_TOP, Lib, Library, Message, OVERSCAN, PAGE_SIDE, PAGE_TOP, ROW, Section,
-    list_header, skeleton, state_block,
+    App, LIST_BOTTOM, LIST_TOP, Lib, Library, Message, OVERSCAN, PAGE_SIDE, PAGE_TOP, PluginMsg,
+    ROW, Section, list_header, skeleton, state_block,
 };
 use crate::api::{
     self, AlbumCard, AlbumKind, ArtistCard, ArtistRef, ListeningTop, PlaylistCard, SearchKind,
@@ -374,7 +374,7 @@ impl Library {
     pub fn visible_covers(&self) -> Vec<(Grade, &str)> {
         let (first, last) = self.visible_range();
         let mut uris: Vec<(Grade, &str)> = self
-            .current()
+            .current_shown()
             .and_then(|track| track.cover_uri.as_deref())
             .map(|uri| (Grade::Small, uri))
             .into_iter()
@@ -385,31 +385,31 @@ impl Library {
             match &entry.page {
                 Page::Album { load, .. } => {
                     if let Some(album) = load.ready() {
-                        uris.extend(medium(album.card.cover_uri.as_deref()));
-                        uris.extend(small(&album.tracks, first..last));
+                        uris.extend(medium(self.album_cover(&album.card)));
+                        uris.extend(self.small(&album.tracks, first..last));
                     }
                 }
                 Page::Playlist { load, .. } => {
                     if let Some(playlist) = load.ready() {
                         uris.extend(medium(playlist.card.cover_uri.as_deref()));
-                        uris.extend(small(&playlist.tracks, first..last));
+                        uris.extend(self.small(&playlist.tracks, first..last));
                     }
                 }
                 Page::Artist { load, .. } => {
                     if let Some(artist) = load.ready() {
                         uris.extend(medium(artist.card.cover_uri.as_deref()));
-                        uris.extend(small(&artist.popular, 0..POPULAR));
+                        uris.extend(self.small(&artist.popular, 0..POPULAR));
                         uris.extend(cards(first..last).filter_map(|index| {
                             artist
                                 .albums
                                 .get(index)
-                                .and_then(|album| medium(album.cover_uri.as_deref()))
+                                .and_then(|album| medium(self.album_cover(album)))
                         }));
                     }
                 }
                 Page::ArtistTracks { load, .. } => {
                     if let Some(paged) = load.ready() {
-                        uris.extend(small(&paged.items, first..last));
+                        uris.extend(self.small(&paged.items, first..last));
                     }
                 }
                 Page::TopArtists { load } => {
@@ -431,14 +431,14 @@ impl Library {
                     (first..last)
                         .filter_map(|row| self.shown_at(row))
                         .filter_map(|index| tracks.get(index))
-                        .filter_map(|track| track.cover_uri.as_deref())
+                        .filter_map(|track| self.shown(track).cover_uri.as_deref())
                         .map(|uri| (Grade::Small, uri)),
                 );
             }
             Section::Search => match self.search.tab {
                 SearchKind::Tracks => {
                     if let Some(paged) = ready_paged(self.search.tracks.as_ref()) {
-                        uris.extend(small(&paged.items, first..last));
+                        uris.extend(self.small(&paged.items, first..last));
                     }
                 }
                 SearchKind::Albums => {
@@ -447,7 +447,7 @@ impl Library {
                             paged
                                 .items
                                 .get(index)
-                                .and_then(|card| medium(card.cover_uri.as_deref()))
+                                .and_then(|card| medium(self.album_cover(card)))
                         }));
                     }
                 }
@@ -495,7 +495,7 @@ impl Library {
                                     .iter()
                                     .skip(first_card)
                                     .take(shown)
-                                    .filter_map(|card| medium(card.cover_uri.as_deref())),
+                                    .filter_map(|card| medium(self.album_cover(card))),
                             );
                         }
                     }
@@ -514,6 +514,69 @@ impl Library {
             _ => {}
         }
         uris
+    }
+
+    /// Маленькие обложки строк `range` списка `tracks`, как их показывают.
+    fn small<'a>(
+        &'a self,
+        tracks: &'a [Track],
+        range: std::ops::Range<usize>,
+    ) -> Vec<(Grade, &'a str)> {
+        range
+            .filter_map(|index| tracks.get(index))
+            .filter_map(|track| self.shown(track).cover_uri.as_deref())
+            .map(|uri| (Grade::Small, uri))
+            .collect()
+    }
+
+    /// Треки в видимых строках и в плеере.
+    pub(super) fn visible_tracks(&self) -> Vec<&Track> {
+        let (first, last) = self.visible_range();
+        let rows = last.saturating_sub(first);
+        let mut out: Vec<&Track> = self.current().into_iter().collect();
+        if let Some(entry) = self.stack.last() {
+            match &entry.page {
+                Page::Album { load, .. } => {
+                    if let Some(album) = load.ready() {
+                        out.extend(album.tracks.iter().skip(first).take(rows));
+                    }
+                }
+                Page::Playlist { load, .. } => {
+                    if let Some(playlist) = load.ready() {
+                        out.extend(playlist.tracks.iter().skip(first).take(rows));
+                    }
+                }
+                Page::Artist { load, .. } => {
+                    if let Some(artist) = load.ready() {
+                        out.extend(artist.popular.iter().take(POPULAR));
+                    }
+                }
+                Page::ArtistTracks { load, .. } => {
+                    if let Some(paged) = load.ready() {
+                        out.extend(paged.items.iter().skip(first).take(rows));
+                    }
+                }
+                Page::TopArtists { .. } => {}
+            }
+            return out;
+        }
+        match self.section {
+            Section::Liked => {
+                let tracks = self.tracks();
+                out.extend(
+                    (first..last)
+                        .filter_map(|row| self.shown_at(row))
+                        .filter_map(|index| tracks.get(index)),
+                );
+            }
+            Section::Search if self.search.tab == SearchKind::Tracks => {
+                if let Some(paged) = ready_paged(self.search.tracks.as_ref()) {
+                    out.extend(paged.items.iter().skip(first).take(rows));
+                }
+            }
+            _ => {}
+        }
+        out
     }
 
     // ---------------------------------------------------------- общий список
@@ -561,12 +624,16 @@ impl Library {
             .as_ref()
             .is_some_and(|(selected, at)| selected == key && *at == index);
         let liked = self.liked.contains(&track.id);
+        let playable = self.track_playable(track);
+        let ai = self.ai_track(track);
+        let replaced = self.replaced(track);
+        let shown = self.shown(track);
         let make = |hovered: bool| -> Element<'a, App> {
             container(track_cells(
                 key,
                 index,
                 number,
-                track,
+                shown,
                 covers,
                 Flags {
                     current,
@@ -574,6 +641,9 @@ impl Library {
                     buffering: self.player.buffering,
                     hovered,
                     liked,
+                    playable,
+                    ai,
+                    replaced,
                 },
             ))
             .height(ROW)
@@ -600,6 +670,10 @@ impl Library {
         ))
         .on_press(Lib(Message::Select(key.clone(), index)))
         .on_double_click(Lib(Message::PlayFrom(key.clone(), index)))
+        .on_right_press(Lib(Message::Plugin(PluginMsg::TrackMenu(
+            key.clone(),
+            index,
+        ))))
         .into()
     }
 
@@ -728,16 +802,16 @@ impl Library {
             caption.push_str(&format!(" · {year}"));
         }
         let header = detail_header(
-            header_cover(covers, card.cover_uri.as_deref(), &card.id, false),
+            header_cover(covers, self.album_cover(card), &card.id, false),
             caption,
-            card.display_title(),
+            self.album_title(card),
             Some(artist_links(
-                &card.artists,
+                self.album_artists(card),
                 Style::BodyStrong,
                 theme::TEXT_PRIMARY,
             )),
             list_stats(&album.tracks),
-            list_actions(&key, &album.tracks),
+            list_actions(&key, self.any_playable(&album.tracks)),
         );
         self.track_page(key, header, &album.tracks, covers, "В альбоме нет треков")
     }
@@ -771,7 +845,7 @@ impl Library {
             card.title.clone(),
             Some(byline),
             stats,
-            list_actions(&key, &playlist.tracks),
+            list_actions(&key, self.any_playable(&playlist.tracks)),
         );
         self.track_page(
             key,
@@ -849,13 +923,19 @@ impl Library {
                 }
             ));
         }
+        // Slopless: ИИ-исполнитель помечен в подписи.
+        let caption = if self.ai_artist(&card.id) {
+            "Исполнитель · ИИ по данным slopless.art".to_owned()
+        } else {
+            "Исполнитель".to_owned()
+        };
         let header = detail_header(
             header_cover(covers, card.cover_uri.as_deref(), &card.id, true),
-            "Исполнитель".to_owned(),
+            caption,
             card.name.clone(),
             None,
             stats.join(" · "),
-            list_actions(&key, &artist.popular),
+            list_actions(&key, self.any_playable(&artist.popular)),
         );
         let mut top = column![
             Space::new().height(TOP_PAD),
@@ -887,7 +967,7 @@ impl Library {
         let albums = &artist.albums;
         self.scroller(self.body(), Some(top.into()), move |row| {
             Some(cards_row(row, columns, side, albums, |album| {
-                album_card(covers, album, side)
+                album_card(self, covers, album, side)
             }))
         })
     }
@@ -916,7 +996,7 @@ impl Library {
                 theme::TEXT_SECONDARY
             ),
             Space::new().height(10),
-            list_actions(&key, &paged.items),
+            list_actions(&key, self.any_playable(&paged.items)),
         ]
         .spacing(4);
         let top = column![
@@ -1079,7 +1159,7 @@ impl Library {
                     items
                         .iter()
                         .take(shown)
-                        .filter_map(|card| medium(card.cover_uri.as_deref())),
+                        .filter_map(|card| medium(self.album_cover(card))),
                 ),
                 ShelfItems::Playlists(items) => uris.extend(
                     items
@@ -1207,7 +1287,7 @@ impl Library {
                     let items = ready_arc(self.collections.albums.as_ref())
                         .map_or(&[][..], |all| all.liked.as_slice());
                     cards_row(index, columns, side, items, |card| {
-                        album_card(covers, card, side)
+                        album_card(self, covers, card, side)
                     })
                 }
                 _ => {
@@ -1270,7 +1350,7 @@ impl Library {
                     artist_card(covers, card, side)
                 }),
                 ShelfItems::Albums(items) => cards_row(index, columns, side, items, |card| {
-                    album_card(covers, card, side)
+                    album_card(self, covers, card, side)
                 }),
                 ShelfItems::Playlists(items) => cards_row(index, columns, side, items, |card| {
                     personal_card(covers, card, side)
@@ -1369,7 +1449,7 @@ impl Library {
                 self.scroller(self.body(), note, move |row| {
                     Some(
                         paged_cards_row(row, columns, side, items, |card| {
-                            album_card(covers, card, side)
+                            album_card(self, covers, card, side)
                         })
                         .unwrap_or_else(|| self.tail_row(error, retry.clone(), turn)),
                     )
@@ -1473,15 +1553,6 @@ fn state_of<T>(load: Option<&Load<T>>) -> State<'_> {
 
 fn loading<T>(load: Option<&Load<T>>) -> bool {
     load.is_some_and(Load::is_loading)
-}
-
-/// Маленькие обложки треков `range` списка.
-fn small(tracks: &[Track], range: std::ops::Range<usize>) -> Vec<(Grade, &str)> {
-    range
-        .filter_map(|index| tracks.get(index))
-        .filter_map(|track| track.cover_uri.as_deref())
-        .map(|uri| (Grade::Small, uri))
-        .collect()
 }
 
 fn medium(uri: Option<&str>) -> Option<(Grade, &str)> {
@@ -1609,6 +1680,12 @@ struct Flags {
     buffering: bool,
     hovered: bool,
     liked: bool,
+    /// Можно включить: доступен сам или есть замена FckCensor.
+    playable: bool,
+    /// ИИ-трек по Slopless.
+    ai: bool,
+    /// Ручная замена FckCensor.
+    replaced: bool,
 }
 
 fn track_cells<'a>(
@@ -1619,7 +1696,7 @@ fn track_cells<'a>(
     covers: &'a Covers,
     flags: Flags,
 ) -> Element<'a, App> {
-    let available = track.available;
+    let available = flags.playable;
     let (title_color, other_color) = match (available, flags.current) {
         (false, _) => (theme::TEXT_DISABLED, theme::TEXT_DISABLED),
         (true, true) => (theme::accent(), theme::TEXT_SECONDARY),
@@ -1644,8 +1721,25 @@ fn track_cells<'a>(
     } else {
         widgets::block(40, 40, theme::SURFACE_3, widgets::RADIUS_S)
     };
+    // Метки плагинов — перед названием: длинное название их не вытеснит.
+    let mut name = row![].spacing(6).align_y(Alignment::Center);
+    if flags.ai {
+        name = name.push(widgets::with_tooltip(
+            super::plugins::tag("ИИ", theme::ERROR),
+            "ИИ-трек по данным slopless.art",
+            tooltip::Position::Top,
+        ));
+    }
+    if flags.replaced {
+        name = name.push(widgets::with_tooltip(
+            super::plugins::tag("Замена", theme::accent()),
+            "Звук заменён (FckCensor)",
+            tooltip::Position::Top,
+        ));
+    }
+    let name = name.push(theme::line(track.display_title(), Style::Body, title_color));
     let title = column![
-        theme::line(track.display_title(), Style::Body, title_color),
+        name,
         artist_links(&track.artists, Style::Secondary, other_color),
     ]
     .spacing(2);
@@ -1729,8 +1823,7 @@ fn list_stats(tracks: &[Track]) -> String {
 }
 
 /// «Слушать» и «Перемешать». Нет доступных треков — кнопки недоступны.
-fn list_actions<'a>(key: &ListKey, tracks: &[Track]) -> Element<'a, App> {
-    let playable = tracks.iter().any(|track| track.available);
+fn list_actions<'a>(key: &ListKey, playable: bool) -> Element<'a, App> {
     row![
         widgets::action(
             Kind::Primary,
@@ -1909,7 +2002,13 @@ fn card<'a>(
         .into()
 }
 
-fn album_card<'a>(covers: &'a Covers, album: &'a AlbumCard, side: f32) -> Element<'a, App> {
+fn album_card<'a>(
+    library: &Library,
+    covers: &'a Covers,
+    album: &AlbumCard,
+    side: f32,
+) -> Element<'a, App> {
+    let artists = library.album_artists(album);
     let mut parts = Vec::new();
     if album.kind != AlbumKind::Album {
         parts.push(album.kind.title().to_owned());
@@ -1917,17 +2016,17 @@ fn album_card<'a>(covers: &'a Covers, album: &'a AlbumCard, side: f32) -> Elemen
     if let Some(year) = album.year {
         parts.push(year.to_string());
     }
-    if !album.artists.is_empty() {
-        parts.push(api::artists_text(&album.artists));
+    if !artists.is_empty() {
+        parts.push(api::artists_text(artists));
     }
     card(
         widgets::cover(
-            art(covers, Grade::Medium, album.cover_uri.as_deref(), &album.id),
+            art(covers, Grade::Medium, library.album_cover(album), &album.id),
             side,
             12.0,
         ),
         side,
-        album.display_title(),
+        library.album_title(album),
         caption(parts.join(" · ")),
         Target::Album(album.id.clone()),
     )

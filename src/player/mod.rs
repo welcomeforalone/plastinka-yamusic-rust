@@ -12,9 +12,11 @@ mod decode;
 mod download;
 #[cfg(debug_assertions)]
 mod fake;
+mod local;
 mod output;
 
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
@@ -32,14 +34,23 @@ pub use output::{TAP_LEN, Tap};
 /// Как часто поток управления сообщает позицию.
 const TICK: Duration = Duration::from_millis(200);
 
+/// Откуда звук: поток трека Яндекса или файл, который выбрал сам
+/// пользователь (замена в плагине FckCensor). Других источников нет
+/// (правило 7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sound {
+    Track(String),
+    File(PathBuf),
+}
+
 /// Команды окна.
 #[derive(Debug, Clone)]
 pub enum Command {
-    /// Играть трек с позиции `start`. `id` окно выбирает само и узнаёт по
-    /// нему свои события.
+    /// Играть с позиции `start`. `id` окно выбирает само и узнаёт по нему
+    /// свои события.
     Play {
         id: u64,
-        track_id: String,
+        sound: Sound,
         start: Duration,
     },
     Pause,
@@ -309,11 +320,7 @@ impl Control {
 
     fn handle(&mut self, command: Command) {
         match command {
-            Command::Play {
-                id,
-                track_id,
-                start,
-            } => self.play(id, track_id, start),
+            Command::Play { id, sound, start } => self.play(id, sound, start),
             Command::Pause => self.with_session(|shared| shared.set_paused(true)),
             Command::Resume => self.with_session(|shared| shared.set_paused(false)),
             Command::Seek(to) => {
@@ -364,7 +371,7 @@ impl Control {
         Ok(mixer)
     }
 
-    fn play(&mut self, id: u64, track_id: String, start: Duration) {
+    fn play(&mut self, id: u64, sound: Sound, start: Duration) {
         if let Some(session) = self.session.take() {
             session.stop();
         }
@@ -380,27 +387,24 @@ impl Control {
             start,
         );
 
-        let (http, token) = (self.api_http.clone(), self.token.clone());
-        let relink: download::Relink = Box::new(move || {
-            let (http, token, track_id) = (http.clone(), token.clone(), track_id.clone());
-            Box::pin(async move {
-                api::fetch_stream_source(&http, &token.access_token, &track_id).await
-            })
-        });
-        let (buffer, audio_http, quality) = (
-            shared.buffer.clone(),
-            self.audio_http.clone(),
-            shared.clone(),
-        );
-        let on_link = move |source: &api::StreamSource| quality.set_kbps(source.kbps());
-        let download = self
-            .runtime
-            .spawn(download::run(buffer, audio_http, relink, on_link));
+        let (download, extension) = match sound {
+            Sound::Track(track_id) => (self.stream(&shared, track_id), None),
+            Sound::File(path) => {
+                let extension = path
+                    .extension()
+                    .map(|extension| extension.to_string_lossy().to_lowercase());
+                let buffer = shared.buffer.clone();
+                let read = self
+                    .runtime
+                    .spawn_blocking(move || local::run(&buffer, &path));
+                (read, extension)
+            }
+        };
 
         let decoder_shared = shared.clone();
         let spawned = std::thread::Builder::new()
             .name("plastinka-decoder".to_owned())
-            .spawn(move || decode::run(decoder_shared, mixer));
+            .spawn(move || decode::run(decoder_shared, mixer, extension));
         let session = Session {
             id,
             seeks: 0,
@@ -415,6 +419,25 @@ impl Control {
             });
         }
         self.session = Some(session);
+    }
+
+    /// Загрузка трека Яндекса потоком в буфер сеанса.
+    fn stream(&self, shared: &Arc<Shared>, track_id: String) -> tokio::task::JoinHandle<()> {
+        let (http, token) = (self.api_http.clone(), self.token.clone());
+        let relink: download::Relink = Box::new(move || {
+            let (http, token, track_id) = (http.clone(), token.clone(), track_id.clone());
+            Box::pin(async move {
+                api::fetch_stream_source(&http, &token.access_token, &track_id).await
+            })
+        });
+        let (buffer, audio_http, quality) = (
+            shared.buffer.clone(),
+            self.audio_http.clone(),
+            shared.clone(),
+        );
+        let on_link = move |source: &api::StreamSource| quality.set_kbps(source.kbps());
+        self.runtime
+            .spawn(download::run(buffer, audio_http, relink, on_link))
     }
 
     /// Позиция, конец трека, ошибки.
@@ -510,7 +533,7 @@ mod tests {
         let (mixer, mut source) =
             rodio::mixer::mixer(NonZero::new(2).unwrap(), NonZero::new(44_100).unwrap());
         let decoder = shared.clone();
-        std::thread::spawn(move || decode::run(decoder, mixer));
+        std::thread::spawn(move || decode::run(decoder, mixer, None));
         if let SeekAt::Start(to) = seek_at {
             std::thread::sleep(Duration::from_millis(50));
             shared.request_seek(to);

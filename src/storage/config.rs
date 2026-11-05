@@ -36,6 +36,41 @@ pub struct Config {
     /// Визуализатор спектра под плеером.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub visualizer: Option<bool>,
+    /// Плагины (таблица `[plugins]`).
+    #[serde(
+        skip_serializing_if = "PluginsConfig::is_empty",
+        deserialize_with = "lenient_table"
+    )]
+    pub plugins: PluginsConfig,
+}
+
+/// Таблица `[plugins]`: какие плагины включены и их настройки. Значение
+/// неверного типа — как будто его нет.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginsConfig {
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub fckcensor: Option<bool>,
+    /// Искать версию трека без цензуры на Яндексе.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub fckcensor_explicit: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub slopless: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub slopless_autoskip: Option<bool>,
+    /// Согласие ставить «Не нравится» ИИ-трекам (запись в аккаунт).
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub slopless_dislike: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub copy_track_name: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub copy_track_name_format: Option<String>,
+}
+
+impl PluginsConfig {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// Масштаб окна: от 75 до 200 % шагом 25.
@@ -53,6 +88,16 @@ where
 {
     let value = toml::Value::deserialize(deserializer)?;
     Ok(value.try_into().ok())
+}
+
+/// Таблица неверного типа (`plugins = 5`) — как будто её нет.
+fn lenient_table<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned + Default,
+{
+    let value = toml::Value::deserialize(deserializer)?;
+    Ok(value.try_into().unwrap_or_default())
 }
 
 /// Масштаб в допустимых пределах, к ближайшему шагу.
@@ -189,6 +234,39 @@ visualizer = \"yes\"
         assert_eq!(config.scale, None);
         assert_eq!(config.visualizer, None);
         assert_eq!(config.scale_percent(), 100);
+    }
+
+    #[test]
+    fn plugins_survive_bad_values() {
+        let config: Config = toml::from_str(
+            "accent = \"teal\"
+[plugins]
+fckcensor = true
+slopless = \"да\"
+copy_track_name_format = \"{title}\"
+",
+        )
+        .unwrap();
+        assert_eq!(config.plugins.fckcensor, Some(true));
+        assert_eq!(config.plugins.slopless, None);
+        assert_eq!(
+            config.plugins.copy_track_name_format.as_deref(),
+            Some("{title}")
+        );
+        let broken: Config = toml::from_str(
+            "plugins = 5
+accent = \"teal\"
+",
+        )
+        .unwrap();
+        assert_eq!(broken.plugins, PluginsConfig::default());
+        assert_eq!(broken.accent.as_deref(), Some("teal"));
+        // Пустая таблица не пишется.
+        assert!(
+            !toml::to_string(&Config::default())
+                .unwrap()
+                .contains("plugins")
+        );
     }
 
     #[test]

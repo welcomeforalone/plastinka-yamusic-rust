@@ -25,8 +25,10 @@ pub use catalog::{
 };
 pub use stream::{StreamError, StreamSource, fetch_stream_source};
 pub use tracks::{
-    ArtistRef, LikedIds, TRACKS_BATCH, Track, artists_text, fetch_liked_ids, fetch_tracks,
+    ArtistRef, LikedIds, TRACKS_BATCH, Track, Warning, add_disliked_tracks, artists_text,
+    fetch_liked_ids, fetch_tracks,
 };
+pub(crate) use tracks::{clean, numeric_id, parse_artist_refs, plausible_id};
 
 const API_BASE: &str = "https://api.music.yandex.net";
 

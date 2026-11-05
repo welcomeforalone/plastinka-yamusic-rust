@@ -2,14 +2,17 @@
 //!
 //! Трек, запущенный из альбома, плейлиста или поиска, играет дальше по этому
 //! списку, а не по «Мне нравится». Повтор и перемешивание работают по
-//! очереди. Плееру очередь не нужна: он получает только `track_id`.
+//! очереди. Плееру очередь не нужна: он получает только звук трека.
 //!
-//! [`sound_id`] — единственное место, где трек для показа превращается в
-//! трек для звука. Здесь на этапе 7.5 плагин FckCensor подменит звук.
+//! [`sound`] — единственное место, где трек для показа превращается в звук
+//! для плеера. Здесь плагин FckCensor подменяет звук. Можно ли включить трек,
+//! решает окно (`playable`): с заменой играет и недоступный трек.
 
 use std::sync::Arc;
 
 use crate::api::Track;
+use crate::player::Sound;
+use crate::plugins::fckcensor::{Censor, Decision};
 
 /// Откуда список треков. По ключу окно находит список и понимает, что
 /// строка в нём — это играющий трек.
@@ -87,23 +90,33 @@ impl Queue {
         self.tracks.get(index)
     }
 
-    fn available(&self, index: usize) -> bool {
-        self.tracks.get(index).is_some_and(|track| track.available)
+    fn available(&self, index: usize, playable: &dyn Fn(&Track) -> bool) -> bool {
+        self.tracks.get(index).is_some_and(playable)
     }
 
     /// Первый доступный трек: по списку или по новому порядку перемешивания.
-    pub fn first(&mut self, shuffle: bool, rng: &mut Rng) -> Option<usize> {
+    pub fn first(
+        &mut self,
+        shuffle: bool,
+        rng: &mut Rng,
+        playable: &dyn Fn(&Track) -> bool,
+    ) -> Option<usize> {
         if shuffle {
-            self.shuffle(None, rng);
+            self.shuffle(None, rng, playable);
             return self.order.first().copied();
         }
-        (0..self.tracks.len()).find(|index| self.available(*index))
+        (0..self.tracks.len()).find(|index| self.available(*index, playable))
     }
 
     /// Новый порядок перемешивания доступных треков, `first` — в начало.
-    pub fn shuffle(&mut self, first: Option<usize>, rng: &mut Rng) {
+    pub fn shuffle(
+        &mut self,
+        first: Option<usize>,
+        rng: &mut Rng,
+        playable: &dyn Fn(&Track) -> bool,
+    ) {
         let mut order: Vec<usize> = (0..self.tracks.len())
-            .filter(|index| self.available(*index))
+            .filter(|index| self.available(*index, playable))
             .collect();
         // Тасование Фишера — Йетса.
         for i in (1..order.len()).rev() {
@@ -120,14 +133,19 @@ impl Queue {
 
     /// Список вырос (догрузилась страница): новые доступные треки встают в
     /// конец порядка перемешивания, вперемешку.
-    pub fn extend(&mut self, tracks: Arc<Vec<Track>>, rng: &mut Rng) {
+    pub fn extend(
+        &mut self,
+        tracks: Arc<Vec<Track>>,
+        rng: &mut Rng,
+        playable: &dyn Fn(&Track) -> bool,
+    ) {
         let old = self.tracks.len();
         self.tracks = tracks;
         if self.order.is_empty() {
             return;
         }
         let mut fresh: Vec<usize> = (old..self.tracks.len())
-            .filter(|index| self.available(*index))
+            .filter(|index| self.available(*index, playable))
             .collect();
         for i in (1..fresh.len()).rev() {
             let j = rng.up_to(i);
@@ -145,10 +163,11 @@ impl Queue {
         shuffle: bool,
         wrap: bool,
         rng: &mut Rng,
+        playable: &dyn Fn(&Track) -> bool,
     ) -> Option<usize> {
         if shuffle {
             if !self.order.contains(&from) {
-                self.shuffle(Some(from), rng);
+                self.shuffle(Some(from), rng, playable);
             }
             let order = &self.order;
             let at = order.iter().position(|index| *index == from)?;
@@ -172,7 +191,7 @@ impl Queue {
                 (false, i) if i > 0 => i - 1,
                 _ => return None,
             };
-            if self.available(index) {
+            if self.available(index, playable) {
                 return Some(index);
             }
         }
@@ -180,15 +199,23 @@ impl Queue {
     }
 }
 
-/// Какой трек играть вместо показанного: идентификатор для плеера. `None` —
-/// трек не играет (недоступен).
-pub fn sound_id(track: &Track) -> Option<String> {
-    track.available.then(|| track.id.clone())
+/// Какой звук играть вместо показанного трека. `censor` — FckCensor, если
+/// он включён; `explicit_search` — искать ли версию без цензуры.
+pub fn sound(track: &Track, censor: Option<&Censor>, explicit_search: bool) -> Decision {
+    match censor {
+        Some(censor) => censor.sound(track, explicit_search),
+        None if track.available => Decision::Play(Sound::Track(track.id.clone())),
+        None => Decision::Silent,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ok(track: &Track) -> bool {
+        track.available
+    }
 
     fn tracks(available: &[bool]) -> Arc<Vec<Track>> {
         Arc::new(
@@ -205,6 +232,7 @@ mod tests {
                     duration: None,
                     available: *available,
                     cover_uri: None,
+                    warning: crate::api::Warning::None,
                 })
                 .collect(),
         )
@@ -214,33 +242,45 @@ mod tests {
     fn neighbours_skip_unavailable_and_wrap() {
         let mut rng = Rng::seeded(7);
         let mut queue = Queue::new(ListKey::Album(1), tracks(&[true, false, true, true]), 0);
-        assert_eq!(queue.neighbour(0, true, false, false, &mut rng), Some(2));
-        assert_eq!(queue.neighbour(3, true, false, false, &mut rng), None);
-        assert_eq!(queue.neighbour(3, true, false, true, &mut rng), Some(0));
-        assert_eq!(queue.neighbour(0, false, false, true, &mut rng), Some(3));
-        assert_eq!(queue.neighbour(2, false, false, false, &mut rng), Some(0));
-        assert_eq!(queue.first(false, &mut rng), Some(0));
+        assert_eq!(
+            queue.neighbour(0, true, false, false, &mut rng, &ok),
+            Some(2)
+        );
+        assert_eq!(queue.neighbour(3, true, false, false, &mut rng, &ok), None);
+        assert_eq!(
+            queue.neighbour(3, true, false, true, &mut rng, &ok),
+            Some(0)
+        );
+        assert_eq!(
+            queue.neighbour(0, false, false, true, &mut rng, &ok),
+            Some(3)
+        );
+        assert_eq!(
+            queue.neighbour(2, false, false, false, &mut rng, &ok),
+            Some(0)
+        );
+        assert_eq!(queue.first(false, &mut rng, &ok), Some(0));
     }
 
     #[test]
     fn nothing_available_means_no_neighbour() {
         let mut rng = Rng::seeded(1);
         let mut queue = Queue::new(ListKey::Liked, tracks(&[false, false]), 0);
-        assert_eq!(queue.neighbour(0, true, false, true, &mut rng), None);
-        assert_eq!(queue.first(false, &mut rng), None);
-        assert_eq!(queue.first(true, &mut rng), None);
+        assert_eq!(queue.neighbour(0, true, false, true, &mut rng, &ok), None);
+        assert_eq!(queue.first(false, &mut rng, &ok), None);
+        assert_eq!(queue.first(true, &mut rng, &ok), None);
         let mut empty = Queue::new(ListKey::Liked, tracks(&[]), 0);
-        assert_eq!(empty.neighbour(0, true, true, true, &mut rng), None);
+        assert_eq!(empty.neighbour(0, true, true, true, &mut rng, &ok), None);
     }
 
     #[test]
     fn shuffle_visits_every_available_track_once() {
         let mut rng = Rng::seeded(42);
         let mut queue = Queue::new(ListKey::Liked, tracks(&[true; 50]), 0);
-        queue.shuffle(Some(10), &mut rng);
+        queue.shuffle(Some(10), &mut rng, &ok);
         let mut seen = vec![10];
         let mut at = 10;
-        while let Some(next) = queue.neighbour(at, true, true, false, &mut rng) {
+        while let Some(next) = queue.neighbour(at, true, true, false, &mut rng, &ok) {
             seen.push(next);
             at = next;
         }
@@ -252,11 +292,12 @@ mod tests {
     fn extended_queue_keeps_order_and_adds_new_tracks() {
         let mut rng = Rng::seeded(3);
         let mut queue = Queue::new(ListKey::SearchTracks(1), tracks(&[true; 4]), 0);
-        queue.shuffle(Some(0), &mut rng);
+        queue.shuffle(Some(0), &mut rng, &ok);
         let before = queue.order.clone();
         queue.extend(
             tracks(&[true, true, true, true, true, false, true]),
             &mut rng,
+            &ok,
         );
         assert_eq!(queue.order.get(..4), Some(before.as_slice()));
         let mut added: Vec<usize> = queue.order.get(4..).unwrap().to_vec();
@@ -267,7 +308,91 @@ mod tests {
     #[test]
     fn unavailable_track_has_no_sound() {
         let list = tracks(&[true, false]);
-        assert_eq!(sound_id(&list[0]).as_deref(), Some("0"));
-        assert_eq!(sound_id(&list[1]), None);
+        assert_eq!(
+            sound(&list[0], None, true),
+            Decision::Play(Sound::Track("0".to_owned()))
+        );
+        assert_eq!(sound(&list[1], None, true), Decision::Silent);
+    }
+    fn censor_with_list() -> Censor {
+        use crate::plugins::fckcensor::{Loaded, SAMPLE_LIST, parse_list};
+        let mut censor = Censor::default();
+        censor.loaded(
+            Loaded {
+                list: Arc::new(parse_list(SAMPLE_LIST.as_bytes()).unwrap()),
+                fetched: 0,
+                stale: None,
+            },
+            None,
+        );
+        censor
+    }
+
+    #[test]
+    fn censor_replaces_sound_and_opens_unavailable_tracks() {
+        use crate::plugins::fckcensor::Replacement;
+        let mut censor = censor_with_list();
+        let mut list: Vec<Track> = tracks(&[true, false, false, true])
+            .iter()
+            .cloned()
+            .collect();
+        // Номера из примера списка: «2» — снят, но у него есть замена в списке.
+        if let Some(track) = list.get_mut(1) {
+            track.id = "2".to_owned();
+        }
+        if let Some(track) = list.get_mut(2) {
+            track.id = "99".to_owned();
+        }
+        let list = Arc::new(list);
+
+        let first = list.first().unwrap();
+        assert_eq!(
+            sound(first, Some(&censor), false),
+            Decision::Play(Sound::Track("0".to_owned()))
+        );
+        let listed = list.get(1).unwrap();
+        assert_eq!(
+            sound(listed, Some(&censor), false),
+            Decision::Play(Sound::Track("29238706".to_owned()))
+        );
+        let gone = list.get(2).unwrap();
+        assert_eq!(sound(gone, Some(&censor), false), Decision::Silent);
+        // Выключенный плагин (censor = None) замен не знает.
+        assert_eq!(sound(listed, None, false), Decision::Silent);
+
+        // Очередь с FckCensor доходит до трека со звуком-заменой.
+        let mut rng = Rng::seeded(5);
+        let mut queue = Queue::new(ListKey::Liked, list.clone(), 0);
+        let plain = |track: &Track| censor_playable(&censor_with_list(), track);
+        assert_eq!(
+            queue.neighbour(0, true, false, false, &mut rng, &plain),
+            Some(1)
+        );
+        assert_eq!(
+            queue.neighbour(1, true, false, false, &mut rng, &plain),
+            Some(3)
+        );
+        // Без замены трека «2» очередь его перескакивает.
+        assert_eq!(
+            queue.neighbour(0, true, false, false, &mut rng, &ok),
+            Some(3)
+        );
+
+        // Ручная замена файлом тоже открывает трек.
+        censor
+            .replacements
+            .tracks
+            .insert("1".to_owned(), Replacement::file("мой-файл.mp3".into()));
+        let mut hidden = first.clone();
+        hidden.id = "1".to_owned();
+        hidden.available = false;
+        assert_eq!(
+            sound(&hidden, Some(&censor), false),
+            Decision::Play(Sound::File("мой-файл.mp3".into()))
+        );
+    }
+
+    fn censor_playable(censor: &Censor, track: &Track) -> bool {
+        censor.playable(track)
     }
 }

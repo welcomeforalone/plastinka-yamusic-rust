@@ -63,6 +63,7 @@ mod tests {
             duration: None,
             available: true,
             cover_uri: None,
+            warning: crate::api::Warning::None,
         }
     }
 

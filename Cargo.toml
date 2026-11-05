@@ -15,10 +15,13 @@ keyring-core = "1.0.1"
 md-5 = "0.11"
 open = "5.4.5"
 reqwest = { version = "0.13", features = ["form", "json"] }
+# Системный диалог выбора своего файла (FckCensor).
+rfd = "0.17.2"
 rodio = { version = "0.23", default-features = false, features = ["playback"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-symphonia = { version = "0.5.5", default-features = false, features = ["mp3"] }
+# MP3 — поток Яндекса; остальное — свои файлы пользователя (FckCensor).
+symphonia = { version = "0.5.5", default-features = false, features = ["mp3", "flac", "ogg", "vorbis", "wav", "pcm", "isomp4", "aac"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "signal"] }
 toml = "1.2.0"

@@ -6,6 +6,7 @@ pub mod api;
 pub mod auth;
 pub mod net;
 pub mod player;
+pub mod plugins;
 pub mod storage;
 pub mod texts;
 pub mod ui;

@@ -11,6 +11,7 @@ mod gate;
 mod icons;
 mod library;
 mod marquee;
+mod pointer;
 mod queue;
 mod scroll;
 mod theme;
@@ -29,6 +30,7 @@ use crate::APP_NAME;
 use crate::api::{self, AccountStatus, ApiError, PlaybackPermit};
 use crate::auth::{self, AuthError, DeviceCode, OAuthApp};
 use crate::net::{self, NetError};
+use crate::plugins::PluginSettings;
 use crate::storage::config::{self, Config};
 use crate::storage::token::{StoredToken, TokenStore};
 use crate::storage::{self, AppDirs, StorageError};
@@ -242,6 +244,8 @@ pub enum Zoom {
 pub enum Dialog {
     Licenses,
     ConfirmLogout,
+    /// Согласие: Slopless ставит «Не нравится» ИИ-трекам (запись в аккаунт).
+    SloplessConsent,
 }
 
 #[derive(Clone)]
@@ -277,11 +281,15 @@ pub enum Message {
     Logout,
     LoggedOut(Arc<StoredToken>, Result<(), Failure>),
 
-    ConfigLoaded(Prefs),
+    ConfigLoaded(Prefs, PluginSettings),
     ToggleSidebar,
     SetAccent(theme::Accent),
     Zoom(Zoom),
     ToggleVisualizer,
+    /// Новые настройки плагинов.
+    SetPlugins(PluginSettings),
+    /// Пользователь разрешил Slopless ставить «Не нравится».
+    AllowDislike,
     PrefsSaved(Result<(), Failure>),
 
     OpenDialog(Dialog),
@@ -313,6 +321,8 @@ pub struct App {
     sidebar: Animation<bool>,
     /// Вид меню и внешний вид. Запоминаются в `config.toml`.
     prefs: Prefs,
+    /// Плагины: что включено. Тоже в `config.toml`, таблица `[plugins]`.
+    plugins: PluginSettings,
     /// Тема iced с текущим акцентом.
     theme: iced::Theme,
     /// Настройки сейчас пишутся; `save_again` — за это время они изменились.
@@ -344,6 +354,7 @@ impl App {
             page: anim::entering(anim::PAGE, now),
             sidebar: anim::settled(false, anim::PANEL),
             prefs: Prefs::default(),
+            plugins: PluginSettings::default(),
             theme: theme::theme(),
             saving: false,
             save_again: false,
@@ -356,11 +367,8 @@ impl App {
             Task::perform(load_token(), Message::TokenLoaded),
             // Не прочитались настройки — всё по умолчанию.
             Task::perform(load_config(), |config| {
-                Message::ConfigLoaded(
-                    config
-                        .map(|config| Prefs::from_config(&config))
-                        .unwrap_or_default(),
-                )
+                let config = config.unwrap_or_default();
+                Message::ConfigLoaded(Prefs::from_config(&config), plugin_settings(&config))
             }),
         ]);
         (app, task)
@@ -556,14 +564,34 @@ impl App {
                 Err(failure) => self.show_toast(format!("Выйти не удалось: {}", failure.text)),
             },
 
-            Message::ConfigLoaded(prefs) => {
+            Message::ConfigLoaded(prefs, plugins) => {
                 let rescaled = prefs.scale != self.prefs.scale;
                 // Вид меню при запуске — без анимации.
                 self.sidebar = anim::settled(prefs.sidebar_collapsed, anim::PANEL);
                 self.apply_prefs(prefs);
+                let plugins = self.apply_plugins(plugins);
                 if rescaled {
-                    return self.refresh_size();
+                    return Task::batch([plugins, self.refresh_size()]);
                 }
+                return plugins;
+            }
+            Message::SetPlugins(plugins) => {
+                // «Не нравится» — запись в аккаунт: сначала согласие.
+                if plugins.dislike && !self.plugins.dislike {
+                    self.open_dialog(Dialog::SloplessConsent);
+                    return Task::none();
+                }
+                let task = self.apply_plugins(plugins);
+                return Task::batch([task, self.save_prefs()]);
+            }
+            Message::AllowDislike => {
+                self.close_dialog();
+                let plugins = PluginSettings {
+                    dislike: true,
+                    ..self.plugins.clone()
+                };
+                let task = self.apply_plugins(plugins);
+                return Task::batch([task, self.save_prefs()]);
             }
             Message::ToggleSidebar => {
                 let prefs = Prefs {
@@ -645,6 +673,15 @@ impl App {
         Task::none()
     }
 
+    /// Новые настройки плагинов: окну — тоже.
+    fn apply_plugins(&mut self, plugins: PluginSettings) -> Task<Message> {
+        self.plugins = plugins;
+        match &mut self.screen {
+            Screen::Main(library) => library.plugins_changed(&self.plugins).map(Message::Library),
+            _ => Task::none(),
+        }
+    }
+
     fn apply_prefs(&mut self, prefs: Prefs) {
         self.sidebar.go_mut(prefs.sidebar_collapsed, Instant::now());
         if prefs.accent != self.prefs.accent {
@@ -672,7 +709,10 @@ impl App {
             return Task::none();
         }
         self.saving = true;
-        Task::perform(save_prefs(self.prefs), Message::PrefsSaved)
+        Task::perform(
+            save_prefs(self.prefs, self.plugins.clone()),
+            Message::PrefsSaved,
+        )
     }
 
     /// Размер окна в единицах раскладки меняется вместе с масштабом.
@@ -698,11 +738,13 @@ impl App {
         )
     }
 
-    /// Esc: закрыть диалог, иначе полноэкранный плеер, иначе сбросить поиск.
+    /// Esc: закрыть диалог, иначе меню трека, иначе полноэкранный плеер,
+    /// иначе сбросить поиск.
     fn escape(&mut self) -> Task<Message> {
         if self.dialog.is_some() {
             self.close_dialog();
         } else if let Screen::Main(library) = &mut self.screen
+            && !library.close_overlay()
             && !library.close_fullscreen()
             && let Some(task) = library.clear_search()
         {
@@ -1045,6 +1087,7 @@ impl App {
             permit,
             self.size.height,
             self.http.as_ref().ok(),
+            &self.plugins,
         );
         self.screen = Screen::Main(Box::new(library));
         task.map(Message::Library)
@@ -1176,6 +1219,9 @@ impl App {
             if let Some(sheet) = sheet {
                 layers = layers.push(sheet);
             }
+            if let Some(overlay) = library.overlay(self.size) {
+                layers = layers.push(overlay);
+            }
         }
         if let Some((text, _)) = &self.toast {
             // В главном окне — по центру плеера, а не всего окна.
@@ -1193,7 +1239,15 @@ impl App {
             let shown = anim::progress(&self.dialog_anim, self.now);
             layers = layers.push(gate::dialog(dialog, shown, self.dialog.is_some()));
         }
-        layers.push(resize_edges()).into()
+        let layers = layers.push(resize_edges());
+        // Где нажали мышь — для меню трека у курсора.
+        if matches!(self.screen, Screen::Main(_)) {
+            pointer::pointer(layers, |at| {
+                Message::Library(library::Message::Plugin(library::PluginMsg::Pointer(at)))
+            })
+        } else {
+            layers.into()
+        }
     }
 }
 
@@ -1285,12 +1339,23 @@ async fn revoke(http: reqwest::Client, token: Arc<StoredToken>) {
     let _ = auth::revoke(&http, &app, &token.access_token).await;
 }
 
-/// Запоминает вид меню и внешний вид. Остальные настройки не трогает.
-async fn save_prefs(prefs: Prefs) -> Result<(), Failure> {
+/// Настройки плагинов из `config.toml`. С отладочным хуком
+/// `PLASTINKA_TEST_PLUGINS` включены все плагины (и ничего не пишется).
+fn plugin_settings(config: &Config) -> PluginSettings {
+    #[cfg(debug_assertions)]
+    if crate::plugins::test_hook().is_some() {
+        return PluginSettings::all_on();
+    }
+    PluginSettings::from_config(&config.plugins)
+}
+
+/// Запоминает вид меню, внешний вид и плагины. Остальные настройки не трогает.
+async fn save_prefs(prefs: Prefs, plugins: PluginSettings) -> Result<(), Failure> {
     let path = AppDirs::discover()?.config_file();
     storage::blocking(move || {
         let mut config = Config::load(&path)?;
         prefs.write(&mut config);
+        plugins.write(&mut config.plugins);
         config.save(&path)
     })
     .await

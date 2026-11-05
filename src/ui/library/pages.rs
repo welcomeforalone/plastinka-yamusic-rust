@@ -13,7 +13,7 @@ use std::time::Duration;
 use iced::Task;
 use iced::time::Instant;
 
-use super::{Effect, Library, Message, Section};
+use super::{Effect, Library, Message, Section, plugins};
 use crate::api::{
     self, AlbumCard, ArtistCard, Found, PlaylistCard, SEARCH_LAST_PAGE, SearchKind, Track,
 };
@@ -21,7 +21,7 @@ use crate::ui::queue::{ListKey, Queue};
 use crate::ui::{Failure, FailureKind};
 
 /// Через сколько после ввода искать: пока печатают, запросы не уходят.
-const SEARCH_SETTLE: Duration = Duration::from_millis(350);
+pub(super) const SEARCH_SETTLE: Duration = Duration::from_millis(350);
 /// Сколько строк до конца списка оставить, чтобы догрузить следующую страницу.
 const MORE_AHEAD: usize = 12;
 /// Поле поиска по каталогу.
@@ -579,11 +579,15 @@ impl Library {
         }
         let mut grown: Option<Arc<Vec<Track>>> = None;
         let mut toast = None;
+        let mut album_ready: Option<String> = None;
         let Some(entry) = self.find_entry(serial) else {
             return (Task::none(), None);
         };
         match (&mut entry.page, loaded) {
             (Page::Album { load, .. }, Loaded::Album(result)) => {
+                if let Ok(album) = &result {
+                    album_ready = Some(album.card.id.clone());
+                }
                 *load = match result {
                     Ok(album) => Load::Ready(AlbumView {
                         card: album.card,
@@ -638,11 +642,18 @@ impl Library {
         }
         let autoplay = std::mem::take(&mut entry.autoplay) && entry.page_ready();
         let key = entry_key(entry);
+        let censor = self.plugins.fckcensor.then_some(&self.censor);
         if let Some(tracks) = grown
             && let Some(queue) = &mut self.queue
             && key.as_ref() == Some(&queue.key)
         {
-            queue.extend(tracks, &mut self.rng);
+            queue.extend(tracks, &mut self.rng, &|track| {
+                plugins::playable(censor, track)
+            });
+        }
+        // FckCensor знает состав альбома — догружаем треки по нему.
+        if let Some(album) = album_ready {
+            self.album_volumes(serial, &album);
         }
         let mut effect = toast.map(|text| {
             Effect::Toast(crate::texts::sentence(&format!(
@@ -892,12 +903,15 @@ impl Library {
                     }),
                 );
                 // Очередь из этих же треков растёт вместе со списком.
+                let censor = self.plugins.fckcensor.then_some(&self.censor);
                 if let Some(Load::Ready(paged)) = &self.search.tracks
                     && let Some(queue) = &mut self.queue
                     && queue.key == ListKey::SearchTracks(generation)
                     && queue.tracks.len() < paged.items.len()
                 {
-                    queue.extend(paged.items.clone(), &mut self.rng);
+                    queue.extend(paged.items.clone(), &mut self.rng, &|track| {
+                        plugins::playable(censor, track)
+                    });
                 }
                 failure
             }
@@ -1019,6 +1033,8 @@ impl Library {
     /// очередь (и порядок перемешивания) остаётся.
     pub(super) fn play_from(&mut self, key: ListKey, index: usize) -> Option<Effect> {
         let tracks = self.list_tracks(&key)?;
+        // Включённый вручную трек Slopless не пропускает.
+        self.chosen = tracks.get(index).map(|track| track.id.clone());
         let same = self
             .queue
             .as_ref()
@@ -1030,7 +1046,10 @@ impl Library {
         } else {
             let mut queue = Queue::new(key, tracks, index);
             if self.player.shuffle {
-                queue.shuffle(Some(index), &mut self.rng);
+                let censor = self.plugins.fckcensor.then_some(&self.censor);
+                queue.shuffle(Some(index), &mut self.rng, &|track| {
+                    plugins::playable(censor, track)
+                });
             }
             self.queue = Some(queue);
         }
@@ -1044,8 +1063,12 @@ impl Library {
         if shuffle {
             self.player.shuffle = true;
         }
+        self.chosen = None;
         let mut queue = Queue::new(key, tracks, 0);
-        let first = queue.first(self.player.shuffle, &mut self.rng)?;
+        let censor = self.plugins.fckcensor.then_some(&self.censor);
+        let first = queue.first(self.player.shuffle, &mut self.rng, &|track| {
+            plugins::playable(censor, track)
+        })?;
         queue.current = first;
         self.queue = Some(queue);
         self.player.skipped = 0;

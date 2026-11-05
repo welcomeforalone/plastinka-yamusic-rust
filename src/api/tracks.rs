@@ -61,6 +61,28 @@ pub struct Track {
     pub available: bool,
     /// Шаблон адреса обложки с `%%` вместо размера.
     pub cover_uri: Option<String>,
+    /// Пометка о содержании (`contentWarning`).
+    pub warning: Warning,
+}
+
+/// Пометка о содержании трека: `explicit` — есть ненормативная лексика,
+/// `clean` — цензурная версия.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Warning {
+    #[default]
+    None,
+    Explicit,
+    Clean,
+}
+
+impl Warning {
+    fn parse(value: Option<&Value>) -> Self {
+        match value.and_then(Value::as_str) {
+            Some("explicit") => Self::Explicit,
+            Some("clean") => Self::Clean,
+            _ => Self::None,
+        }
+    }
 }
 
 impl Track {
@@ -76,6 +98,7 @@ impl Track {
             duration: None,
             available: false,
             cover_uri: None,
+            warning: Warning::None,
         }
     }
 
@@ -128,6 +151,35 @@ pub async fn fetch_liked_ids(
     let status = response.status();
     let body = response.text().await.map_err(NetError::from)?;
     parse_liked_ids(status, &body)
+}
+
+/// «Не нравится» для треков `ids` пользователя `uid`: запись в аккаунт.
+/// Окно зовёт её только после отдельного согласия пользователя (Slopless).
+pub async fn add_disliked_tracks(
+    http: &reqwest::Client,
+    token: &str,
+    uid: u64,
+    ids: &[String],
+) -> Result<(), ApiError> {
+    if ids.is_empty() || !ids.iter().all(|id| plausible_id(id)) {
+        return Ok(());
+    }
+    #[cfg(debug_assertions)]
+    if crate::storage::test_hooks_active() {
+        // С фальшивым токеном в аккаунт ничего не пишем.
+        return Ok(());
+    }
+    let response = http
+        .post(format!(
+            "{API_BASE}/users/{uid}/dislikes/tracks/add-multiple"
+        ))
+        .header(AUTHORIZATION, auth_header(token)?)
+        .header("X-Yandex-Music-Client", MUSIC_CLIENT)
+        .form(&[("track-ids", ids.join(","))])
+        .send()
+        .await
+        .map_err(NetError::from)?;
+    check_status(response.status())
 }
 
 /// Исполнители через запятую, без них — «Неизвестный исполнитель».
@@ -250,7 +302,7 @@ where
 
 /// Сервис принимает число от 1 до `i32::MAX` или UUID (так выглядят
 /// загруженные пользователем треки). Остальное ломает всю пачку.
-pub(super) fn plausible_id(id: &str) -> bool {
+pub(crate) fn plausible_id(id: &str) -> bool {
     if id.bytes().all(|byte| byte.is_ascii_digit()) {
         return id.parse::<i32>().is_ok_and(|number| number > 0);
     }
@@ -338,13 +390,14 @@ pub(super) fn parse_track(value: &Value) -> Option<Track> {
             .map(Duration::from_millis),
         available: value.get("available").and_then(Value::as_bool) == Some(true) && !error,
         cover_uri: text("coverUri"),
+        warning: Warning::parse(value.get("contentWarning")),
         id,
     })
 }
 
 /// Исполнители из массива `artists`: у каждого имя, идентификатор — если
 /// это число. Без имени исполнитель пропускается.
-pub(super) fn parse_artist_refs(value: Option<&Value>) -> Vec<ArtistRef> {
+pub(crate) fn parse_artist_refs(value: Option<&Value>) -> Vec<ArtistRef> {
     value
         .and_then(Value::as_array)
         .map(|artists| {
@@ -365,7 +418,7 @@ pub(super) fn parse_artist_refs(value: Option<&Value>) -> Vec<ArtistRef> {
 /// Числовой идентификатор (альбома, исполнителя, пользователя, плейлиста)
 /// строкой или числом: от 1 до 20 цифр. Он попадает в адрес следующего
 /// запроса, поэтому другие символы не принимаем.
-pub(super) fn numeric_id(value: &Value) -> Option<String> {
+pub(crate) fn numeric_id(value: &Value) -> Option<String> {
     let text = match value {
         Value::String(text) => text.clone(),
         Value::Number(number) => number.as_u64()?.to_string(),
@@ -393,7 +446,7 @@ pub(super) fn id_text(value: &Value) -> Option<String> {
 /// Текст из ответа для показа: без управляющих символов и символов смены
 /// направления письма (они могли бы испортить вывод в терминал) и лишних
 /// пробелов. Пустой — `None`.
-pub(super) fn clean(text: &str) -> Option<String> {
+pub(crate) fn clean(text: &str) -> Option<String> {
     let cleaned: String = text
         .chars()
         .map(|ch| if unsafe_for_output(ch) { ' ' } else { ch })

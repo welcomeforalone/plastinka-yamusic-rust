@@ -619,6 +619,7 @@ pub fn dialog<'a>(dialog: Dialog, shown: f32, interactive: bool) -> Element<'a, 
     let body: Element<'a, Message> = match dialog {
         Dialog::Licenses => licenses(),
         Dialog::ConfirmLogout => confirm_logout(),
+        Dialog::SloplessConsent => slopless_consent(),
     };
     let close = right(widgets::icon_button(
         Icon::Close,
@@ -675,7 +676,8 @@ const LICENSES: &[(&str, &str)] = &[
     ),
     ("image — обложки", "MIT или Apache-2.0"),
     // MPL-2.0: код symphonia не меняем, исходники — github.com/pdeljanov/Symphonia.
-    ("symphonia — декодер MP3", "MPL-2.0"),
+    ("symphonia — декодер MP3, FLAC, Ogg, WAV, AAC", "MPL-2.0"),
+    ("rfd — окно выбора файла", "MIT"),
     ("rodio, cpal — вывод звука", "MIT или Apache-2.0"),
     ("md-5 — подпись ссылок", "MIT или Apache-2.0"),
 ];
@@ -697,6 +699,36 @@ fn licenses<'a>() -> Element<'a, Message> {
             theme::TEXT_SECONDARY
         ),
         iced::widget::Column::with_children(rows).spacing(10),
+    ]
+    .spacing(16)
+    .padding(Padding::default().top(4))
+    .into()
+}
+
+fn slopless_consent<'a>() -> Element<'a, Message> {
+    column![
+        theme::line(
+            "Ставить «Не нравится» ИИ-трекам?",
+            Style::Title,
+            theme::TEXT_PRIMARY
+        ),
+        theme::label(
+            "Slopless будет отмечать пропущенные ИИ-треки как «Не нравится» в вашем \
+             аккаунте. Это меняет рекомендации и видно на всех устройствах. Снять \
+             отметку можно в списке «Не нравится» на сайте музыки.",
+            Style::Body,
+            theme::TEXT_SECONDARY
+        ),
+        row![
+            widgets::action(
+                Kind::Primary,
+                None,
+                "Разрешить",
+                Some(Message::AllowDislike)
+            ),
+            widgets::action(Kind::Secondary, None, "Отмена", Some(Message::CloseDialog)),
+        ]
+        .spacing(12),
     ]
     .spacing(16)
     .padding(Padding::default().top(4))
