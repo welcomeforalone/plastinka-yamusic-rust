@@ -11,6 +11,7 @@ mod gate;
 mod icons;
 mod library;
 mod marquee;
+mod queue;
 mod scroll;
 mod theme;
 mod visualizer;
@@ -285,7 +286,7 @@ pub enum Message {
 
     OpenDialog(Dialog),
     CloseDialog,
-    CoverLoaded(String, Option<Vec<u8>>),
+    CoverLoaded(covers::Key, Option<Vec<u8>>),
     BigCoverLoaded(String, Option<Arc<covers::Big>>),
     Library(library::Message),
 }
@@ -395,6 +396,15 @@ impl App {
         self.now = Instant::now();
         let before = self.page_key();
         let task = self.handle(message);
+        // Сетка карточек строится по ширине раздела справа от меню.
+        let sidebar = if self.prefs.sidebar_collapsed {
+            library::SIDEBAR_COLLAPSED
+        } else {
+            library::SIDEBAR
+        };
+        if let Screen::Main(library) = &mut self.screen {
+            library.set_layout(self.size.width, sidebar);
+        }
         if self.page_key() != before {
             self.page = anim::entering(anim::PAGE, self.now);
         }
@@ -412,14 +422,14 @@ impl App {
     }
 
     /// Какой экран на виду: для перехода между экранами.
-    fn page_key(&self) -> (u8, Option<library::Section>) {
+    fn page_key(&self) -> (u8, Option<(library::Section, u64)>) {
         match &self.screen {
             Screen::Starting => (0, None),
             Screen::Problem(_) => (1, None),
             Screen::Login(_) => (2, None),
             Screen::Checking => (3, None),
             Screen::Paywall(_) => (4, None),
-            Screen::Main(library) => (5, Some(library.section())),
+            Screen::Main(library) => (5, Some(library.view_key())),
         }
     }
 
@@ -604,9 +614,9 @@ impl App {
 
             Message::OpenDialog(dialog) => self.open_dialog(dialog),
             Message::CloseDialog => self.close_dialog(),
-            Message::CoverLoaded(uri, bytes) => {
+            Message::CoverLoaded(key, bytes) => {
                 let http = self.http.as_ref().ok();
-                return self.covers.finished(uri, bytes, http);
+                return self.covers.finished(key, bytes, http);
             }
             Message::BigCoverLoaded(uri, big) => self.covers.big_finished(uri, big),
             Message::Library(message) => {
@@ -721,8 +731,9 @@ impl App {
         if modifiers.command()
             && physical_key == keyboard::key::Physical::Code(keyboard::key::Code::KeyF)
         {
-            return match &self.screen {
-                Screen::Main(library) => library.focus_search().map(Message::Library),
+            let http = self.http.as_ref().ok();
+            return match &mut self.screen {
+                Screen::Main(library) => library.focus_search(http).map(Message::Library),
                 _ => Task::none(),
             };
         }
@@ -1072,6 +1083,13 @@ impl App {
                     key: keyboard::Key::Named(keyboard::key::Named::Escape),
                     ..
                 }) => Some(Message::Escape),
+                _ => None,
+            }),
+            // Кнопка мыши «Назад» — на предыдущую страницу.
+            iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
+                    iced::mouse::Button::Back,
+                )) => Some(Message::Library(library::Message::Back)),
                 _ => None,
             }),
             window::close_requests().map(|_| Message::CloseWindow),

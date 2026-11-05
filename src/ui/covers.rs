@@ -21,8 +21,10 @@ use super::{Message, anim};
 use crate::net::NetError;
 use iced::time::Instant;
 
-/// Размер, который подставляется в шаблон адреса вместо `%%`.
+/// Размер, который подставляется в шаблон адреса вместо `%%`: для строк
+/// списка и для карточек и шапок.
 const SIZE: &str = "100x100";
+const MEDIUM_SIZE: &str = "300x300";
 /// Размер обложки в полноэкранном плеере.
 const BIG_SIZE: &str = "600x600";
 /// Сторона маленькой копии для фона, пикселей, и сила размытия на ней.
@@ -40,7 +42,7 @@ const BIG_SIDE: u32 = 600;
 const BIG_KEEP: usize = 4;
 /// Сколько обложек грузить одновременно.
 const MAX_IN_FLIGHT: usize = 6;
-/// Больше картинка 100×100 не бывает; всё крупнее — не обложка.
+/// Больше картинка 300×300 не бывает; всё крупнее — не обложка.
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 /// Откуда можно брать обложки.
 const ALLOWED_HOSTS: [&str; 2] = ["avatars.yandex.net", "avatars.mds.yandex.net"];
@@ -52,12 +54,32 @@ enum Entry {
     Failed,
 }
 
-/// Обложки, которые уже есть или грузятся. Ключ — шаблон `cover_uri`.
+/// Размер обложки: маленькая — в строках списка и в плеере, средняя — в
+/// карточках и шапках альбома, плейлиста, исполнителя.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Grade {
+    Small,
+    Medium,
+}
+
+impl Grade {
+    fn size(self) -> &'static str {
+        match self {
+            Self::Small => SIZE,
+            Self::Medium => MEDIUM_SIZE,
+        }
+    }
+}
+
+/// Ключ обложки: размер и шаблон `cover_uri`.
+pub type Key = (Grade, String);
+
+/// Обложки, которые уже есть или грузятся.
 pub struct Covers {
     cache_dir: Option<PathBuf>,
-    entries: HashMap<String, Entry>,
+    entries: HashMap<Key, Entry>,
     /// Что видно сейчас и ещё не загружено, по порядку.
-    wanted: Vec<String>,
+    wanted: Vec<Key>,
     /// Когда пришла последняя обложка: пока она проявляется, нужны кадры.
     last_ready: Option<Instant>,
     /// Большие обложки с фоном, свежие в конце.
@@ -167,11 +189,16 @@ impl Covers {
     /// Обложка по шаблону `uri`. Непрозрачность свежей обложки считается на
     /// момент построения вида.
     pub fn art(&self, uri: Option<&str>) -> Art<'_> {
+        self.art_of(Grade::Small, uri)
+    }
+
+    /// Обложка размера `grade`.
+    pub fn art_of(&self, grade: Grade, uri: Option<&str>) -> Art<'_> {
         let now = Instant::now();
-        let Some(uri) = uri.filter(|uri| cover_url(uri, SIZE).is_some()) else {
+        let Some(uri) = uri.filter(|uri| cover_url(uri, grade.size()).is_some()) else {
             return Art::Missing;
         };
-        match self.entries.get(uri) {
+        match self.entries.get(&(grade, uri.to_owned())) {
             Some(Entry::Ready(handle, at)) => {
                 let age = now.saturating_duration_since(*at).as_secs_f32();
                 Art::Ready(handle, (age / anim::COVER.as_secs_f32()).clamp(0.0, 1.0))
@@ -185,15 +212,15 @@ impl Covers {
     /// Невидимое из очереди выкидывается.
     pub fn show<'a>(
         &mut self,
-        visible: impl IntoIterator<Item = &'a str>,
+        visible: impl IntoIterator<Item = (Grade, &'a str)>,
         http: Option<&reqwest::Client>,
     ) -> Task<Message> {
         let mut seen = HashSet::new();
         self.wanted = visible
             .into_iter()
-            .filter(|uri| cover_url(uri, SIZE).is_some())
-            .filter(|uri| !self.entries.contains_key(*uri) && seen.insert(*uri))
-            .map(str::to_owned)
+            .filter(|(grade, uri)| cover_url(uri, grade.size()).is_some())
+            .map(|(grade, uri)| (grade, uri.to_owned()))
+            .filter(|key| !self.entries.contains_key(key) && seen.insert(key.clone()))
             .collect();
         self.pump(http)
     }
@@ -201,7 +228,7 @@ impl Covers {
     /// Загрузка закончилась.
     pub fn finished(
         &mut self,
-        uri: String,
+        key: Key,
         bytes: Option<Vec<u8>>,
         http: Option<&reqwest::Client>,
     ) -> Task<Message> {
@@ -213,7 +240,7 @@ impl Covers {
             }
             None => Entry::Failed,
         };
-        self.entries.insert(uri, entry);
+        self.entries.insert(key, entry);
         self.pump(http)
     }
 
@@ -238,16 +265,17 @@ impl Covers {
         let tasks: Vec<_> = self
             .wanted
             .drain(..free)
-            .map(|uri| {
-                self.entries.insert(uri.clone(), Entry::Loading);
+            .map(|key| {
+                self.entries.insert(key.clone(), Entry::Loading);
                 let http = http.clone();
                 let cache_dir = self.cache_dir.clone();
                 Task::perform(
                     async move {
-                        let bytes = load(&http, cache_dir.as_deref(), &uri, SIZE).await;
-                        (uri, bytes)
+                        let (grade, uri) = &key;
+                        let bytes = load(&http, cache_dir.as_deref(), uri, grade.size()).await;
+                        (key, bytes)
                     },
-                    |(uri, bytes)| Message::CoverLoaded(uri, bytes),
+                    |(key, bytes)| Message::CoverLoaded(key, bytes),
                 )
             })
             .collect();

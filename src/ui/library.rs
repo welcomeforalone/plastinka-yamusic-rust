@@ -1,10 +1,16 @@
-//! Главное окно: боковое меню, «Мне нравится», настройки и панель плеера.
+//! Главное окно: боковое меню, разделы, страницы альбома, плейлиста и
+//! исполнителя, настройки и панель плеера.
 //!
 //! Плеер ([`audio::Player`]) создаётся вместе с главным окном по пропуску
 //! подписки. Окно шлёт ему команды и получает позицию и состояние через
-//! подписку, само ничего не ждёт. Список длинный (до тысяч строк), поэтому
-//! строятся только видимые строки.
+//! подписку, само ничего не ждёт. Играет очередь ([`Queue`]) — список, из
+//! которого запущен трек. Списки длинные (до тысяч строк), поэтому строятся
+//! только видимые строки.
 
+mod browse;
+mod pages;
+
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,18 +27,21 @@ use super::covers::{Art, Covers};
 use super::filter;
 use super::icons::{Icon, icon, spinner};
 use super::marquee::marquee;
+use super::queue::{self, ListKey, Queue, Rng};
 use super::scroll;
 use super::theme::{self, Style};
 use super::visualizer::{self, Analyzer};
 use super::widgets::{self, CoverArt, Kind, Size};
 use super::{Dialog, Failure, FailureKind, Moment, Prefs, Zoom};
-use crate::api::{self, AccountStatus, PlaybackPermit, Track};
+use crate::api::{self, AccountStatus, PlaybackPermit, SearchKind, Track};
 use crate::player::{self as audio, Command, PlayError};
 use crate::storage::config;
 use crate::storage::token::StoredToken;
 use crate::texts::{self, sentence};
 use iced::animation::Animation;
 use iced::time::Instant;
+pub use pages::Target;
+use pages::{Collected, Collections, Entry, Loaded, SearchState};
 
 /// Высота строки трека.
 const ROW: f32 = 56.0;
@@ -157,6 +166,24 @@ pub enum Message {
     LikesLoaded(Result<Arc<Vec<Track>>, Failure>),
     ShowSkeleton,
     RetryLikes,
+    /// Перейти на страницу альбома, исполнителя или плейлиста.
+    Open(Target),
+    /// Открыть и сразу включить (кнопка Play на карточке).
+    PlayCard(Target),
+    Back,
+    /// Пришли данные страницы: её номер, номер страницы списка, данные.
+    PageLoaded(u64, u32, Loaded),
+    RetryPage,
+    CollectionLoaded(Collected),
+    RetryCollection,
+    /// Поиск по каталогу: текст в поле, ввод замер, Enter, вкладка, ответ.
+    SearchInput(String),
+    SearchSettled(u64),
+    SearchSubmit,
+    SearchTab(SearchKind),
+    SearchLoaded(u64, SearchKind, u32, Result<api::SearchResult, Failure>),
+    ClearCatalogSearch,
+    RetrySearch,
     Scrolled(scrollable::Viewport),
     /// Щелчки колеса над списком (вниз — больше нуля): плавная прокрутка.
     Wheel(f32),
@@ -165,9 +192,12 @@ pub enum Message {
     /// Поиск трека в списке: новый текст запроса.
     Search(String),
     ClearSearch,
-    Select(usize),
-    Play(usize),
-    PlayAll,
+    /// Строка списка выбрана.
+    Select(ListKey, usize),
+    /// Включить трек списка.
+    PlayFrom(ListKey, usize),
+    /// «Слушать»: весь список с начала.
+    PlayList(ListKey),
     TogglePlay,
     Previous,
     Next,
@@ -181,8 +211,8 @@ pub enum Message {
     /// Колесо мыши над плеером: вверх — громче.
     VolumeScroll(f32),
     ToggleMute,
-    /// Перемешать и слушать.
-    ShuffleAll,
+    /// «Перемешать»: весь список вперемешку.
+    ShuffleList(ListKey),
     /// Мышь над ползунком перемотки или ушла с него.
     SeekHover(bool),
     VolumeHover(bool),
@@ -206,9 +236,8 @@ enum Likes {
     Failed(Failure),
 }
 
-/// Состояние плеера, как его видит окно.
+/// Состояние плеера, как его видит окно. Что играет — в очереди.
 struct Player {
-    current: Option<usize>,
     /// Должен звучать (не пауза).
     playing: bool,
     /// Трек открыт в плеере: паузу и перемотку можно слать ему. После конца
@@ -234,8 +263,6 @@ struct Player {
     skipped: usize,
     /// В этом запуске звук уже шёл: ошибка — обрыв, а не «не включился».
     sounded: bool,
-    /// Порядок треков при перемешивании.
-    order: Vec<usize>,
 }
 
 impl Player {
@@ -249,16 +276,30 @@ pub struct Library {
     status: AccountStatus,
     /// Плеер. Не запустился — текст ошибки для сообщения при попытке играть.
     engine: Result<audio::Player, String>,
-    /// Состояние генератора для перемешивания.
-    seed: u64,
+    /// Генератор для перемешивания.
+    rng: Rng,
     section: Section,
+    /// Открытые страницы поверх раздела, последняя — на экране.
+    stack: Vec<Entry>,
+    /// Последний выданный номер страницы.
+    serial: u64,
+    /// Прокрутка раздела, пока поверх него открыта страница.
+    root_scroll: f32,
     likes: Likes,
-    selected: Option<usize>,
+    /// Идентификаторы треков из «Мне нравится»: сердце в строках.
+    liked: HashSet<String>,
+    collections: Collections,
+    search: SearchState,
+    /// Что играет и что дальше.
+    queue: Option<Queue>,
+    selected: Option<(ListKey, usize)>,
     scroll_y: f32,
     /// Высота окна: список заведомо не выше, поэтому строк построится с
     /// запасом. Высоту самого списка `scrollable` сообщает только при
     /// прокрутке, а после увеличения окна она бы устарела.
     viewport: f32,
+    /// Ширина раздела справа от меню: по ней строится сетка карточек.
+    panel_width: f32,
     player: Player,
     motion: PlayerMotion,
     /// Отвод звука плеера и спектр для визуализатора.
@@ -282,7 +323,9 @@ struct PlayerMotion {
     /// Нажатие Play: кнопка коротко сжимается.
     pulse: Animation<bool>,
     /// Прежний трек, чья обложка тает, и ход затухания.
-    cover_from: Option<usize>,
+    cover_from: Option<Track>,
+    /// Трек, обложка которого сейчас в плеере.
+    cover_now: Option<Track>,
     cover_fade: Animation<bool>,
     /// Ручка и заливка ползунков проявляются при наведении.
     seek_hover: Animation<bool>,
@@ -296,6 +339,7 @@ impl PlayerMotion {
         Self {
             pulse: anim::settled(true, anim::PANEL),
             cover_from: None,
+            cover_now: None,
             cover_fade: anim::settled(true, anim::COVER),
             seek_hover: anim::settled(false, anim::HOVER),
             volume_hover: anim::settled(false, anim::HOVER),
@@ -341,14 +385,21 @@ impl Library {
             token,
             status,
             engine,
-            seed: seed(),
+            rng: Rng::new(),
             section: Section::Liked,
+            stack: Vec::new(),
+            serial: 0,
+            root_scroll: 0.0,
             likes: Likes::Loading { skeleton: false },
+            liked: HashSet::new(),
+            collections: Collections::default(),
+            search: SearchState::new(),
+            queue: None,
             selected: None,
             scroll_y: 0.0,
             viewport: window_height,
+            panel_width: 1280.0 - SIDEBAR,
             player: Player {
-                current: None,
                 playing: false,
                 loaded: false,
                 buffering: false,
@@ -363,7 +414,6 @@ impl Library {
                 seeks: 0,
                 skipped: 0,
                 sounded: false,
-                order: Vec::new(),
             },
             motion: PlayerMotion::new(START_VOLUME),
             tap,
@@ -385,6 +435,11 @@ impl Library {
 
     pub fn resized(&mut self, window_height: f32) {
         self.viewport = window_height;
+    }
+
+    /// Ширина окна и меню (уже после сворачивания): по ним строится сетка.
+    pub fn set_layout(&mut self, window_width: f32, sidebar: f32) {
+        self.panel_width = (window_width - sidebar - 1.0).max(0.0);
     }
 
     fn load_likes(&mut self, http: Option<&reqwest::Client>) -> Task<Message> {
@@ -412,6 +467,7 @@ impl Library {
         Task::batch([load, skeleton])
     }
 
+    /// «Мне нравится».
     fn tracks(&self) -> &[Track] {
         match &self.likes {
             Likes::Ready(tracks) => tracks,
@@ -419,10 +475,29 @@ impl Library {
         }
     }
 
+    fn liked_tracks(&self) -> Option<Arc<Vec<Track>>> {
+        match &self.likes {
+            Likes::Ready(tracks) => Some(tracks.clone()),
+            _ => None,
+        }
+    }
+
+    /// Трек в плеере.
     fn current(&self) -> Option<&Track> {
-        self.player
-            .current
-            .and_then(|index| self.tracks().get(index))
+        self.queue.as_ref().and_then(Queue::track)
+    }
+
+    /// Строка `index` списка `key` с треком `track` — играющий трек. В том
+    /// же списке сравниваем место, в другом — сам трек.
+    fn is_current(&self, key: &ListKey, index: usize, track: &Track) -> bool {
+        let Some(queue) = &self.queue else {
+            return false;
+        };
+        if queue.key == *key {
+            queue.current == index
+        } else {
+            queue.track().is_some_and(|playing| playing.id == track.id)
+        }
     }
 
     /// Длительность текущего трека в секундах, если она известна.
@@ -436,6 +511,7 @@ impl Library {
     pub fn animating(&self) -> bool {
         matches!(self.likes, Likes::Loading { skeleton: true })
             || (self.player.playing && self.player.buffering)
+            || self.loading_on_screen()
     }
 
     /// Насколько выехал полноэкранный плеер: 0 — его нет, 1 — во всё окно.
@@ -484,9 +560,9 @@ impl Library {
         scroll_list(offset)
     }
 
-    /// Высота списка «Мне нравится» со всеми видимыми строками.
+    /// Высота прокручиваемой части экрана со всеми строками.
     fn list_content(&self) -> f32 {
-        LIST_TOP + rows_height(self.shown_count()) + LIST_BOTTOM
+        self.body().content()
     }
 
     /// Сколько строк в списке с учётом поиска.
@@ -506,31 +582,46 @@ impl Library {
     fn search(&mut self, query: String) -> Task<Message> {
         self.query = query;
         self.shown = filter::matching(&self.haystacks, &self.query);
-        self.scroll_y = 0.0;
-        self.glide = None;
-        scroll_list(0.0)
+        self.selected = None;
+        self.jump(0.0)
     }
 
-    /// Esc: сбросить поиск. `None` — сбрасывать нечего.
+    /// Esc: сбросить поиск — в «Мне нравится» или по каталогу. `None` —
+    /// сбрасывать нечего.
     pub fn clear_search(&mut self) -> Option<Task<Message>> {
-        (self.section == Section::Liked && !self.query.is_empty())
-            .then(|| self.search(String::new()))
-    }
-
-    /// Ctrl + F: курсор в поле поиска, если оно на экране.
-    pub fn focus_search(&self) -> Task<Message> {
-        if self.section == Section::Liked && !self.tracks().is_empty() {
-            iced::widget::operation::focus(SEARCH_ID)
-        } else {
-            Task::none()
+        if !self.stack.is_empty() {
+            return None;
+        }
+        match self.section {
+            Section::Liked if !self.query.is_empty() => Some(self.search(String::new())),
+            Section::Search if !self.search.input.is_empty() => Some(self.clear_catalog_search()),
+            _ => None,
         }
     }
 
-    /// Дальше этого список не прокрутить. Пока `scrollable` не сообщил свою
-    /// высоту, берём высоту окна: цель поправится при первом сообщении.
-    fn max_scroll(&self) -> f32 {
-        let height = self.list_height.unwrap_or(self.viewport * 0.5);
-        (self.list_content() - height).max(0.0)
+    /// Ctrl + F: в «Мне нравится» — поиск трека в списке, в других
+    /// разделах — поиск по каталогу.
+    pub fn focus_search(&mut self, http: Option<&reqwest::Client>) -> Task<Message> {
+        if self.section == Section::Liked && self.stack.is_empty() {
+            return if self.tracks().is_empty() {
+                Task::none()
+            } else {
+                iced::widget::operation::focus(SEARCH_ID)
+            };
+        }
+        if self.section == Section::Search && self.stack.is_empty() {
+            return iced::widget::operation::focus(pages::CATALOG_SEARCH_ID);
+        }
+        self.nav(Section::Search, http)
+    }
+
+    /// Поле поиска по каталогу очищено.
+    fn clear_catalog_search(&mut self) -> Task<Message> {
+        let input = self.search_input(String::new());
+        Task::batch([
+            input,
+            iced::widget::operation::focus(pages::CATALOG_SEARCH_ID),
+        ])
     }
 
     /// События плеера: позиция, конец трека, ошибки.
@@ -556,22 +647,33 @@ impl Library {
         http: Option<&reqwest::Client>,
     ) -> (Task<Message>, Option<Effect>) {
         let effect = match message {
-            Message::Nav(section) => {
-                // Список при возврате в раздел создаётся заново, с начала.
-                if section != self.section {
-                    self.scroll_y = 0.0;
-                    self.glide = None;
-                }
-                self.section = section;
-                None
+            Message::Nav(section) => return (self.nav(section, http), None),
+            Message::Open(target) => return (self.open(target, false, http), None),
+            Message::PlayCard(target) => return (self.open(target, true, http), None),
+            Message::Back => return (self.back().unwrap_or_else(Task::none), None),
+            Message::PageLoaded(serial, page, loaded) => {
+                return self.page_loaded(serial, page, loaded, http);
             }
+            Message::RetryPage => return (self.retry_page(http), None),
+            Message::CollectionLoaded(collected) => self.collection_loaded(collected),
+            Message::RetryCollection => {
+                return (self.load_collection(self.section, true, http), None);
+            }
+            Message::SearchInput(text) => return (self.search_input(text), None),
+            Message::SearchSettled(edit) => return (self.search_settled(Some(edit), http), None),
+            Message::SearchSubmit => return (self.search_settled(None, http), None),
+            Message::SearchTab(tab) => return (self.search_tab(tab, http), None),
+            Message::SearchLoaded(generation, kind, page, result) => {
+                return self.search_loaded(generation, kind, page, result, http);
+            }
+            Message::ClearCatalogSearch => return (self.clear_catalog_search(), None),
+            Message::RetrySearch => return (self.retry_search(http), None),
             Message::LikesLoaded(result) => match result {
                 Ok(tracks) => {
                     self.haystacks = tracks.iter().map(filter::haystack).collect();
+                    self.liked = tracks.iter().map(|track| track.id.clone()).collect();
                     self.likes = Likes::Ready(tracks);
                     self.shown = filter::matching(&self.haystacks, &self.query);
-                    self.selected = None;
-                    self.stop();
                     None
                 }
                 Err(failure) if failure.kind == FailureKind::Unauthorized => Some(Effect::Relogin),
@@ -597,7 +699,8 @@ impl Library {
                 {
                     glide.retarget(max);
                 }
-                None
+                // Список прокрутили к концу — догружаем следующую страницу.
+                return (self.more(http), None);
             }
             Message::Wheel(lines) => {
                 let max = self.max_scroll();
@@ -618,31 +721,13 @@ impl Library {
             }
             Message::Search(query) => return (self.search(query), None),
             Message::ClearSearch => return (self.search(String::new()), None),
-            Message::Select(index) => {
-                self.selected = Some(index);
+            Message::Select(key, index) => {
+                self.selected = Some((key, index));
                 None
             }
-            Message::Play(index) => {
-                self.player.skipped = 0;
-                self.start(index, 0.0)
-            }
-            Message::PlayAll => {
-                self.player.skipped = 0;
-                let first = if self.player.shuffle {
-                    self.shuffle_order(None);
-                    self.player.order.first().copied()
-                } else {
-                    self.tracks().iter().position(|track| track.available)
-                };
-                first.and_then(|index| self.start(index, 0.0))
-            }
-            Message::ShuffleAll => {
-                self.player.shuffle = true;
-                self.player.skipped = 0;
-                self.shuffle_order(None);
-                let first = self.player.order.first().copied();
-                first.and_then(|index| self.start(index, 0.0))
-            }
+            Message::PlayFrom(key, index) => self.play_from(key, index),
+            Message::PlayList(key) => self.play_list(key, false),
+            Message::ShuffleList(key) => self.play_list(key, true),
             Message::TogglePlay => {
                 self.motion.pulse = anim::entering(anim::PANEL, Instant::now());
                 self.toggle_play()
@@ -662,7 +747,7 @@ impl Library {
                 }
                 None
             }
-            Message::Previous => match self.player.current {
+            Message::Previous => match self.queue.as_ref().map(|queue| queue.current) {
                 Some(_) if self.player.position > RESTART_AFTER => {
                     self.seek_to(0.0);
                     None
@@ -675,12 +760,18 @@ impl Library {
             },
             Message::Next => {
                 self.player.skipped = 0;
-                self.player.current.and_then(|index| self.step(index, true))
+                self.queue
+                    .as_ref()
+                    .map(|queue| queue.current)
+                    .and_then(|index| self.step(index, true))
             }
             Message::ToggleShuffle => {
                 self.player.shuffle = !self.player.shuffle;
-                if self.player.shuffle {
-                    self.shuffle_order(self.player.current);
+                if self.player.shuffle
+                    && let Some(queue) = &mut self.queue
+                {
+                    let current = queue.current;
+                    queue.shuffle(Some(current), &mut self.rng);
                 }
                 None
             }
@@ -750,23 +841,25 @@ impl Library {
         (Task::none(), effect)
     }
 
-    /// Запускает трек `index` с секунды `from`.
+    /// Запускает трек `index` очереди с секунды `from`.
     fn start(&mut self, index: usize, from: f32) -> Option<Effect> {
-        let track_id = self
-            .tracks()
-            .get(index)
-            .filter(|track| track.available)?
-            .id
-            .clone();
+        let queue = self.queue.as_mut()?;
+        let track = queue.get(index)?.clone();
+        let track_id = queue::sound_id(&track)?;
+        queue.current = index;
         let now = Instant::now();
-        if self.player.current != Some(index) {
+        let changed = self
+            .motion
+            .cover_now
+            .as_ref()
+            .is_none_or(|shown| shown.id != track.id);
+        if changed {
             // Обложка прежнего трека тает под новой.
-            self.motion.cover_from = self.player.current;
+            self.motion.cover_from = self.motion.cover_now.replace(track);
             self.motion.cover_fade = anim::entering(anim::COVER, now);
         }
         self.motion.pulse = anim::entering(anim::PANEL, now);
         let player = &mut self.player;
-        player.current = Some(index);
         player.playing = true;
         player.loaded = true;
         player.buffering = true;
@@ -776,7 +869,6 @@ impl Library {
         player.sounded = false;
         player.session = player.session.wrapping_add(1);
         player.seeks = 0;
-        self.selected = Some(index);
         let command = Command::Play {
             id: self.player.session,
             track_id,
@@ -802,20 +894,8 @@ impl Library {
         self.player.buffering = false;
     }
 
-    /// Ничего не играет: новый список.
-    fn stop(&mut self) {
-        if self.player.loaded {
-            self.send(Command::Stop);
-        }
-        self.halt();
-        self.player.current = None;
-        self.player.position = 0.0;
-        self.player.kbps = None;
-        self.player.order.clear();
-    }
-
     fn toggle_play(&mut self) -> Option<Effect> {
-        let index = self.player.current?;
+        let index = self.queue.as_ref()?.current;
         if self.player.playing {
             self.player.playing = false;
             self.send(Command::Pause);
@@ -868,16 +948,16 @@ impl Library {
         }
     }
 
-    /// Трек доигран: дальше по повтору и списку.
+    /// Трек доигран: дальше по повтору и очереди.
     fn finished(&mut self) -> Option<Effect> {
-        let index = self.player.current?;
+        let index = self.queue.as_ref()?.current;
         if self.player.repeat == Repeat::One {
             return self.start(index, 0.0);
         }
         match self.neighbour(index, true) {
             Some(next) => self.start(next, 0.0),
             None => {
-                // Список кончился: трек остаётся выбранным, с начала.
+                // Очередь кончилась: трек остаётся выбранным, с начала.
                 self.player.position = 0.0;
                 None
             }
@@ -891,12 +971,8 @@ impl Library {
         if *error == PlayError::Unauthorized {
             return Some(Effect::Relogin);
         }
-        let index = self.player.current?;
-        let title = self
-            .tracks()
-            .get(index)
-            .map(Track::display_title)
-            .unwrap_or_default();
+        let index = self.queue.as_ref()?.current;
+        let title = self.current().map(Track::display_title).unwrap_or_default();
         // С самим треком беда — пробуем следующий, но не бесконечно.
         if error.track_specific() && self.player.skipped < MAX_SKIPS {
             let next = self.neighbour(index, true).filter(|next| *next != index);
@@ -924,106 +1000,12 @@ impl Library {
         self.start(next, 0.0)
     }
 
-    /// Соседний доступный трек: по порядку перемешивания или по списку. С
-    /// повтором списка — по кругу.
+    /// Соседний доступный трек очереди с учётом перемешивания и повтора.
     fn neighbour(&mut self, from: usize, forward: bool) -> Option<usize> {
-        let wrap = self.player.repeat == Repeat::All;
-        if self.player.shuffle {
-            if !self.player.order.contains(&from) {
-                self.shuffle_order(Some(from));
-            }
-            let order = &self.player.order;
-            let at = order.iter().position(|index| *index == from)?;
-            let count = order.len();
-            let next = match (forward, at) {
-                (true, at) if at + 1 < count => at + 1,
-                (true, _) if wrap => 0,
-                (false, 0) if wrap => count.checked_sub(1)?,
-                (false, at) if at > 0 => at - 1,
-                _ => return None,
-            };
-            return order.get(next).copied();
-        }
-        let count = self.tracks().len();
-        let mut index = from;
-        for _ in 0..count {
-            index = match (forward, index) {
-                (true, i) if i + 1 < count => i + 1,
-                (true, _) if wrap => 0,
-                (false, 0) if wrap => count.saturating_sub(1),
-                (false, i) if i > 0 => i - 1,
-                _ => return None,
-            };
-            if self
-                .tracks()
-                .get(index)
-                .is_some_and(|track| track.available)
-            {
-                return Some(index);
-            }
-        }
-        None
-    }
-
-    /// Новый порядок перемешивания доступных треков. `first` — в начало.
-    fn shuffle_order(&mut self, first: Option<usize>) {
-        let mut order: Vec<usize> = self
-            .tracks()
-            .iter()
-            .enumerate()
-            .filter(|(_, track)| track.available)
-            .map(|(index, _)| index)
-            .collect();
-        // Тасование Фишера — Йетса.
-        for i in (1..order.len()).rev() {
-            let bound = u64::try_from(i).unwrap_or(u64::MAX).saturating_add(1);
-            let j = usize::try_from(self.random() % bound).unwrap_or(0);
-            order.swap(i, j);
-        }
-        if let Some(first) = first
-            && let Some(at) = order.iter().position(|index| *index == first)
-        {
-            order.swap(0, at);
-        }
-        self.player.order = order;
-    }
-
-    /// Простой генератор xorshift: для перемешивания его хватает.
-    fn random(&mut self) -> u64 {
-        let mut x = self.seed;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.seed = x;
-        x
-    }
-
-    /// Диапазон строк, которые надо построить.
-    fn visible_range(&self) -> (usize, usize) {
-        let count = self.shown_count();
-        let first = rows_in(self.scroll_y - LIST_TOP).saturating_sub(OVERSCAN);
-        let last = (rows_in(self.scroll_y - LIST_TOP + self.viewport) + 1 + OVERSCAN).min(count);
-        (first.min(last), last)
-    }
-
-    /// Обложки, которые сейчас на экране: видимые строки и трек в плеере.
-    pub fn visible_covers(&self) -> Vec<&str> {
-        let (first, last) = self.visible_range();
-        let mut uris: Vec<&str> = self
-            .current()
-            .and_then(|track| track.cover_uri.as_deref())
-            .into_iter()
-            .collect();
-        if self.section == Section::Liked {
-            let tracks = self.tracks();
-            uris.extend(
-                (first..last)
-                    .filter_map(|row| self.shown_at(row))
-                    .filter_map(|index| tracks.get(index))
-                    .filter_map(|track| track.cover_uri.as_deref()),
-            );
-        }
-        uris
+        let (shuffle, wrap) = (self.player.shuffle, self.player.repeat == Repeat::All);
+        self.queue
+            .as_mut()?
+            .neighbour(from, forward, shuffle, wrap, &mut self.rng)
     }
 
     // ------------------------------------------------------------ вид
@@ -1039,10 +1021,15 @@ impl Library {
         turn: f32,
     ) -> Element<'a, App> {
         let collapsed = prefs.sidebar_collapsed;
-        let content: Element<'a, App> = match self.section {
-            Section::Liked => self.liked(covers, turn),
-            Section::Settings => self.settings(prefs),
-            section => placeholder(section),
+        let content: Element<'a, App> = match (self.stack.last(), self.section) {
+            (Some(entry), _) => self.page_view(entry, covers, turn, moment.now),
+            (None, Section::Liked) => self.liked(covers, turn),
+            (None, Section::Settings) => self.settings(prefs),
+            (None, Section::Search) => self.search_view(covers, turn, moment.now),
+            (None, Section::Playlists | Section::Albums | Section::Artists) => {
+                self.collection_view(covers, turn, moment.now)
+            }
+            (None, section) => placeholder(section),
         };
         let panel = container(super::appear(content, moment.page))
             .width(Length::Fill)
@@ -1301,10 +1288,6 @@ impl Library {
         container(menu).width(width).clip(true).into()
     }
 
-    pub fn section(&self) -> Section {
-        self.section
-    }
-
     /// Идёт ли переход внутри главного окна.
     pub fn transitioning(&self, now: Instant) -> bool {
         self.motion.running(now) || self.fullscreen.is_animating(now) || self.glide.is_some()
@@ -1429,7 +1412,7 @@ impl Library {
                             bottom: 0.0,
                             left: PAGE_SIDE,
                         }),
-                        self.rows(tracks, covers),
+                        self.liked_rows(tracks, covers),
                     ]
                     .into()
                 };
@@ -1453,116 +1436,21 @@ impl Library {
         }
     }
 
-    /// Видимые строки списка, выше и ниже — пустое место нужной высоты.
-    fn rows<'a>(&'a self, tracks: &'a [Track], covers: &'a Covers) -> Element<'a, App> {
-        let (first, last) = self.visible_range();
-        let mut list = column![Space::new().height(LIST_TOP + rows_height(first))];
-        // Номер в строке — номер трека во всём списке, даже при поиске.
-        for index in (first..last).filter_map(|row| self.shown_at(row)) {
-            if let Some(track) = tracks.get(index) {
-                list = list.push(self.track_row(index, track, covers));
-            }
-        }
-        list = list.push(
-            Space::new().height(rows_height(self.shown_count().saturating_sub(last)) + LIST_BOTTOM),
-        );
-        // Полоса прокрутки своя (у iced ручка длинного списка — точка), колесо
-        // прокручивает плавно. Тачпад и клавиши — как обычно у `scrollable`.
-        let list = scrollable(container(list).padding(Padding {
-            top: 0.0,
-            right: PAGE_SIDE,
-            bottom: 0.0,
-            left: PAGE_SIDE,
-        }))
-        .id(LIST_ID)
-        .direction(scrollable::Direction::Vertical(
-            scrollable::Scrollbar::hidden(),
-        ))
-        .on_scroll(|viewport| Lib(Message::Scrolled(viewport)))
-        .height(Length::Fill)
-        .style(|_, _| {
-            let rail = scrollable::Rail {
-                background: None,
-                border: Border::default(),
-                scroller: scrollable::Scroller {
-                    background: Color::TRANSPARENT.into(),
-                    border: Border::default(),
-                },
-            };
-            scrollable::Style {
-                container: container::Style::default(),
-                vertical_rail: rail,
-                horizontal_rail: rail,
-                gap: None,
-                auto_scroll: scrollable::AutoScroll {
-                    background: theme::SURFACE_3.into(),
-                    border: Border::default().rounded(widgets::ROUND),
-                    shadow: widgets::raised_shadow(),
-                    icon: theme::TEXT_PRIMARY,
-                },
-            }
-        });
-        let rail = row![
-            Space::new().width(Length::Fill),
-            container(scroll::rail(self.scroll_y, self.list_content(), |offset| {
-                Lib(Message::ScrollTo(offset))
-            }))
-            .padding(Padding {
-                right: RAIL_RIGHT,
-                ..Padding::ZERO
-            }),
-        ];
-        iced::widget::stack![
-            scroll::wheel(list, |lines| Lib(Message::Wheel(lines))),
-            rail
-        ]
-        .height(Length::Fill)
-        .into()
-    }
-
-    fn track_row<'a>(
-        &'a self,
-        index: usize,
-        track: &'a Track,
-        covers: &'a Covers,
-    ) -> Element<'a, App> {
-        let current = self.player.current == Some(index);
-        let selected = self.selected == Some(index);
-        let make = |hovered: bool| -> Element<'a, App> {
-            container(track_cells(
-                index,
-                track,
-                covers,
-                current,
-                self.player.playing,
-                self.player.buffering,
-                hovered,
-            ))
-            .height(ROW)
-            .padding(Padding {
-                top: 0.0,
-                right: 16.0,
-                bottom: 0.0,
-                left: 8.0,
-            })
-            .center_y(ROW)
-            .into()
-        };
-        // Фон строки проявляется плавно; выбранная строка подсвечена всегда.
-        let (idle, hovered) = if selected {
-            (theme::SURFACE_3, theme::SURFACE_3)
+    /// Строки «Мне нравится». Номер в строке — номер трека во всём списке,
+    /// даже при поиске; очередь при поиске — найденные треки.
+    fn liked_rows<'a>(&'a self, tracks: &'a [Track], covers: &'a Covers) -> Element<'a, App> {
+        let key = if self.query.trim().is_empty() {
+            ListKey::Liked
         } else {
-            (theme::clear(theme::SURFACE_2), theme::SURFACE_2)
+            ListKey::LikedFound(self.query.clone())
         };
-        mouse_area(anim::hover_fill(
-            anim::swap(make(false), make(true)),
-            idle,
-            hovered,
-            widgets::RADIUS_M,
-        ))
-        .on_press(Lib(Message::Select(index)))
-        .on_double_click(Lib(Message::Play(index)))
-        .into()
+        let filtered = !matches!(key, ListKey::Liked);
+        self.scroller(self.body(), None, move |row| {
+            let index = self.shown_at(row)?;
+            let track = tracks.get(index)?;
+            let at = if filtered { row } else { index };
+            Some(self.track_row(&key, at, index + 1, track, covers))
+        })
     }
 
     fn settings(&self, prefs: &Prefs) -> Element<'_, App> {
@@ -1643,6 +1531,7 @@ impl Library {
         let player = &self.player;
         let track = self.current();
         let has_track = track.is_some();
+        let liked = track.is_some_and(|track| self.liked.contains(&track.id));
         let on = |message: Message| has_track.then_some(Lib(message));
         let motion = &self.motion;
 
@@ -1651,7 +1540,7 @@ impl Library {
                 crossfade_cover(
                     covers,
                     track,
-                    motion.cover_from.and_then(|index| self.tracks().get(index)),
+                    motion.cover_from.as_ref(),
                     anim::progress(&motion.cover_fade, now),
                     56.0,
                     8.0,
@@ -1781,7 +1670,17 @@ impl Library {
                 player.repeat != Repeat::Off,
                 on(Message::CycleRepeat),
             ),
-            widgets::icon_button(Icon::HeartFilled, Size::S, has_track, on(Message::Noop)),
+            // Сердце закрашено, только если трек в «Мне нравится».
+            widgets::icon_button(
+                if liked {
+                    Icon::HeartFilled
+                } else {
+                    Icon::Heart
+                },
+                Size::S,
+                liked,
+                on(Message::Noop),
+            ),
         ]);
 
         // Без длительности трек играет, но перематывать некуда.
@@ -1913,32 +1812,65 @@ impl Library {
     }
 }
 
-/// Сколько целых строк помещается в `px`. Отрицательное и не число — ноль.
-fn rows_in(px: f32) -> usize {
-    if px.is_finite() && px > 0.0 {
-        // Значение неотрицательное и не больше высоты списка: потерь нет.
-        (px / ROW) as usize
-    } else {
-        0
-    }
-}
-
-/// Высота `count` строк. Строк меньше 2^24, поэтому точность не теряется.
-fn rows_height(count: usize) -> f32 {
-    count as f32 * ROW
+/// Прокручиваемый список раздела высотой `total`: полоса прокрутки своя (у
+/// iced ручка длинного списка — точка), колесо прокручивает плавно. Тачпад и
+/// клавиши — как обычно у `scrollable`.
+fn scrolling<'a>(library: &Library, list: Element<'a, App>, total: f32) -> Element<'a, App> {
+    let list = scrollable(container(list).padding(Padding {
+        top: 0.0,
+        right: PAGE_SIDE,
+        bottom: 0.0,
+        left: PAGE_SIDE,
+    }))
+    .id(LIST_ID)
+    .direction(scrollable::Direction::Vertical(
+        scrollable::Scrollbar::hidden(),
+    ))
+    .on_scroll(|viewport| Lib(Message::Scrolled(viewport)))
+    .height(Length::Fill)
+    .style(|_, _| {
+        let rail = scrollable::Rail {
+            background: None,
+            border: Border::default(),
+            scroller: scrollable::Scroller {
+                background: Color::TRANSPARENT.into(),
+                border: Border::default(),
+            },
+        };
+        scrollable::Style {
+            container: container::Style::default(),
+            vertical_rail: rail,
+            horizontal_rail: rail,
+            gap: None,
+            auto_scroll: scrollable::AutoScroll {
+                background: theme::SURFACE_3.into(),
+                border: Border::default().rounded(widgets::ROUND),
+                shadow: widgets::raised_shadow(),
+                icon: theme::TEXT_PRIMARY,
+            },
+        }
+    });
+    let rail = row![
+        Space::new().width(Length::Fill),
+        container(scroll::rail(library.scroll_y, total, |offset| {
+            Lib(Message::ScrollTo(offset))
+        }))
+        .padding(Padding {
+            right: RAIL_RIGHT,
+            ..Padding::ZERO
+        }),
+    ];
+    iced::widget::stack![
+        scroll::wheel(list, |lines| Lib(Message::Wheel(lines))),
+        rail
+    ]
+    .height(Length::Fill)
+    .into()
 }
 
 /// Секунды ползунка в `Duration`. Отрицательное и не число — ноль.
 fn seconds(value: f32) -> Duration {
     Duration::try_from_secs_f32(value.max(0.0)).unwrap_or_default()
-}
-
-/// Затравка генератора перемешивания: время запуска, не ноль.
-fn seed() -> u64 {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.subsec_nanos());
-    u64::from(nanos) | 1 << 63
 }
 
 fn clock(seconds: f32) -> String {
@@ -2356,13 +2288,13 @@ fn liked_header<'a>(tracks: &[Track], with_actions: bool) -> Element<'a, App> {
                     Kind::Primary,
                     Some(Icon::PlayFilled),
                     "Слушать",
-                    Some(Lib(Message::PlayAll)),
+                    Some(Lib(Message::PlayList(ListKey::Liked))),
                 ),
                 widgets::action(
                     Kind::Secondary,
                     Some(Icon::Shuffle),
                     "Перемешать",
-                    Some(Lib(Message::ShuffleAll)),
+                    Some(Lib(Message::ShuffleList(ListKey::Liked))),
                 ),
                 widgets::icon_button(Icon::More, Size::M, false, Some(Lib(Message::Noop))),
             ]
@@ -2402,11 +2334,39 @@ fn columns<'a>(
     .into()
 }
 
-/// Поле «Поиск трека»: «таблетка» с лупой, крестик сбрасывает запрос.
+/// Поле поиска: где оно, подсказка и высота.
+struct SearchField {
+    id: &'static str,
+    placeholder: &'static str,
+    height: f32,
+}
+
+/// Поле «Поиск трека» в «Мне нравится».
 fn search_box<'a>(query: &str) -> Element<'a, App> {
-    let input = text_input("Поиск трека", query)
-        .id(SEARCH_ID)
-        .on_input(|value| Lib(Message::Search(value)))
+    search_field(
+        SearchField {
+            id: SEARCH_ID,
+            placeholder: "Поиск трека",
+            height: SEARCH_HEIGHT,
+        },
+        query,
+        |value| Lib(Message::Search(value)),
+        None,
+        Lib(Message::ClearSearch),
+    )
+}
+
+/// Поле поиска — «таблетка» с лупой, крестик сбрасывает запрос.
+fn search_field<'a>(
+    field: SearchField,
+    query: &str,
+    on_input: impl Fn(String) -> App + 'a,
+    on_submit: Option<App>,
+    on_clear: App,
+) -> Element<'a, App> {
+    let mut input = text_input(field.placeholder, query)
+        .id(field.id)
+        .on_input(on_input)
         .size(14)
         .padding(0)
         .style(|_, _| text_input::Style {
@@ -2417,23 +2377,26 @@ fn search_box<'a>(query: &str) -> Element<'a, App> {
             value: theme::TEXT_PRIMARY,
             selection: theme::alpha(theme::accent(), 0.35),
         });
+    if let Some(message) = on_submit {
+        input = input.on_submit(message);
+    }
     let glyph: Element<'a, App> = icon(Icon::Search, 18.0, theme::TEXT_TERTIARY).into();
-    let mut field = row![glyph, input].spacing(12).align_y(Alignment::Center);
+    let mut row = row![glyph, input].spacing(12).align_y(Alignment::Center);
     let right = if query.is_empty() {
         16.0
     } else {
-        field = field.push(widgets::icon_button(
+        row = row.push(widgets::icon_button(
             Icon::Close,
             Size::S,
             false,
-            Some(Lib(Message::ClearSearch)),
+            Some(on_clear),
         ));
         6.0
     };
-    container(field)
+    container(row)
         .width(Length::Fill)
-        .height(SEARCH_HEIGHT)
-        .center_y(SEARCH_HEIGHT)
+        .height(field.height)
+        .center_y(field.height)
         .padding(Padding {
             top: 0.0,
             right,
@@ -2473,82 +2436,6 @@ fn list_header<'a>() -> Element<'a, App> {
         widgets::divider(),
     ]
     .into()
-}
-
-fn track_cells<'a>(
-    index: usize,
-    track: &'a Track,
-    covers: &'a Covers,
-    current: bool,
-    playing: bool,
-    buffering: bool,
-    hovered: bool,
-) -> Element<'a, App> {
-    let available = track.available;
-    let (title_color, other_color) = match (available, current) {
-        (false, _) => (theme::TEXT_DISABLED, theme::TEXT_DISABLED),
-        (true, true) => (theme::accent(), theme::TEXT_SECONDARY),
-        (true, false) => (theme::TEXT_PRIMARY, theme::TEXT_SECONDARY),
-    };
-    let number = index.saturating_add(1).to_string();
-    // Играющий: столбики, при наведении — пауза; на паузе — play акцентом.
-    let index_cell: Element<'a, App> = match (available, current, playing, hovered) {
-        (true, true, true, true) => {
-            play_cell(Icon::PauseFilled, theme::TEXT_PRIMARY, Message::TogglePlay)
-        }
-        (true, true, true, false) => anim::equalizer(theme::accent(), !buffering),
-        (true, true, false, _) => play_cell(Icon::PlayFilled, theme::accent(), Message::TogglePlay),
-        (true, false, _, true) => {
-            play_cell(Icon::PlayFilled, theme::TEXT_PRIMARY, Message::Play(index))
-        }
-        _ => theme::line(number, Style::Secondary, theme::TEXT_TERTIARY).into(),
-    };
-    let cover = if available {
-        widgets::cover(cover_art(covers, track), 40.0, widgets::RADIUS_S)
-    } else {
-        widgets::block(40, 40, theme::SURFACE_3, widgets::RADIUS_S)
-    };
-    let title = column![
-        theme::line(track.display_title(), Style::Body, title_color),
-        theme::line(track.artists_text(), Style::Secondary, other_color),
-    ]
-    .spacing(2);
-    let album = theme::line(
-        track.album_title.clone().unwrap_or_default(),
-        Style::Secondary,
-        other_color,
-    );
-    let like = icon(
-        Icon::HeartFilled,
-        18.0,
-        if available {
-            theme::accent()
-        } else {
-            theme::TEXT_DISABLED
-        },
-    );
-    let duration = theme::line(
-        track.duration_text(),
-        Style::Secondary,
-        theme::TEXT_TERTIARY,
-    );
-    let cells = columns(
-        index_cell,
-        cover,
-        title.into(),
-        album.into(),
-        like.into(),
-        duration.into(),
-    );
-    if available {
-        cells
-    } else {
-        widgets::with_tooltip(
-            cells,
-            "Трек недоступен: его убрали из каталога или он недоступен в вашем регионе",
-            tooltip::Position::FollowCursor,
-        )
-    }
 }
 
 fn play_cell<'a>(name: Icon, color: Color, message: Message) -> Element<'a, App> {
@@ -2642,7 +2529,7 @@ fn quality_badge<'a>(kbps: u32, full: bool) -> Element<'a, App> {
 /// Блок по центру панели: иконка, заголовок, текст, кнопка.
 fn state_block<'a>(
     badge: Element<'a, App>,
-    title: &'a str,
+    title: impl iced::widget::text::IntoFragment<'a>,
     text: String,
     action: Element<'a, App>,
 ) -> Element<'a, App> {

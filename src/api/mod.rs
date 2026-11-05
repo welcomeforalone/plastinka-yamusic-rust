@@ -4,6 +4,7 @@
 //! ошибки возвращаются как значения и не роняют приложение.
 
 mod account;
+mod catalog;
 mod stream;
 mod tracks;
 
@@ -15,8 +16,16 @@ use crate::net::NetError;
 pub use account::{
     Account, AccountStatus, Date, PlaybackPermit, PlusDetails, Subscription, fetch_status,
 };
+pub use catalog::{
+    ARTIST_TRACKS_PAGE, Album, AlbumCard, AlbumKind, Artist, ArtistCard, Found, MyPlaylists, Page,
+    Playlist, PlaylistCard, SEARCH_LAST_PAGE, SearchKind, SearchResult, compact_number,
+    fetch_album, fetch_artist, fetch_artist_tracks, fetch_liked_albums, fetch_liked_artists,
+    fetch_my_playlists, fetch_playlist, search, total_duration,
+};
 pub use stream::{StreamError, StreamSource, fetch_stream_source};
-pub use tracks::{LikedIds, TRACKS_BATCH, Track, fetch_liked_ids, fetch_tracks};
+pub use tracks::{
+    ArtistRef, LikedIds, TRACKS_BATCH, Track, artists_text, fetch_liked_ids, fetch_tracks,
+};
 
 const API_BASE: &str = "https://api.music.yandex.net";
 
@@ -37,6 +46,13 @@ pub enum ApiError {
     UnexpectedStatus(u16),
     #[error("сервис музыки прислал непонятный ответ")]
     InvalidResponse,
+    /// Альбом, исполнитель или плейлист удалён или его нет в каталоге.
+    #[error("не найдено: его удалили или убрали из каталога")]
+    NotFound,
+    /// Каталог отказал в доступе (например, чужой закрытый плейлист). Это
+    /// не «токен не действует»: каталог отвечает и без токена.
+    #[error("нет доступа: владелец закрыл его или он недоступен в вашем регионе")]
+    Forbidden,
     /// Неверно задан отладочный хук `PLASTINKA_TEST_*`.
     #[cfg(debug_assertions)]
     #[error("{0}")]

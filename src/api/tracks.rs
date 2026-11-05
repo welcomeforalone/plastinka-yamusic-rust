@@ -38,13 +38,22 @@ pub struct LikedIds {
     pub unreadable: usize,
 }
 
+/// Исполнитель трека или альбома: имя и, если есть, идентификатор для
+/// перехода на его страницу.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtistRef {
+    /// Только число: идентификатор попадает в адрес запроса.
+    pub id: Option<String>,
+    pub name: String,
+}
+
 /// Трек для списка.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Track {
     pub id: String,
     pub title: Option<String>,
     pub version: Option<String>,
-    pub artists: Vec<String>,
+    pub artists: Vec<ArtistRef>,
     pub album_id: Option<String>,
     pub album_title: Option<String>,
     pub duration: Option<Duration>,
@@ -56,7 +65,7 @@ pub struct Track {
 
 impl Track {
     /// Заглушка для трека, данные которого получить не удалось.
-    fn missing(id: &str) -> Self {
+    pub(super) fn missing(id: &str) -> Self {
         Self {
             id: id.to_owned(),
             title: None,
@@ -81,11 +90,7 @@ impl Track {
 
     /// Исполнители через запятую.
     pub fn artists_text(&self) -> String {
-        if self.artists.is_empty() {
-            "Неизвестный исполнитель".to_owned()
-        } else {
-            self.artists.join(", ")
-        }
+        artists_text(&self.artists)
     }
 
     /// Длительность `м:сс` или `ч:мм:сс`, без неё — `-:--`.
@@ -125,6 +130,15 @@ pub async fn fetch_liked_ids(
     parse_liked_ids(status, &body)
 }
 
+/// Исполнители через запятую, без них — «Неизвестный исполнитель».
+pub fn artists_text(artists: &[ArtistRef]) -> String {
+    if artists.is_empty() {
+        return "Неизвестный исполнитель".to_owned();
+    }
+    let names: Vec<&str> = artists.iter().map(|artist| artist.name.as_str()).collect();
+    names.join(", ")
+}
+
 /// Данные треков в порядке `ids`. Для каждого идентификатора — трек или
 /// заглушка «недоступен». Запросы идут пачками по [`TRACKS_BATCH`];
 /// `progress` получает, сколько идентификаторов уже обработано.
@@ -157,7 +171,7 @@ pub async fn fetch_tracks(
     .await
 }
 
-async fn post_tracks(
+pub(super) async fn post_tracks(
     http: &reqwest::Client,
     token: &str,
     ids: &[String],
@@ -184,7 +198,7 @@ async fn post_tracks(
 /// Сломанный запрос отличаем от плохих идентификаторов по всему списку, а не
 /// по одной пачке: ни одного успешного ответа на несколько треков (или
 /// слишком много отказов до первого успеха) — ошибка.
-async fn load_tracks<F>(
+pub(super) async fn load_tracks<F>(
     ids: &[String],
     mut send: impl FnMut(Vec<String>) -> F,
     mut progress: impl FnMut(usize),
@@ -292,36 +306,28 @@ struct TracksEnvelope {
     result: Vec<Value>,
 }
 
-fn parse_tracks(status: StatusCode, body: &str) -> Result<Vec<Track>, ApiError> {
+pub(super) fn parse_tracks(status: StatusCode, body: &str) -> Result<Vec<Track>, ApiError> {
     check_status(status)?;
     let envelope: TracksEnvelope =
         serde_json::from_str(body).map_err(|_| ApiError::InvalidResponse)?;
     Ok(envelope.result.iter().filter_map(parse_track).collect())
 }
 
-fn parse_track(value: &Value) -> Option<Track> {
+/// Трек из ответа. Нет понятного `id` — `None`.
+pub(super) fn parse_track(value: &Value) -> Option<Track> {
     let id = value.get("id").and_then(id_text)?;
     let text = |key: &str| value.get(key).and_then(Value::as_str).and_then(clean);
     let album = value
         .get("albums")
         .and_then(Value::as_array)
         .and_then(|albums| albums.first());
-    let artists = value
-        .get("artists")
-        .and_then(Value::as_array)
-        .map(|artists| {
-            artists
-                .iter()
-                .filter_map(|artist| artist.get("name").and_then(Value::as_str).and_then(clean))
-                .collect()
-        })
-        .unwrap_or_default();
+    let artists = parse_artist_refs(value.get("artists"));
     let error = value.get("error").is_some_and(|error| !error.is_null());
     Some(Track {
         title: text("title"),
         version: text("version"),
         artists,
-        album_id: album.and_then(|album| album.get("id")).and_then(id_text),
+        album_id: album.and_then(|album| album.get("id")).and_then(numeric_id),
         album_title: album
             .and_then(|album| album.get("title"))
             .and_then(Value::as_str)
@@ -336,10 +342,43 @@ fn parse_track(value: &Value) -> Option<Track> {
     })
 }
 
+/// Исполнители из массива `artists`: у каждого имя, идентификатор — если
+/// это число. Без имени исполнитель пропускается.
+pub(super) fn parse_artist_refs(value: Option<&Value>) -> Vec<ArtistRef> {
+    value
+        .and_then(Value::as_array)
+        .map(|artists| {
+            artists
+                .iter()
+                .filter_map(|artist| {
+                    let name = artist.get("name").and_then(Value::as_str).and_then(clean)?;
+                    Some(ArtistRef {
+                        id: artist.get("id").and_then(numeric_id),
+                        name,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Числовой идентификатор (альбома, исполнителя, пользователя, плейлиста)
+/// строкой или числом: от 1 до 20 цифр. Он попадает в адрес следующего
+/// запроса, поэтому другие символы не принимаем.
+pub(super) fn numeric_id(value: &Value) -> Option<String> {
+    let text = match value {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.as_u64()?.to_string(),
+        _ => return None,
+    };
+    let digits = (1..=20).contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_digit());
+    (digits && text.bytes().any(|byte| byte != b'0')).then_some(text)
+}
+
 /// Идентификатор строкой или неотрицательным целым числом. Идентификатор
 /// попадает в вывод, поэтому берём только короткие строки из видимых
 /// символов ASCII: настоящие идентификаторы — числа и UUID.
-fn id_text(value: &Value) -> Option<String> {
+pub(super) fn id_text(value: &Value) -> Option<String> {
     match value {
         Value::String(text)
             if (1..=64).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_graphic()) =>
@@ -354,7 +393,7 @@ fn id_text(value: &Value) -> Option<String> {
 /// Текст из ответа для показа: без управляющих символов и символов смены
 /// направления письма (они могли бы испортить вывод в терминал) и лишних
 /// пробелов. Пустой — `None`.
-fn clean(text: &str) -> Option<String> {
+pub(super) fn clean(text: &str) -> Option<String> {
     let cleaned: String = text
         .chars()
         .map(|ch| if unsafe_for_output(ch) { ' ' } else { ch })

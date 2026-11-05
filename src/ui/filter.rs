@@ -1,6 +1,8 @@
 //! Поиск трека в списке «Мне нравится»: фильтр по названию и исполнителю,
 //! прямо в памяти, без запросов к API.
 
+#[cfg(test)]
+use crate::api::ArtistRef;
 use crate::api::Track;
 
 /// Строка трека, в которой ищем: название с версией и исполнители, в
@@ -9,7 +11,7 @@ pub fn haystack(track: &Track) -> String {
     let mut text = track.display_title();
     for artist in &track.artists {
         text.push(' ');
-        text.push_str(artist);
+        text.push_str(&artist.name);
     }
     normalize(&text)
 }
@@ -49,7 +51,13 @@ mod tests {
             id: "1".to_owned(),
             title: Some(title.to_owned()),
             version: version.map(str::to_owned),
-            artists: artists.iter().map(|artist| (*artist).to_owned()).collect(),
+            artists: artists
+                .iter()
+                .map(|artist| ArtistRef {
+                    id: None,
+                    name: (*artist).to_owned(),
+                })
+                .collect(),
             album_id: None,
             album_title: None,
             duration: None,
