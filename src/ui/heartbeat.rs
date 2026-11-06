@@ -6,10 +6,23 @@
 //! подписки ничего не обновляют, спектр под плеером замирает. Единственное,
 //! что в этом цикле продолжает приходить, — перерисовка окна по `WM_PAINT`
 //! (`RedrawRequested`). Сообщение, которое виджет публикует прямо во время
-//! перерисовки, iced обрабатывает тут же. Поэтому пока нужны кадры, виджет на
-//! каждой перерисовке просит следующую и (не чаще [`PERIOD`], если
-//! `smooth` выключен) публикует сообщение кадра. Когда кадры не нужны, он
-//! ничего не просит, и окно в простое не перерисовывается.
+//! перерисовки, iced обрабатывает тут же. Поэтому пока нужны кадры, виджет
+//! просит следующую перерисовку и (не чаще [`PERIOD`], если `smooth`
+//! выключен) публикует сообщение кадра. Когда кадры не нужны, он ничего не
+//! просит, и окно в простое не перерисовывается.
+//!
+//! Цена кадра — перерисовка всего окна, поэтому следующая перерисовка просится
+//! к сроку следующего кадра (`last + PERIOD`), а не на каждый vsync: иначе окно
+//! рисуется с частотой монитора. Во время перетаскивания окна это важно
+//! вдвойне: непрерывная просьба «перерисуй сейчас» превращается в цепочку
+//! `WM_PAINT` на частоте монитора, и GPU грузится заметно сильнее. Поэтому
+//! кадры во время перетаскивания ведут сами события `Moved`/`Resized` (iced
+//! доставляет их и в модальном цикле Windows): на событие виджет просит одну
+//! перерисовку, если пора публиковать кадр. Так перерисовок не больше
+//! 30 в секунду, а спектр не замирает, пока окно движется. Если мышь с
+//! зажатым окном стоит, событий нет: тогда перерисовку ставит в очередь
+//! таймер потока из `drag_pulse` (в модальном цикле он срабатывает), а кадр
+//! публикует этот виджет по своему сроку `PERIOD`.
 
 use std::time::Duration;
 
@@ -49,9 +62,34 @@ struct State {
     last: Option<Instant>,
 }
 
+/// Когда просить следующую перерисовку.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Redraw {
+    /// Сразу, на ближайшем кадре.
+    Now,
+    /// Не раньше указанного срока.
+    At(Instant),
+}
+
+/// Какая перерисовка нужна после кадра. `last` — момент последнего
+/// опубликованного кадра.
+fn next_redraw(last: Instant, smooth: bool) -> Redraw {
+    if smooth {
+        Redraw::Now
+    } else {
+        Redraw::At(last + PERIOD)
+    }
+}
+
 /// Пора ли публиковать кадр.
 fn due(last: Option<Instant>, now: Instant, smooth: bool) -> bool {
     smooth || last.is_none_or(|last| now.saturating_duration_since(last) >= PERIOD)
+}
+
+/// Просить ли перерисовку на событие перемещения или изменения размера окна.
+/// При `smooth` перерисовки и так идут на каждом кадре.
+fn redraw_on_motion(last: Option<Instant>, now: Instant, active: bool, smooth: bool) -> bool {
+    active && !smooth && due(last, now, false)
 }
 
 impl<Message> Widget<Message, Theme, iced::Renderer> for Heartbeat<'_, Message> {
@@ -88,10 +126,17 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Heartbeat<'_, Message> 
         shell: &mut Shell<'_, Message>,
         _viewport: &Rectangle,
     ) {
-        let Event::Window(window::Event::RedrawRequested(now)) = event else {
-            return;
-        };
         let state = tree.state.downcast_mut::<State>();
+        let now = match event {
+            Event::Window(window::Event::Moved(_) | window::Event::Resized(_)) => {
+                if redraw_on_motion(state.last, Instant::now(), self.active, self.smooth) {
+                    shell.request_redraw();
+                }
+                return;
+            }
+            Event::Window(window::Event::RedrawRequested(now)) => now,
+            _ => return,
+        };
         if !self.active {
             state.last = None;
             return;
@@ -100,7 +145,11 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Heartbeat<'_, Message> 
             state.last = Some(*now);
             shell.publish((self.on_frame)(*now));
         }
-        shell.request_redraw();
+        let last = state.last.unwrap_or(*now);
+        match next_redraw(last, self.smooth) {
+            Redraw::Now => shell.request_redraw(),
+            Redraw::At(at) => shell.request_redraw_at(window::RedrawRequest::At(at)),
+        }
     }
 
     fn draw(
@@ -127,5 +176,24 @@ mod tests {
         assert!(!due(Some(start), start + Duration::from_millis(10), false));
         assert!(due(Some(start), start + PERIOD, false));
         assert!(due(Some(start), start + Duration::from_millis(1), true));
+    }
+
+    #[test]
+    fn redraw_follows_frame_deadline_unless_smooth() {
+        let last = Instant::now();
+        assert_eq!(next_redraw(last, false), Redraw::At(last + PERIOD));
+        assert_eq!(next_redraw(last, true), Redraw::Now);
+    }
+
+    #[test]
+    fn motion_requests_redraw_only_when_frame_is_due() {
+        let start = Instant::now();
+        let soon = start + Duration::from_millis(10);
+        let later = start + PERIOD;
+        assert!(!redraw_on_motion(Some(start), soon, true, false));
+        assert!(redraw_on_motion(Some(start), later, true, false));
+        assert!(redraw_on_motion(None, start, true, false));
+        assert!(!redraw_on_motion(Some(start), later, true, true));
+        assert!(!redraw_on_motion(Some(start), later, false, false));
     }
 }

@@ -33,7 +33,9 @@ uuid = { version = "1.29.0", features = ["v4"] }
 opt-level = 2
 
 [lints.rust]
-unsafe_code = "forbid"
+# Единственное исключение — модуль таймера перетаскивания окна под Windows
+# (src/ui/drag_pulse.rs), там `#[allow(unsafe_code)]`.
+unsafe_code = "deny"
 
 # Правило проекта: в рабочем коде ничего не паникует. В тестах разрешено (см. clippy.toml).
 [lints.clippy]
@@ -53,6 +55,13 @@ string_slice = "deny"
 
 [target."cfg(windows)".dependencies]
 windows-native-keyring-store = "1.1.0"
+# Таймер потока для кадров во время перетаскивания окна (MIT OR Apache-2.0).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }

@@ -6,12 +6,14 @@
 
 mod anim;
 mod covers;
+mod drag_pulse;
 mod filter;
 mod gate;
 mod heartbeat;
 mod icons;
 mod library;
 mod marquee;
+mod pause;
 mod pointer;
 mod queue;
 mod scroll;
@@ -252,7 +254,11 @@ pub enum Dialog {
 #[derive(Clone)]
 pub enum Message {
     WindowOpened(Option<window::Id>),
+    /// Системный дескриптор окна (только Windows) для таймера перетаскивания.
+    NativeHandle(Option<isize>),
     WindowResized(Size),
+    /// Свёрнуто ли окно (`None` — платформа не ответила, считаем «нет»).
+    Minimized(Option<bool>),
     DragWindow,
     ToggleMaximize,
     Minimize,
@@ -303,6 +309,8 @@ pub enum Message {
 pub struct App {
     window: Option<window::Id>,
     size: Size,
+    /// Окно свёрнуто: перерисовки стоят (см. `pause`).
+    minimized: bool,
     http: Result<reqwest::Client, String>,
     covers: covers::Covers,
     screen: Screen,
@@ -343,6 +351,7 @@ impl App {
         let app = Self {
             window: None,
             size: window_settings().size,
+            minimized: false,
             http: net::http_client().map_err(|err| err.to_string()),
             covers: covers::Covers::new(cache_dir),
             screen: Screen::Starting,
@@ -405,6 +414,7 @@ impl App {
         self.now = Instant::now();
         let before = self.page_key();
         let task = self.handle(message);
+        drag_pulse::set_wanted(self.wants_frames());
         // Сетка карточек строится по ширине раздела справа от меню.
         let sidebar = if self.prefs.sidebar_collapsed {
             library::SIDEBAR_COLLAPSED
@@ -483,20 +493,37 @@ impl App {
             Message::WindowOpened(id) => {
                 self.window = id;
                 return id.map_or_else(Task::none, |id| {
-                    window::size(id).map(Message::WindowResized)
+                    Task::batch([
+                        window::size(id).map(Message::WindowResized),
+                        window::run(id, native_handle).map(Message::NativeHandle),
+                    ])
                 });
+            }
+            Message::NativeHandle(hwnd) => {
+                if let Some(hwnd) = hwnd {
+                    drag_pulse::set_window(hwnd);
+                }
             }
             Message::WindowResized(size) => {
                 self.size = size;
                 if let Screen::Main(library) = &mut self.screen {
                     library.resized(size.height);
                 }
+                // Сворачивание и разворачивание всегда приходят как Resized:
+                // узнаём, свёрнуто ли окно (у окна без рамки размер свёрнутого
+                // не нулевой, iced сам рисовать не перестанет).
+                return self.with_window(|id| window::is_minimized(id).map(Message::Minimized));
             }
-            Message::DragWindow => return self.with_window(window::drag),
+            Message::Minimized(state) => self.minimized = state.unwrap_or(false),
+            Message::DragWindow => {
+                drag_pulse::start();
+                return self.with_window(window::drag);
+            }
             Message::ToggleMaximize => return self.with_window(window::toggle_maximize),
             Message::Minimize => return self.with_window(|id| window::minimize(id, true)),
             Message::CloseWindow => return self.close(),
             Message::ResizeWindow(direction) => {
+                drag_pulse::start();
                 return self.with_window(|id| window::drag_resize(id, direction));
             }
             Message::Tick(now) => {
@@ -1171,6 +1198,11 @@ impl App {
         Subscription::batch(subscriptions)
     }
 
+    /// Нужны ли кадры: окно не свёрнуто, и что-то движется.
+    fn wants_frames(&self) -> bool {
+        !self.minimized && (self.transitioning() || self.animating())
+    }
+
     /// Идёт ли то, чему нужны кадры раз в 30 мс: спиннеры, скелетон, спектр.
     fn animating(&self) -> bool {
         match &self.screen {
@@ -1258,20 +1290,23 @@ impl App {
         // Переходам — кадры с частотой экрана, спиннерам и спектру хватает 30
         // в секунду. Когда ничего не движется, кадров нет вовсе.
         let transitioning = self.transitioning();
+        // Свёрнутому окну кадры не нужны (и пауза всё равно их не пропустит).
         let layers = layers.push(heartbeat::heartbeat(
-            transitioning || self.animating(),
+            self.wants_frames(),
             transitioning,
             Message::Frame,
         ));
         let layers = layers.push(resize_edges());
         // Где нажали мышь — для меню трека у курсора.
-        if matches!(self.screen, Screen::Main(_)) {
+        let root: Element<'a, Message> = if matches!(self.screen, Screen::Main(_)) {
             pointer::pointer(layers, |at| {
                 Message::Library(library::Message::Plugin(library::PluginMsg::Pointer(at)))
             })
         } else {
             layers.into()
-        }
+        };
+        // В свёрнутом окне (клиентская область не 0×0) перерисовку не просим.
+        pause::pause(root, self.minimized)
     }
 }
 
@@ -1417,4 +1452,13 @@ async fn prepare_login(
     let app = OAuthApp::from_config(&config);
     let code = auth::request_device_code(&http, &app, &device_id).await?;
     Ok((Arc::new(LoginSetup { app, store }), Arc::new(code)))
+}
+
+/// Системный дескриптор окна для таймера перетаскивания (только Windows).
+fn native_handle(window: &dyn window::Window) -> Option<isize> {
+    use window::raw_window_handle::RawWindowHandle;
+    match window.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+        _ => None,
+    }
 }

@@ -28,7 +28,7 @@ use super::anim;
 use super::covers::{Art, Covers};
 use super::filter;
 use super::icons::{Icon, icon, spinner};
-use super::marquee::marquee;
+use super::marquee::{marquee, marquee_element};
 use super::queue::{self, ListKey, Queue, Rng};
 use super::scroll;
 use super::theme::{self, Style};
@@ -1862,15 +1862,17 @@ impl Library {
         // целиком. Подсказка без трека стоит на месте и обрезается: бегущая
         // строка в простое заставляла бы окно перерисовываться всё время.
         let texts: Element<'a, App> = if has_track {
-            // Исполнители — ссылки на их страницы (одной строкой, лишнее
-            // обрезается). Без идентификаторов ссылок нет — бегущая строка.
+            // Исполнители — ссылки на их страницы, одной бегущей строкой (пока
+            // курсор над ней, она стоит). Без идентификаторов ссылок нет —
+            // обычная бегущая строка с текстом.
             let artist: Element<'a, App> = match track {
-                Some(track) if track.artists.iter().any(|artist| artist.id.is_some()) => container(
-                    browse::artist_links(&track.artists, Style::Secondary, theme::TEXT_SECONDARY),
-                )
-                .width(Length::Fill)
-                .clip(true)
-                .into(),
+                Some(track) if track.artists.iter().any(|artist| artist.id.is_some()) => {
+                    marquee_element(browse::artist_links(
+                        &track.artists,
+                        Style::Secondary,
+                        theme::TEXT_SECONDARY,
+                    ))
+                }
                 _ => marquee(artist, Style::Secondary, theme::TEXT_SECONDARY).into(),
             };
             column![
@@ -2098,7 +2100,8 @@ impl Library {
         .center_y(88);
         // Спектр — тихим слоем под кнопками.
         let bar: Element<'a, App> = if visualizer && self.spectrum.moving() {
-            let color = theme::alpha(theme::accent(), SPECTRUM_ALPHA);
+            // Цвет волны: акцент, а с VibeColorizer — цвет трека.
+            let color = theme::alpha(self.wave_color(now), SPECTRUM_ALPHA);
             iced::widget::stack![
                 container(visualizer::bars(self.spectrum.levels(), color))
                     .padding(Padding {

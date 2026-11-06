@@ -360,7 +360,7 @@ impl Library {
     }
 
     /// Цвет волны на экране в момент `now` (с плавным переходом).
-    fn wave_color(&self, now: Instant) -> Color {
+    pub(super) fn wave_color(&self, now: Instant) -> Color {
         self.wave.tint.at(now)
     }
 
