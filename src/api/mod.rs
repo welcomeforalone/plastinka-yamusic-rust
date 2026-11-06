@@ -5,6 +5,7 @@
 
 mod account;
 mod catalog;
+mod rotor;
 mod stream;
 mod tracks;
 
@@ -23,10 +24,14 @@ pub use catalog::{
     fetch_listening_top, fetch_my_albums, fetch_my_artists, fetch_my_playlists, fetch_playlist,
     search, total_duration,
 };
+pub use rotor::{
+    QUEUE_LEN, WaveBatch, WaveColors, WaveEvent, WaveTrack, WaveTracks, fetch_wave_tracks,
+    queue_id, send_wave_feedback, start_wave,
+};
 pub use stream::{StreamError, StreamSource, fetch_stream_source};
 pub use tracks::{
-    ArtistRef, LikedIds, TRACKS_BATCH, Track, Warning, add_disliked_tracks, artists_text,
-    fetch_liked_ids, fetch_tracks,
+    ArtistRef, LikedIds, TRACKS_BATCH, Track, Warning, add_disliked_tracks, add_liked_tracks,
+    artists_text, fetch_liked_ids, fetch_tracks, remove_liked_tracks,
 };
 pub(crate) use tracks::{clean, numeric_id, parse_artist_refs, plausible_id};
 

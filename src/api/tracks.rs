@@ -182,6 +182,74 @@ pub async fn add_disliked_tracks(
     check_status(response.status())
 }
 
+/// Поставить «Нравится» трекам `ids` (`id` или `id:albumId`) пользователя
+/// `uid`: запись в аккаунт по явному нажатию сердца.
+pub async fn add_liked_tracks(
+    http: &reqwest::Client,
+    token: &str,
+    uid: u64,
+    ids: &[String],
+) -> Result<(), ApiError> {
+    write_likes(http, token, uid, ids, "add-multiple").await
+}
+
+/// Снять «Нравится» с треков `ids` (`id` или `id:albumId`).
+pub async fn remove_liked_tracks(
+    http: &reqwest::Client,
+    token: &str,
+    uid: u64,
+    ids: &[String],
+) -> Result<(), ApiError> {
+    write_likes(http, token, uid, ids, "remove").await
+}
+
+/// `POST /users/{uid}/likes/tracks/{action}`, форма `track-ids`. Ответ
+/// `{"result":{"revision":N}}` нам не нужен: список обновляет окно.
+async fn write_likes(
+    http: &reqwest::Client,
+    token: &str,
+    uid: u64,
+    ids: &[String],
+    action: &str,
+) -> Result<(), ApiError> {
+    let Some(form) = like_ids(ids) else {
+        return Ok(());
+    };
+    #[cfg(debug_assertions)]
+    if crate::storage::test_hooks_active() {
+        // С фальшивым токеном в аккаунт ничего не пишем.
+        return Ok(());
+    }
+    let response = http
+        .post(format!("{API_BASE}/users/{uid}/likes/tracks/{action}"))
+        .header(AUTHORIZATION, auth_header(token)?)
+        .header("X-Yandex-Music-Client", MUSIC_CLIENT)
+        .form(&[("track-ids", form)])
+        .send()
+        .await
+        .map_err(NetError::from)?;
+    check_status(response.status())
+}
+
+/// Значение поля `track-ids`: идентификаторы через запятую. Пусто или есть
+/// непохожий на настоящий (`id` или `id:albumId`) — `None`: такой запрос не
+/// отправляем.
+fn like_ids(ids: &[String]) -> Option<String> {
+    let valid = !ids.is_empty()
+        && ids.iter().all(|id| {
+            let (track, album) = match id.split_once(':') {
+                Some((track, album)) => (track, Some(album)),
+                None => (id.as_str(), None),
+            };
+            plausible_id(track) && album.is_none_or(numeric_id_text)
+        });
+    valid.then(|| ids.join(","))
+}
+
+fn numeric_id_text(text: &str) -> bool {
+    (1..=20).contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// Исполнители через запятую, без них — «Неизвестный исполнитель».
 pub fn artists_text(artists: &[ArtistRef]) -> String {
     if artists.is_empty() {
@@ -921,6 +989,29 @@ mod tests {
         .unwrap();
         assert_eq!(liked.ids, ["4"]);
         assert_eq!(liked.unreadable, 3);
+    }
+
+    #[test]
+    fn like_ids_accept_only_real_ids() {
+        let ids = |list: &[&str]| list.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+        assert_eq!(like_ids(&ids(&["1", "2:3"])).as_deref(), Some("1,2:3"));
+        assert_eq!(like_ids(&[]), None);
+        for bad in ["", "0", "abc", "1:", "1:x", "1:2:3", "1,2", ":5", "1 :2"] {
+            assert_eq!(like_ids(&ids(&["5", bad])), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn like_status_is_mapped() {
+        assert!(check_status(StatusCode::OK).is_ok());
+        assert!(matches!(
+            check_status(StatusCode::UNAUTHORIZED),
+            Err(ApiError::Unauthorized)
+        ));
+        assert!(matches!(
+            check_status(StatusCode::BAD_GATEWAY),
+            Err(ApiError::Server(502))
+        ));
     }
 
     #[test]

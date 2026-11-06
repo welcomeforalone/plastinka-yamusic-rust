@@ -103,6 +103,9 @@ enum BigEntry {
 pub struct Big {
     pub cover: image::Handle,
     pub backdrop: image::Handle,
+    /// Средний цвет обложки (считается один раз при подготовке): для
+    /// плагина VibeColorizer.
+    pub average: Option<[u8; 3]>,
 }
 
 /// Состояние обложки для отрисовки.
@@ -169,6 +172,15 @@ impl Covers {
             },
             |(uri, big)| Message::BigCoverLoaded(uri, big),
         )
+    }
+
+    /// Средний цвет большой обложки `uri`, если она уже загружена.
+    pub fn average(&self, uri: Option<&str>) -> Option<[u8; 3]> {
+        let uri = uri?;
+        self.big.iter().find_map(|(key, entry)| match entry {
+            BigEntry::Ready(big, _) if key == uri => big.average,
+            _ => None,
+        })
     }
 
     /// Большая обложка загрузилась (или нет).
@@ -316,6 +328,7 @@ fn prepare_big(bytes: Vec<u8>) -> Option<Big> {
             ::image::imageops::FilterType::Triangle,
         )
         .to_rgba8();
+    let average = crate::plugins::vibe::average_rgb(small.as_raw());
     let mut pixels = ::image::imageops::blur(&small, BACKDROP_SIGMA).into_raw();
     for pixel in pixels.as_chunks_mut::<4>().0 {
         for channel in pixel.iter_mut().take(3) {
@@ -326,6 +339,7 @@ fn prepare_big(bytes: Vec<u8>) -> Option<Big> {
     Some(Big {
         cover: image::Handle::from_rgba(cover.width(), cover.height(), cover.into_raw()),
         backdrop: image::Handle::from_rgba(BACKDROP_SIDE, BACKDROP_SIDE, pixels),
+        average,
     })
 }
 

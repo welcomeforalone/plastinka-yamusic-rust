@@ -7,12 +7,14 @@
 //! - [`slopless`] — метки ИИ-исполнителей и треков по API slopless.art,
 //!   автопропуск.
 //! - [`copy_name`] — «Исполнитель — Название» в буфер обмена.
+//! - [`vibe`] — цвет «Моей волны» под обложку текущего трека.
 //!
 //! На диск плагины кэшируют только метаданные (правило 1).
 
 pub mod copy_name;
 pub mod fckcensor;
 pub mod slopless;
+pub mod vibe;
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -35,6 +37,8 @@ pub struct PluginSettings {
     pub copy_name: bool,
     /// Формат копирования, см. [`copy_name::format`].
     pub copy_format: String,
+    /// VibeColorizer: цвет «Моей волны» под обложку.
+    pub vibe: bool,
 }
 
 impl Default for PluginSettings {
@@ -47,6 +51,7 @@ impl Default for PluginSettings {
             dislike: false,
             copy_name: false,
             copy_format: copy_name::DEFAULT_FORMAT.to_owned(),
+            vibe: false,
         }
     }
 }
@@ -69,6 +74,7 @@ impl PluginSettings {
                 .filter(|format| !format.trim().is_empty())
                 .map(|format| copy_name::limit(&format))
                 .unwrap_or(defaults.copy_format),
+            vibe: config.vibe_colorizer.unwrap_or(defaults.vibe),
         }
     }
 
@@ -80,6 +86,7 @@ impl PluginSettings {
         config.slopless_dislike = Some(self.dislike);
         config.copy_track_name = Some(self.copy_name);
         config.copy_track_name_format = Some(self.copy_format.clone());
+        config.vibe_colorizer = Some(self.vibe);
     }
 
     /// Все плагины включены: для отладочного хука `PLASTINKA_TEST_PLUGINS`.
@@ -89,6 +96,7 @@ impl PluginSettings {
             fckcensor: true,
             slopless: true,
             copy_name: true,
+            vibe: true,
             ..Self::default()
         }
     }
@@ -159,12 +167,13 @@ mod tests {
     fn settings_round_trip_and_defaults() {
         let defaults = PluginSettings::from_config(&PluginsConfig::default());
         assert_eq!(defaults, PluginSettings::default());
-        assert!(!defaults.fckcensor && !defaults.slopless && !defaults.copy_name);
+        assert!(!defaults.fckcensor && !defaults.slopless && !defaults.copy_name && !defaults.vibe);
         assert!(!defaults.dislike, "запись в аккаунт — только по согласию");
 
         let mut changed = PluginSettings {
             slopless: true,
             dislike: true,
+            vibe: true,
             copy_format: "{title} by {artist}".to_owned(),
             ..PluginSettings::default()
         };

@@ -308,9 +308,188 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Bars {
     }
 }
 
+// ------------------------------------------------------- круговой спектр
+
+/// Сколько лучей по кругу.
+pub const RAYS: usize = 96;
+/// Диаметр точки луча и шаг между точками, пиксели.
+const DOT: f32 = 4.0;
+const DOT_STEP: f32 = 2.5;
+/// Самый короткий луч (на тишине): одна точка.
+const MIN_LENGTH: f32 = DOT;
+
+/// Номер полосы спектра для луча `ray`. Симметрия по вертикали: низкие
+/// частоты внизу круга, высокие вверху, обе половины зеркальны.
+pub fn ray_band(ray: usize) -> usize {
+    let ray = ray % RAYS;
+    let from_bottom = ray.min(RAYS - ray);
+    let half = RAYS / 2;
+    // Номер от 0 до half включительно растягиваем на все полосы.
+    (from_bottom * (BARS - 1) + half / 2) / half
+}
+
+/// Угол луча в радианах: 0 — вниз, дальше по кругу.
+pub fn ray_angle(ray: usize) -> f32 {
+    std::f32::consts::TAU * (ray % RAYS) as f32 / RAYS as f32
+}
+
+/// Длина луча по уровню полосы: от одной точки до `max`.
+pub fn ray_length(level: f32, max: f32) -> f32 {
+    let level = if level.is_finite() {
+        level.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    MIN_LENGTH + (max - MIN_LENGTH).max(0.0) * level
+}
+
+/// Центры точек луча длиной `length`, начиная с радиуса `inner` от центра.
+pub fn ray_dots(center: iced::Point, angle: f32, inner: f32, length: f32) -> Vec<iced::Point> {
+    let (sin, cos) = angle.sin_cos();
+    let count = ((length - DOT) / DOT_STEP).max(0.0) as usize + 1;
+    (0..count)
+        .map(|n| {
+            let radius = inner + DOT / 2.0 + n as f32 * DOT_STEP;
+            iced::Point::new(center.x + radius * sin, center.y + radius * cos)
+        })
+        .collect()
+}
+
+/// Круговой спектр: лучи из точек цвета `color` вокруг центра, начиная с
+/// радиуса `inner`, длиной до `max`. Занимает квадрат со стороной
+/// `2 * (inner + max)`.
+pub fn rays<'a, Message: 'a>(
+    levels: [f32; BARS],
+    color: Color,
+    inner: f32,
+    max: f32,
+) -> Element<'a, Message> {
+    Element::new(Rays {
+        levels,
+        color,
+        inner,
+        max,
+    })
+}
+
+struct Rays {
+    levels: [f32; BARS],
+    color: Color,
+    inner: f32,
+    max: f32,
+}
+
+impl Rays {
+    fn side(&self) -> f32 {
+        2.0 * (self.inner + self.max)
+    }
+}
+
+impl<Message> Widget<Message, Theme, iced::Renderer> for Rays {
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fixed(self.side()), Length::Fixed(self.side()))
+    }
+
+    fn layout(
+        &mut self,
+        _tree: &mut Tree,
+        _renderer: &iced::Renderer,
+        _limits: &layout::Limits,
+    ) -> layout::Node {
+        layout::Node::new(Size::new(self.side(), self.side()))
+    }
+
+    fn draw(
+        &self,
+        _tree: &Tree,
+        renderer: &mut iced::Renderer,
+        _theme: &Theme,
+        _style: &renderer::Style,
+        layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+    ) {
+        let bounds = layout.bounds();
+        let center = bounds.center();
+        for ray in 0..RAYS {
+            let level = self.levels.get(ray_band(ray)).copied().unwrap_or(0.0);
+            let length = ray_length(level, self.max);
+            let dots = ray_dots(center, ray_angle(ray), self.inner, length);
+            let count = dots.len().max(1) as f32;
+            for (n, dot) in dots.into_iter().enumerate() {
+                // К концу луча точки бледнеют.
+                let fade = 1.0 - 0.6 * (n as f32 / count);
+                renderer.fill_quad(
+                    Quad {
+                        bounds: Rectangle {
+                            x: dot.x - DOT / 2.0,
+                            y: dot.y - DOT / 2.0,
+                            width: DOT,
+                            height: DOT,
+                        },
+                        border: Border::default().rounded(DOT / 2.0),
+                        ..Quad::default()
+                    },
+                    Color {
+                        a: self.color.a * fade,
+                        ..self.color
+                    },
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rays_are_mirrored_with_bass_at_the_bottom() {
+        assert_eq!(ray_band(0), 0);
+        assert_eq!(ray_band(RAYS / 2), BARS - 1);
+        for ray in 1..RAYS {
+            assert_eq!(ray_band(ray), ray_band(RAYS - ray), "{ray}");
+            assert!(ray_band(ray) < BARS);
+        }
+        // Вверх по кругу полоса не убывает.
+        for ray in 1..=RAYS / 2 {
+            assert!(ray_band(ray) >= ray_band(ray - 1));
+        }
+        assert_eq!(ray_angle(0), 0.0);
+        assert!((ray_angle(RAYS / 2) - std::f32::consts::PI).abs() < 1e-5);
+    }
+
+    #[test]
+    fn ray_length_follows_the_level_and_survives_odd_input() {
+        assert_eq!(ray_length(0.0, 40.0), MIN_LENGTH);
+        assert_eq!(ray_length(1.0, 40.0), 40.0);
+        assert!(ray_length(0.5, 40.0) > MIN_LENGTH && ray_length(0.5, 40.0) < 40.0);
+        assert_eq!(ray_length(f32::NAN, 40.0), MIN_LENGTH);
+        assert_eq!(ray_length(7.0, 40.0), 40.0);
+        assert_eq!(ray_length(1.0, 0.0), MIN_LENGTH);
+    }
+
+    #[test]
+    fn dots_start_at_the_inner_radius_and_go_outward() {
+        let center = iced::Point::new(100.0, 100.0);
+        // Угол 0 — вниз.
+        let dots = ray_dots(center, 0.0, 50.0, 20.0);
+        let first = dots.first().unwrap();
+        assert!((first.x - 100.0).abs() < 1e-3);
+        assert!((first.y - (150.0 + DOT / 2.0)).abs() < 1e-3);
+        assert!(dots.windows(2).all(|pair| pair[1].y > pair[0].y));
+        // Одна точка на тишине, больше на длинном луче.
+        assert_eq!(ray_dots(center, 1.0, 50.0, MIN_LENGTH).len(), 1);
+        assert!(dots.len() > 1);
+        // Все точки на лучах не ближе внутреннего радиуса.
+        for ray in 0..RAYS {
+            for dot in ray_dots(center, ray_angle(ray), 50.0, 30.0) {
+                let distance = ((dot.x - 100.0).powi(2) + (dot.y - 100.0).powi(2)).sqrt();
+                assert!(distance >= 50.0 + DOT / 2.0 - 1e-3, "{ray}: {distance}");
+            }
+        }
+    }
 
     fn tone(hz: f32, rate: u32, amplitude: f32) -> Tap {
         let tap = Tap::default();

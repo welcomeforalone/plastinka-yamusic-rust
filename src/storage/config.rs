@@ -65,6 +65,8 @@ pub struct PluginsConfig {
     pub copy_track_name: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub copy_track_name_format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub vibe_colorizer: Option<bool>,
 }
 
 impl PluginsConfig {

@@ -634,6 +634,7 @@ impl Library {
                 index,
                 number,
                 shown,
+                track,
                 covers,
                 Flags {
                     current,
@@ -1693,6 +1694,7 @@ fn track_cells<'a>(
     index: usize,
     number: usize,
     track: &'a Track,
+    original: &'a Track,
     covers: &'a Covers,
     flags: Flags,
 ) -> Element<'a, App> {
@@ -1743,17 +1745,29 @@ fn track_cells<'a>(
         artist_links(&track.artists, Style::Secondary, other_color),
     ]
     .spacing(2);
-    let like: Element<'a, App> = if flags.liked {
-        icon(
-            Icon::HeartFilled,
-            18.0,
-            if available {
-                theme::accent()
-            } else {
-                theme::TEXT_DISABLED
-            },
+    // Сердце: у лайкнутого трека видно всегда, у остальных — при наведении
+    // на строку. Лайк ставится настоящему треку, а не подмене FckCensor.
+    let like: Element<'a, App> = if flags.liked || flags.hovered {
+        let icon = if flags.liked {
+            Icon::HeartFilled
+        } else {
+            Icon::Heart
+        };
+        let tip = if flags.liked {
+            "Убрать из «Мне нравится»"
+        } else {
+            "Поставить «Нравится»"
+        };
+        widgets::with_tooltip(
+            widgets::icon_button(
+                icon,
+                Size::S,
+                flags.liked,
+                Some(Lib(Message::ToggleLike(original.clone()))),
+            ),
+            tip,
+            tooltip::Position::Top,
         )
-        .into()
     } else {
         Space::new().into()
     };

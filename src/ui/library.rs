@@ -10,6 +10,7 @@
 mod browse;
 mod pages;
 mod plugins;
+mod wave;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -48,6 +49,8 @@ pub use pages::Target;
 use pages::{Collected, Collections, Entry, Loaded, PlaylistTab, SearchState, ShelfId};
 pub use plugins::Msg as PluginMsg;
 use plugins::{PluginIo, Replace, TrackMenu};
+pub use wave::Msg as WaveMsg;
+use wave::{Leave, Wave};
 
 /// Высота строки трека.
 const ROW: f32 = 56.0;
@@ -231,6 +234,13 @@ pub enum Message {
     Audio(audio::Event),
     /// Плагины: загрузка данных, меню трека, замены.
     Plugin(plugins::Msg),
+    /// «Моя волна».
+    Wave(wave::Msg),
+    /// Сердце: поставить или снять «Нравится» треку (настоящему треку из
+    /// списка, не его подмене FckCensor).
+    ToggleLike(Track),
+    /// Ответ сервера на сердце: трек, какое состояние просили, результат.
+    LikeDone(Track, bool, Result<(), Failure>),
     Noop,
 }
 
@@ -300,6 +310,9 @@ pub struct Library {
     likes: Likes,
     /// Идентификаторы треков из «Мне нравится»: сердце в строках.
     liked: HashSet<String>,
+    /// Треки, чей запрос сердца ещё идёт: повторные нажатия по ним
+    /// игнорируются, пока не придёт ответ.
+    like_busy: HashSet<String>,
     collections: Collections,
     search: SearchState,
     /// Что играет и что дальше.
@@ -343,6 +356,8 @@ pub struct Library {
     replace: Option<Replace>,
     /// Трек, который включили вручную: Slopless его не пропускает.
     chosen: Option<String>,
+    /// «Моя волна»: сессия, данные очереди, события обратной связи.
+    wave: Wave,
 }
 
 /// Анимации плеера.
@@ -420,6 +435,7 @@ impl Library {
             root_scroll: 0.0,
             likes: Likes::Loading { skeleton: false },
             liked: HashSet::new(),
+            like_busy: HashSet::new(),
             collections: Collections::default(),
             search: SearchState::new(),
             queue: None,
@@ -462,6 +478,7 @@ impl Library {
             menu: None,
             replace: None,
             chosen: None,
+            wave: Wave::new(),
         };
         let task = library.load_likes(http);
         let plugins = library.plugins_changed(plugins);
@@ -551,6 +568,7 @@ impl Library {
         matches!(self.likes, Likes::Loading { skeleton: true })
             || (self.player.playing && self.player.buffering)
             || self.loading_on_screen()
+            || self.wave_animating()
     }
 
     /// Насколько выехал полноэкранный плеер: 0 — его нет, 1 — во всё окно.
@@ -703,6 +721,7 @@ impl Library {
             self.note_all();
         }
         let pump = self.pump();
+        self.wave_pump();
         let queued = Task::batch(std::mem::take(&mut self.tasks));
         (Task::batch([task, pump, queued]), effect)
     }
@@ -846,6 +865,8 @@ impl Library {
                     .map(|queue| queue.current)
                     .and_then(|index| self.step(index, true))
             }
+            // В «Моей волне» перемешивания нет.
+            Message::ToggleShuffle if self.in_wave() => None,
             Message::ToggleShuffle => {
                 self.player.shuffle = !self.player.shuffle;
                 if self.player.shuffle
@@ -857,6 +878,12 @@ impl Library {
                         plugins::playable(censor, track)
                     });
                 }
+                None
+            }
+            // В волне повтор переключается «выкл ↔ трек», а повтор списков
+            // пользователя остаётся как был.
+            Message::CycleRepeat if self.in_wave() => {
+                self.cycle_wave_repeat();
                 None
             }
             Message::CycleRepeat => {
@@ -921,9 +948,93 @@ impl Library {
             }
             Message::Audio(event) => self.audio_event(event),
             Message::Plugin(msg) => return self.plugin_update(msg),
+            Message::Wave(msg) => return self.wave_update(msg),
+            Message::ToggleLike(track) => return self.toggle_like(track),
+            Message::LikeDone(track, target, result) => {
+                self.like_busy.remove(&track.id);
+                match result {
+                    Ok(()) => None,
+                    Err(failure) => {
+                        // Сервер не принял: возвращаем сердце как было.
+                        self.set_liked(&track, !target);
+                        if failure.kind == FailureKind::Unauthorized {
+                            Some(Effect::Relogin)
+                        } else {
+                            let action = if target {
+                                "поставить «Нравится»"
+                            } else {
+                                "снять «Нравится»"
+                            };
+                            Some(Effect::Toast(sentence(&format!(
+                                "Не удалось {action}: {}",
+                                failure.text
+                            ))))
+                        }
+                    }
+                }
+            }
             Message::Noop => None,
         };
         (Task::none(), effect)
+    }
+
+    /// Нажали сердце: сразу меняем сердце и список, потом шлём запрос.
+    /// Пока запрос по треку идёт, повторное нажатие игнорируется: так
+    /// состояние на экране не расходится с сервером.
+    fn toggle_like(&mut self, track: Track) -> (Task<Message>, Option<Effect>) {
+        if self.like_busy.contains(&track.id) {
+            return (Task::none(), None);
+        }
+        let Some(http) = self.http.clone() else {
+            let toast = Effect::Toast(sentence("не удалось подготовить сетевое соединение"));
+            return (Task::none(), Some(toast));
+        };
+        let target = !self.liked.contains(&track.id);
+        self.set_liked(&track, target);
+        self.like_busy.insert(track.id.clone());
+        let token = self.token.clone();
+        let uid = self.status.account().uid;
+        let ids = vec![api::queue_id(&track)];
+        let task = Task::perform(
+            async move {
+                if target {
+                    api::add_liked_tracks(&http, &token.access_token, uid, &ids).await
+                } else {
+                    api::remove_liked_tracks(&http, &token.access_token, uid, &ids).await
+                }
+                .map_err(Failure::from)
+            },
+            move |result| Message::LikeDone(track, target, result),
+        );
+        (task, None)
+    }
+
+    /// Показывает трек лайкнутым или нет: сердца и список «Мне нравится».
+    /// Играющая очередь «Мне нравится» держит свой список, но номера в нём
+    /// перестают совпадать с экраном, поэтому её отвязываем.
+    fn set_liked(&mut self, track: &Track, liked: bool) {
+        let list = match &mut self.likes {
+            Likes::Ready(tracks) => Some(Arc::make_mut(tracks)),
+            _ => None,
+        };
+        let changed = edit_likes(&mut self.liked, list, track, liked);
+        if !changed {
+            return;
+        }
+        self.haystacks = self.tracks().iter().map(filter::haystack).collect();
+        self.shown = filter::matching(&self.haystacks, &self.query);
+        if let Some(queue) = &mut self.queue
+            && matches!(queue.key, ListKey::Liked | ListKey::LikedFound(_))
+        {
+            queue.key = ListKey::Detached;
+        }
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|(key, _)| matches!(key, ListKey::Liked | ListKey::LikedFound(_)))
+        {
+            self.selected = None;
+        }
     }
 
     /// Запускает трек `index` очереди с секунды `from`.
@@ -941,9 +1052,11 @@ impl Library {
                 return self.launch(index, track, from);
             }
             self.dislike_ai(&track);
-            index = self
-                .neighbour(index, forward)
-                .filter(|next| *next != index)?;
+            let Some(next) = self.neighbour(index, forward).filter(|next| *next != index) else {
+                // В волне за концом очереди будет догрузка.
+                return if forward { self.wave_exhausted() } else { None };
+            };
+            index = next;
         }
         Some(Effect::Toast(
             "Дальше в очереди только ИИ-треки: Slopless их пропускает".to_owned(),
@@ -956,6 +1069,8 @@ impl Library {
         if decision == Decision::Silent {
             return None;
         }
+        // Прежний трек волны уходит: событие `skip`, если он успел зазвучать.
+        self.wave_leave(Leave::Skip);
         if let Some(queue) = &mut self.queue {
             queue.current = index;
         }
@@ -1051,15 +1166,22 @@ impl Library {
                 self.player.kbps = kbps;
                 if !buffering {
                     self.player.skipped = 0;
+                    if !self.player.sounded {
+                        self.wave_sounded();
+                    }
                     self.player.sounded = true;
                 }
                 None
             }
             audio::Event::Ended { id } if id == session => {
+                self.wave_leave(Leave::Finish);
                 self.halt();
                 self.finished()
             }
-            audio::Event::Failed { id, error } if id == session => self.failed(&error),
+            audio::Event::Failed { id, error } if id == session => {
+                self.wave_leave(Leave::Skip);
+                self.failed(&error)
+            }
             _ => None,
         }
     }
@@ -1067,11 +1189,12 @@ impl Library {
     /// Трек доигран: дальше по повтору и очереди.
     fn finished(&mut self) -> Option<Effect> {
         let index = self.queue.as_ref()?.current;
-        if self.player.repeat == Repeat::One {
+        if self.repeat_one() {
             return self.start(index, 0.0);
         }
         match self.neighbour(index, true) {
             Some(next) => self.start(next, 0.0),
+            None if self.in_wave() => self.wave_exhausted(),
             None => {
                 // Очередь кончилась: трек остаётся выбранным, с начала.
                 self.player.position = 0.0;
@@ -1115,13 +1238,21 @@ impl Library {
 
     /// Соседний трек и его запуск.
     fn step(&mut self, from: usize, forward: bool) -> Option<Effect> {
-        let next = self.neighbour(from, forward)?;
+        let Some(next) = self.neighbour(from, forward) else {
+            // В волне за концом очереди будет догрузка.
+            return if forward { self.wave_exhausted() } else { None };
+        };
         self.start_toward(next, 0.0, forward)
     }
 
     /// Соседний доступный трек очереди с учётом перемешивания и повтора.
     fn neighbour(&mut self, from: usize, forward: bool) -> Option<usize> {
-        let (shuffle, wrap) = (self.player.shuffle, self.player.repeat == Repeat::All);
+        // В волне нет ни перемешивания, ни повтора списка.
+        let (shuffle, wrap) = if self.in_wave() {
+            (false, false)
+        } else {
+            (self.player.shuffle, self.player.repeat == Repeat::All)
+        };
         let censor = self.plugins.fckcensor.then_some(&self.censor);
         self.queue
             .as_mut()?
@@ -1146,12 +1277,12 @@ impl Library {
         let content: Element<'a, App> = match (self.stack.last(), self.section) {
             (Some(entry), _) => self.page_view(entry, covers, turn, moment.now),
             (None, Section::Liked) => self.liked(covers, turn),
+            (None, Section::Wave) => self.wave_view(covers, turn, moment.now, prefs.visualizer),
             (None, Section::Settings) => self.settings(prefs),
             (None, Section::Search) => self.search_view(covers, turn, moment.now),
             (None, Section::Playlists | Section::Albums | Section::Artists) => {
                 self.collection_view(covers, turn, moment.now)
             }
-            (None, section) => placeholder(section),
         };
         let panel = container(super::appear(content, moment.page))
             .width(Length::Fill)
@@ -1427,7 +1558,10 @@ impl Library {
 
     /// Идёт ли переход внутри главного окна.
     pub fn transitioning(&self, now: Instant) -> bool {
-        self.motion.running(now) || self.fullscreen.is_animating(now) || self.glide.is_some()
+        self.motion.running(now)
+            || self.fullscreen.is_animating(now)
+            || self.glide.is_some()
+            || self.wave_tint_running(now)
     }
 
     fn account_card(&self, compact: bool) -> Element<'_, App> {
@@ -1670,6 +1804,10 @@ impl Library {
         let track = self.current_shown();
         let has_track = track.is_some();
         let liked = track.is_some_and(|track| self.liked.contains(&track.id));
+        // Лайк ставится настоящему треку очереди, а не подмене FckCensor.
+        let like_message = self
+            .current()
+            .map(|track| Lib(Message::ToggleLike(track.clone())));
         let on = |message: Message| has_track.then_some(Lib(message));
         let motion = &self.motion;
 
@@ -1798,33 +1936,44 @@ impl Library {
         // Нажатие: кнопка коротко сжимается и возвращается.
         let squeeze = (std::f32::consts::PI * anim::progress(&motion.pulse, now)).sin();
         let play = anim::motion(play).scale(1.0 - 0.1 * squeeze);
-        let repeat_icon = if player.repeat == Repeat::One {
+        let in_wave = self.in_wave();
+        let repeat_on = self.repeat_one() || (!in_wave && player.repeat != Repeat::Off);
+        let repeat_icon = if self.repeat_one() {
             Icon::RepeatOne
         } else {
             Icon::Repeat
         };
-        // «Не нравится» заработает с «Моей волной» (этап 8). В узком окне его
-        // нет: место нужнее названию трека.
+        // «Не нравится» работает в «Моей волне»: пропуск, отзыв и запись в
+        // аккаунт. В узком окне его нет: место нужнее названию трека.
         let mut buttons = row![].spacing(8).align_y(Alignment::Center);
         if !compact {
-            buttons = buttons.push(widgets::icon_button(Icon::Dislike, Size::S, false, None));
+            buttons = buttons.push(widgets::icon_button(
+                Icon::Dislike,
+                Size::S,
+                false,
+                in_wave.then_some(Lib(Message::Wave(WaveMsg::Dislike))),
+            ));
         }
-        let buttons = buttons.extend([
+        let shuffle: Element<'a, App> = if in_wave {
+            widgets::with_tooltip(
+                widgets::icon_button(Icon::Shuffle, Size::S, false, None),
+                "В «Моей волне» перемешивания нет",
+                tooltip::Position::Top,
+            )
+        } else {
             widgets::icon_button(
                 Icon::Shuffle,
                 Size::S,
                 player.shuffle,
                 on(Message::ToggleShuffle),
-            ),
+            )
+        };
+        let buttons = buttons.extend([
+            shuffle,
             widgets::icon_button(Icon::PreviousFilled, Size::M, false, on(Message::Previous)),
             play.into(),
             widgets::icon_button(Icon::NextFilled, Size::M, false, on(Message::Next)),
-            widgets::icon_button(
-                repeat_icon,
-                Size::S,
-                player.repeat != Repeat::Off,
-                on(Message::CycleRepeat),
-            ),
+            widgets::icon_button(repeat_icon, Size::S, repeat_on, on(Message::CycleRepeat)),
             // Сердце закрашено, только если трек в «Мне нравится».
             widgets::icon_button(
                 if liked {
@@ -1834,7 +1983,7 @@ impl Library {
                 },
                 Size::S,
                 liked,
-                on(Message::Noop),
+                like_message,
             ),
         ]);
 
@@ -2426,6 +2575,37 @@ fn nav_item<'a>(section: Section, selected: bool, compact: bool) -> Element<'a, 
     }
 }
 
+/// Ставит или снимает «Нравится» в множестве идентификаторов и в списке
+/// «Мне нравится» (если он загружен): новый трек — в начало, снятый
+/// убирается. `true` — что-то изменилось.
+fn edit_likes(
+    ids: &mut HashSet<String>,
+    list: Option<&mut Vec<Track>>,
+    track: &Track,
+    liked: bool,
+) -> bool {
+    let mut changed = if liked {
+        ids.insert(track.id.clone())
+    } else {
+        ids.remove(&track.id)
+    };
+    if let Some(list) = list {
+        let at = list.iter().position(|item| item.id == track.id);
+        match (liked, at) {
+            (true, None) => {
+                list.insert(0, track.clone());
+                changed = true;
+            }
+            (false, Some(at)) => {
+                list.remove(at);
+                changed = true;
+            }
+            _ => {}
+        }
+    }
+    changed
+}
+
 fn liked_header<'a>(tracks: &[Track], with_actions: bool) -> Element<'a, App> {
     // `sum` паникует при переполнении, а длительность приходит от сервера.
     let total = tracks
@@ -2721,25 +2901,6 @@ fn state_block<'a>(
     .into()
 }
 
-/// Раздел, которого ещё нет.
-fn placeholder<'a>(section: Section) -> Element<'a, App> {
-    let when = match section {
-        Section::Wave => "«Моя волна» появится в одной из следующих версий.",
-        _ => "Этот раздел появится в одной из следующих версий.",
-    };
-    state_block(
-        widgets::badge(section.icon(), theme::TEXT_SECONDARY, theme::SURFACE_2),
-        section.title(),
-        when.to_owned(),
-        widgets::action(
-            Kind::Secondary,
-            Some(Icon::Heart),
-            "Открыть «Мне нравится»",
-            Some(Lib(Message::Nav(Section::Liked))),
-        ),
-    )
-}
-
 /// Скелетон шапки и строк, мерцает (прозрачность 0.5 → 1 → 0.5).
 fn skeleton<'a>(turn: f32) -> Element<'a, App> {
     let alpha = 0.75 + 0.25 * (turn * std::f32::consts::TAU).cos();
@@ -2797,4 +2958,74 @@ fn skeleton<'a>(turn: f32) -> Element<'a, App> {
         left: 32.0,
     })
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(id: &str) -> Track {
+        Track {
+            id: id.to_owned(),
+            title: Some(format!("Трек {id}")),
+            version: None,
+            artists: Vec::new(),
+            album_id: None,
+            album_title: None,
+            duration: None,
+            available: true,
+            cover_uri: None,
+            warning: api::Warning::None,
+        }
+    }
+
+    fn ids(list: &[Track]) -> Vec<&str> {
+        list.iter().map(|track| track.id.as_str()).collect()
+    }
+
+    #[test]
+    fn like_goes_to_the_top_and_unlike_leaves_the_list() {
+        let mut set: HashSet<String> = ["1", "2"].map(str::to_owned).into();
+        let mut list = vec![track("1"), track("2")];
+        assert!(edit_likes(&mut set, Some(&mut list), &track("3"), true));
+        assert_eq!(ids(&list), ["3", "1", "2"]);
+        assert!(set.contains("3"));
+        assert!(edit_likes(&mut set, Some(&mut list), &track("1"), false));
+        assert_eq!(ids(&list), ["3", "2"]);
+        assert!(!set.contains("1"));
+    }
+
+    #[test]
+    fn repeated_edits_change_nothing() {
+        let mut set: HashSet<String> = ["1"].map(str::to_owned).into();
+        let mut list = vec![track("1")];
+        assert!(!edit_likes(&mut set, Some(&mut list), &track("1"), true));
+        assert!(!edit_likes(&mut set, Some(&mut list), &track("9"), false));
+        assert_eq!(ids(&list), ["1"]);
+    }
+
+    #[test]
+    fn failed_like_is_rolled_back() {
+        let mut set: HashSet<String> = ["1"].map(str::to_owned).into();
+        let mut list = vec![track("1")];
+        // Поставили лайк, сервер отказал: откат убирает трек и из списка.
+        edit_likes(&mut set, Some(&mut list), &track("2"), true);
+        edit_likes(&mut set, Some(&mut list), &track("2"), false);
+        assert_eq!(ids(&list), ["1"]);
+        assert_eq!(set.len(), 1);
+        // Снятие откатывается возвратом трека (в начало списка).
+        edit_likes(&mut set, Some(&mut list), &track("1"), false);
+        edit_likes(&mut set, Some(&mut list), &track("1"), true);
+        assert_eq!(ids(&list), ["1"]);
+        assert!(set.contains("1"));
+    }
+
+    #[test]
+    fn without_a_loaded_list_only_the_set_changes() {
+        let mut set = HashSet::new();
+        assert!(edit_likes(&mut set, None, &track("5"), true));
+        assert!(set.contains("5"));
+        assert!(edit_likes(&mut set, None, &track("5"), false));
+        assert!(set.is_empty());
+    }
 }

@@ -8,6 +8,7 @@ mod anim;
 mod covers;
 mod filter;
 mod gate;
+mod heartbeat;
 mod icons;
 mod library;
 mod marquee;
@@ -646,15 +647,23 @@ impl App {
                 let http = self.http.as_ref().ok();
                 return self.covers.finished(key, bytes, http);
             }
-            Message::BigCoverLoaded(uri, big) => self.covers.big_finished(uri, big),
+            Message::BigCoverLoaded(uri, big) => {
+                self.covers.big_finished(uri, big);
+                // Среднее по обложке может поменять цвет волны.
+                if let Screen::Main(library) = &mut self.screen {
+                    library.sync_wave_tint(&self.covers, Instant::now());
+                }
+            }
             Message::Library(message) => {
                 if let Screen::Main(library) = &mut self.screen {
                     let http = self.http.as_ref().ok();
                     let (task, effect) = library.update(message, http);
                     let task = task.map(Message::Library);
+                    library.sync_wave_tint(&self.covers, self.now);
                     let covers = Task::batch([
                         self.covers.show(library.visible_covers(), http),
                         self.covers.want_big(library.fullscreen_cover(), http),
+                        self.covers.want_big(library.wave_cover(), http),
                     ]);
                     let effect = match effect {
                         Some(library::Effect::Relogin) => self.start_login(Some(
@@ -677,7 +686,14 @@ impl App {
     fn apply_plugins(&mut self, plugins: PluginSettings) -> Task<Message> {
         self.plugins = plugins;
         match &mut self.screen {
-            Screen::Main(library) => library.plugins_changed(&self.plugins).map(Message::Library),
+            Screen::Main(library) => {
+                let task = library.plugins_changed(&self.plugins).map(Message::Library);
+                library.sync_wave_tint(&self.covers, Instant::now());
+                let cover = self
+                    .covers
+                    .want_big(library.wave_cover(), self.http.as_ref().ok());
+                Task::batch([task, cover])
+            }
             _ => Task::none(),
         }
     }
@@ -1146,7 +1162,18 @@ impl App {
         if ticking {
             subscriptions.push(iced::time::every(Duration::from_secs(1)).map(Message::Tick));
         }
-        let animating = match &self.screen {
+        // Кадры гонит невидимый виджет `heartbeat` из самой перерисовки (в
+        // `decorate`): так анимации и спектр идут и пока окно тянут за
+        // заголовок или край, когда таймеры и подписки стоят.
+        if let Screen::Main(library) = &self.screen {
+            subscriptions.push(library.subscription());
+        }
+        Subscription::batch(subscriptions)
+    }
+
+    /// Идёт ли то, чему нужны кадры раз в 30 мс: спиннеры, скелетон, спектр.
+    fn animating(&self) -> bool {
+        match &self.screen {
             Screen::Starting | Screen::Checking => true,
             Screen::Login(login) => login.animating(),
             Screen::Paywall(paywall) => paywall.checking,
@@ -1154,18 +1181,7 @@ impl App {
                 library.animating() || library.visualizing(self.prefs.visualizer)
             }
             Screen::Problem(_) => false,
-        };
-        // Переходам — кадры с частотой экрана, спиннерам и скелетону хватает
-        // 30 в секунду. Когда ничего не движется, кадров нет вовсе.
-        if self.transitioning() {
-            subscriptions.push(window::frames().map(Message::Frame));
-        } else if animating {
-            subscriptions.push(iced::time::every(Duration::from_millis(33)).map(Message::Frame));
         }
-        if let Screen::Main(library) = &self.screen {
-            subscriptions.push(library.subscription());
-        }
-        Subscription::batch(subscriptions)
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -1239,6 +1255,14 @@ impl App {
             let shown = anim::progress(&self.dialog_anim, self.now);
             layers = layers.push(gate::dialog(dialog, shown, self.dialog.is_some()));
         }
+        // Переходам — кадры с частотой экрана, спиннерам и спектру хватает 30
+        // в секунду. Когда ничего не движется, кадров нет вовсе.
+        let transitioning = self.transitioning();
+        let layers = layers.push(heartbeat::heartbeat(
+            transitioning || self.animating(),
+            transitioning,
+            Message::Frame,
+        ));
         let layers = layers.push(resize_edges());
         // Где нажали мышь — для меню трека у курсора.
         if matches!(self.screen, Screen::Main(_)) {

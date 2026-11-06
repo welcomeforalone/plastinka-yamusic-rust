@@ -1020,6 +1020,7 @@ impl Library {
             | ListKey::Playlist(serial)
             | ListKey::ArtistPopular(serial)
             | ListKey::ArtistTracks(serial) => page_tracks(*serial),
+            ListKey::Detached | ListKey::Wave => None,
             ListKey::SearchTracks(generation) => match &self.search.tracks {
                 Some(Load::Ready(paged)) if *generation == self.search.generation => {
                     Some(paged.items.clone())

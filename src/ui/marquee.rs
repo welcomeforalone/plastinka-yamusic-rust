@@ -26,6 +26,8 @@ pub struct Marquee {
     content: String,
     style: Style,
     color: Color,
+    /// Короткий текст стоит по центру, а не слева.
+    centered: bool,
 }
 
 /// Однострочный текст в стиле `style`, длинный — бегущей строкой.
@@ -34,6 +36,7 @@ pub fn marquee(content: impl Into<String>, style: Style, color: Color) -> Marque
         content: content.into(),
         style,
         color,
+        centered: false,
     }
 }
 
@@ -48,6 +51,12 @@ struct State {
 }
 
 impl Marquee {
+    /// Если текст помещается, он стоит по центру.
+    pub fn centered(mut self) -> Self {
+        self.centered = true;
+        self
+    }
+
     fn text(&self, line: f32) -> text::Text<&str, iced::Font> {
         let (size, line_height, font) = self.style.metrics();
         text::Text {
@@ -144,10 +153,15 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Marquee {
         let Some(clip) = bounds.intersection(viewport) else {
             return;
         };
+        let shift = if self.centered && state.overflow <= 0.0 {
+            ((bounds.width - state.paragraph.min_width()) / 2.0).max(0.0)
+        } else {
+            0.0
+        };
         renderer.with_layer(clip, |renderer| {
             renderer.fill_paragraph(
                 state.paragraph.raw(),
-                Point::new(bounds.x - state.offset, bounds.y),
+                Point::new(bounds.x - state.offset + shift, bounds.y),
                 self.color,
                 clip,
             );

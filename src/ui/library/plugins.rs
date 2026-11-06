@@ -1169,6 +1169,12 @@ impl Library {
         if settings.copy_name {
             rows.push(self.copy_format_row());
         }
+        rows.push(widgets::divider());
+        rows.push(setting_row(
+            "VibeColorizer",
+            "Цвет «Моей волны» под обложку текущего трека".to_owned(),
+            switch(settings.vibe, change(settings, |s, on| s.vibe = on)),
+        ));
         container(column(rows))
             .width(Length::Fill)
             .style(|_| super::card_style())
