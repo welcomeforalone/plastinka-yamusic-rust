@@ -36,6 +36,34 @@ pub struct Config {
     /// Визуализатор спектра под плеером.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub visualizer: Option<bool>,
+    /// Качество звука: `lossless`, `normal` или `low`. Неизвестное значение
+    /// окно заменяет на `normal`.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub audio_quality: Option<String>,
+    /// Нормализация громкости треков (по умолчанию выключена).
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub normalize: Option<bool>,
+    /// Discord Rich Presence: показывать статус (по умолчанию да).
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub discord_enabled: Option<bool>,
+    /// Что в строке статуса: `app`, `artist` или `track`.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub discord_status: Option<String>,
+    /// Показывать статус на паузе (по умолчанию нет).
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub discord_on_pause: Option<bool>,
+    /// Кнопка «Слушать» со ссылкой на трек (по умолчанию да).
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub discord_button: Option<bool>,
+    /// Язык подписей статуса: `ru` или `en`.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub discord_lang: Option<String>,
+    /// Имя в статусе Discord: `plastinka`, `yandex-ru`, `yandex-en`.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub discord_app_name: Option<String>,
+    /// Application ID Discord вместо встроенного.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub discord_app_id: Option<String>,
     /// Плагины (таблица `[plugins]`).
     #[serde(
         skip_serializing_if = "PluginsConfig::is_empty",
@@ -236,6 +264,54 @@ visualizer = \"yes\"
         assert_eq!(config.scale, None);
         assert_eq!(config.visualizer, None);
         assert_eq!(config.scale_percent(), 100);
+    }
+
+    #[test]
+    fn sound_settings_survive_bad_values() {
+        let config: Config = toml::from_str(
+            "accent = \"teal\"
+audio_quality = \"lossless\"
+normalize = true
+",
+        )
+        .unwrap();
+        assert_eq!(config.audio_quality.as_deref(), Some("lossless"));
+        assert_eq!(config.normalize, Some(true));
+        let broken: Config = toml::from_str(
+            "audio_quality = 7
+normalize = \"да\"
+",
+        )
+        .unwrap();
+        assert_eq!(broken.audio_quality, None);
+        assert_eq!(broken.normalize, None);
+        // Неизвестное значение — «Оптимальное».
+        let unknown: Config = toml::from_str("audio_quality = \"ultra\"").unwrap();
+        let quality = unknown
+            .audio_quality
+            .as_deref()
+            .and_then(crate::api::AudioQuality::from_key)
+            .unwrap_or_default();
+        assert_eq!(quality, crate::api::AudioQuality::Normal);
+    }
+
+    #[test]
+    fn discord_settings_survive_bad_values() {
+        let config: Config = toml::from_str(
+            "discord_enabled = false
+discord_status = \"track\"
+discord_app_id = \"123\"
+discord_button = \"да\"
+",
+        )
+        .unwrap();
+        assert_eq!(config.discord_enabled, Some(false));
+        assert_eq!(config.discord_status.as_deref(), Some("track"));
+        assert_eq!(config.discord_app_id.as_deref(), Some("123"));
+        assert_eq!(config.discord_button, None);
+        // Ничего не задано — в файл ничего не пишется.
+        let text = toml::to_string(&Config::default()).unwrap();
+        assert!(!text.contains("discord"));
     }
 
     #[test]

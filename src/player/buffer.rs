@@ -6,6 +6,7 @@
 //! ничего не пишется: буфер живёт, пока играет трек.
 
 use std::io::{self, Read, Seek, SeekFrom};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -104,16 +105,110 @@ impl State {
     }
 }
 
+/// Отладка: атомы mp4 верхнего уровня — первые по порядку и сколько каких.
+#[cfg(debug_assertions)]
+fn layout(data: &[u8]) -> String {
+    if data.get(..4) == Some(b"fLaC".as_slice()) {
+        return "нативный FLAC".to_owned();
+    }
+    let be32 = |at: usize| -> Option<u64> {
+        let bytes: [u8; 4] = data.get(at..at.checked_add(4)?)?.try_into().ok()?;
+        Some(u64::from(u32::from_be_bytes(bytes)))
+    };
+    let be64 = |at: usize| -> Option<u64> {
+        let bytes: [u8; 8] = data.get(at..at.checked_add(8)?)?.try_into().ok()?;
+        Some(u64::from_be_bytes(bytes))
+    };
+    let mut first = Vec::new();
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    let mut pos: usize = 0;
+    while let (Some(size), Some(kind)) = (be32(pos), data.get(pos + 4..pos + 8)) {
+        let kind = String::from_utf8_lossy(kind).into_owned();
+        let size = match size {
+            0 => (data.len() - pos) as u64,
+            1 => be64(pos + 8).unwrap_or(0),
+            size => size,
+        };
+        if size < 8 {
+            break;
+        }
+        if first.len() < 8 {
+            first.push(format!("{kind}@{pos}({size})"));
+        }
+        *counts.entry(kind).or_default() += 1;
+        let Some(next) = usize::try_from(size)
+            .ok()
+            .and_then(|size| pos.checked_add(size))
+        else {
+            break;
+        };
+        pos = next;
+    }
+    if counts.is_empty() {
+        return "не mp4 и не FLAC (MP3/ADTS?)".to_owned();
+    }
+    format!("первые атомы: {}; всего: {counts:?}", first.join(" "))
+}
+
 /// Общий буфер загрузчика и читателя.
 #[derive(Default)]
 pub struct StreamBuffer {
     state: Mutex<State>,
     changed: Condvar,
+    /// Отладка: начало трассировки потока (`PLASTINKA_TRACE_STREAM=1`).
+    #[cfg(debug_assertions)]
+    trace: Option<std::time::Instant>,
 }
 
 impl StreamBuffer {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self::default())
+        Arc::new(Self {
+            #[cfg(debug_assertions)]
+            trace: std::env::var("PLASTINKA_TRACE_STREAM")
+                .is_ok_and(|value| value == "1")
+                .then(std::time::Instant::now),
+            ..Self::default()
+        })
+    }
+
+    /// Отладка: включена ли трассировка потока.
+    #[cfg(debug_assertions)]
+    pub fn tracing(&self) -> bool {
+        self.trace.is_some()
+    }
+
+    /// Отладка: строка трассировки с временем от начала трека.
+    #[cfg(debug_assertions)]
+    pub fn trace(&self, message: std::fmt::Arguments<'_>) {
+        use std::io::Write;
+        if let Some(start) = self.trace {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[поток {:>6} мс] {message}",
+                start.elapsed().as_millis()
+            );
+        }
+    }
+
+    /// Отладка: где читатель и сколько скачано.
+    #[cfg(debug_assertions)]
+    pub fn trace_state(&self) -> String {
+        let state = self.lock();
+        let filled: u64 = state.filled.iter().map(|(start, end)| end - start).sum();
+        format!(
+            "читатель на {}, ждёт {:?}, скачано {} из {:?} байт ({} отрезков)",
+            state.read_pos,
+            state.wanted,
+            filled,
+            state.total,
+            state.filled.len()
+        )
+    }
+
+    /// Отладка: устройство скачанного файла (атомы mp4 верхнего уровня).
+    #[cfg(debug_assertions)]
+    pub fn trace_layout(&self) -> String {
+        layout(&self.lock().data)
     }
 
     /// Мьютекс отравляется только паникой в другом потоке. Данные при этом
@@ -192,9 +287,13 @@ impl StreamBuffer {
         if state.cancelled || state.filled_end(pos).is_some() {
             return true;
         }
-        state
-            .wanted
-            .is_some_and(|wanted| wanted < pos || wanted > pos.saturating_add(LOOKAHEAD))
+        // Читатель, чьи байты уже легли, ждать не будет: его `wanted` просто
+        // не успел сброситься. Иначе каждый запрос отдавал бы один кусок и
+        // сразу перезапускался (на каждый кусок — задержка ответа).
+        state.wanted.is_some_and(|wanted| {
+            state.filled_end(wanted).is_none()
+                && (wanted < pos || wanted > pos.saturating_add(LOOKAHEAD))
+        })
     }
 
     pub fn fail(&self, failure: Failure) {
@@ -290,6 +389,12 @@ pub struct Reader {
     buffer: Arc<StreamBuffer>,
     pos: u64,
     total: u64,
+    /// Что отвечает `is_seekable`. Читатель mp4 в режиме «перематывается»
+    /// обходит все атомы файла до конца: у фрагментированного mp4 это сотни
+    /// прыжков и столько же запросов Range. Поэтому на открытии и при
+    /// перемотке вперёд режим выключают (см. `decode`): чтение идёт подряд, а
+    /// загрузка не прыгает.
+    seekable: Arc<AtomicBool>,
 }
 
 impl Reader {
@@ -307,6 +412,7 @@ impl Reader {
                     buffer,
                     pos: 0,
                     total,
+                    seekable: Arc::new(AtomicBool::new(true)),
                 });
             }
             state.wanted = Some(0);
@@ -316,6 +422,28 @@ impl Reader {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .0;
         }
+    }
+}
+
+impl Reader {
+    /// Переключатель «перематывается» для `MediaSource`.
+    pub fn seekable_switch(&self) -> Arc<AtomicBool> {
+        self.seekable.clone()
+    }
+
+    /// Файл начинается как mp4 (`ftyp` или `styp`). Позиция после проверки
+    /// возвращается в начало.
+    pub fn sniff_mp4(&mut self) -> bool {
+        let mut head = [0_u8; 8];
+        let mut filled = 0;
+        while let Some(rest) = head.get_mut(filled..).filter(|rest| !rest.is_empty()) {
+            match self.read(rest) {
+                Ok(read) if read > 0 => filled += read,
+                _ => break,
+            }
+        }
+        self.pos = 0;
+        matches!(head.get(4..8), Some(b"ftyp" | b"styp")) && filled == head.len()
     }
 }
 
@@ -344,7 +472,7 @@ impl Seek for Reader {
 
 impl MediaSource for Reader {
     fn is_seekable(&self) -> bool {
-        true
+        self.seekable.load(Ordering::SeqCst)
     }
 
     fn byte_len(&self) -> Option<u64> {
@@ -394,6 +522,49 @@ mod tests {
         assert_eq!(buffer.next_start(), Some(1000));
         buffer.write(1000, &vec![0; 654_360]);
         assert_eq!(buffer.next_start(), None);
+    }
+
+    /// Читатель, чьи байты уже легли, не повод перезапускать запрос: иначе
+    /// каждый запрос отдавал бы один кусок (на каждый — задержка ответа).
+    #[test]
+    fn satisfied_reader_does_not_restart_download() {
+        let buffer = StreamBuffer::new();
+        buffer.set_total(10_000_000).unwrap();
+        buffer.write(0, &[0; 8192]);
+        // Читатель ждал позицию 0, байты легли, `wanted` ещё не сброшен.
+        buffer.lock().wanted = Some(0);
+        assert!(!buffer.should_restart(8192));
+        // Ждёт нескачанное позади — это уже повод.
+        buffer.lock().wanted = Some(100_000);
+        assert!(buffer.should_restart(8192 + 1_000_000));
+        // Ждёт нескачанное далеко впереди — тоже.
+        buffer.lock().wanted = Some(5_000_000);
+        assert!(buffer.should_restart(8192));
+    }
+
+    #[test]
+    fn sniff_finds_mp4_and_resets_position() {
+        let buffer = StreamBuffer::new();
+        let mut data = vec![0, 0, 0, 28];
+        data.extend_from_slice(b"ftypisom");
+        data.resize(64, 0);
+        buffer.set_total(data.len() as u64).unwrap();
+        buffer.write(0, &data);
+        let mut reader = Reader::open(buffer).unwrap();
+        assert!(reader.sniff_mp4());
+        let mut out = [0; 4];
+        assert_eq!(reader.read(&mut out).unwrap(), 4);
+        assert_eq!(out, [0, 0, 0, 28]);
+        // Переключатель «перематывается» доходит до `MediaSource`.
+        let switch = reader.seekable_switch();
+        assert!(reader.is_seekable());
+        switch.store(false, Ordering::SeqCst);
+        assert!(!reader.is_seekable());
+
+        let other = StreamBuffer::new();
+        other.set_total(16).unwrap();
+        other.write(0, b"fLaC0000abcdefgh");
+        assert!(!Reader::open(other).unwrap().sniff_mp4());
     }
 
     #[test]

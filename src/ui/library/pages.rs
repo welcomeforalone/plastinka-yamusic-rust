@@ -1045,6 +1045,7 @@ impl Library {
                 queue.current = index;
             }
         } else {
+            self.remember_source(&key);
             let mut queue = Queue::new(key, tracks, index);
             if self.player.shuffle {
                 let censor = self.plugins.fckcensor.then_some(&self.censor);
@@ -1065,6 +1066,7 @@ impl Library {
             self.player.shuffle = true;
         }
         self.chosen = None;
+        self.remember_source(&key);
         let mut queue = Queue::new(key, tracks, 0);
         let censor = self.plugins.fckcensor.then_some(&self.censor);
         let first = queue.first(self.player.shuffle, &mut self.rng, &|track| {

@@ -315,6 +315,8 @@ pub(super) struct Wave {
     started: Instant,
     /// Цвет экрана волны.
     tint: Tint,
+    /// Откуда построена очередь, если играет не волна: подпись в таблетке.
+    source: String,
 }
 
 impl Wave {
@@ -336,7 +338,54 @@ impl Wave {
             feedback: Feedback::default(),
             started: Instant::now(),
             tint: Tint::new(theme::accent()),
+            source: String::new(),
         }
+    }
+}
+
+/// Что показывает экран «Моя волна».
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Screen {
+    /// Играет волна.
+    Wave,
+    /// Играет (или на паузе) трек не из волны: тот же экран с таблеткой
+    /// источника и крестиком.
+    Foreign,
+    /// Ничего не играет или волна запускается/не запустилась: стартовый вид
+    /// по фазе.
+    Start,
+}
+
+/// Выбор вида экрана. `idle` — волна не запускается и не в ошибке (фаза
+/// `Idle`): пока она грузится, остаётся «Загружаем волну…», а не чужой трек.
+fn screen_for(in_wave: bool, idle: bool, has_track: bool) -> Screen {
+    if in_wave {
+        Screen::Wave
+    } else if idle && has_track {
+        Screen::Foreign
+    } else {
+        Screen::Start
+    }
+}
+
+/// Подпись источника очереди для таблетки. `title` — название страницы
+/// (альбома, плейлиста, исполнителя), если оно известно.
+fn source_text(key: &ListKey, title: Option<&str>) -> String {
+    let with = |kind: &str| match title {
+        Some(title) => format!("{kind} «{title}»"),
+        None => kind.to_owned(),
+    };
+    match key {
+        // Отвязанная очередь осталась от «Мне нравится».
+        ListKey::Liked | ListKey::LikedFound(_) | ListKey::Detached => "Мне нравится".to_owned(),
+        ListKey::Album(_) => with("Альбом"),
+        ListKey::Playlist(_) => with("Плейлист"),
+        ListKey::ArtistPopular(_) | ListKey::ArtistTracks(_) => match title {
+            Some(name) => format!("Исполнитель {name}"),
+            None => "Исполнитель".to_owned(),
+        },
+        ListKey::SearchTracks(_) => "Поиск".to_owned(),
+        ListKey::Wave => "Моя волна".to_owned(),
     }
 }
 
@@ -348,15 +397,58 @@ impl Library {
             .is_some_and(|queue| queue.key == ListKey::Wave)
     }
 
+    /// Что сейчас показывает экран волны.
+    fn wave_screen(&self) -> Screen {
+        let has_track = self.player.loaded && self.current_shown().is_some();
+        screen_for(
+            self.in_wave(),
+            matches!(self.wave.phase, Phase::Idle),
+            has_track,
+        )
+    }
+
+    /// Запоминает, откуда построена очередь `key` (для таблетки на экране
+    /// волны): название берём у страницы в стопке, пока она есть.
+    pub(super) fn remember_source(&mut self, key: &ListKey) {
+        let title = self.stack.iter().find_map(|entry| {
+            let serial = match key {
+                ListKey::Album(serial)
+                | ListKey::Playlist(serial)
+                | ListKey::ArtistPopular(serial)
+                | ListKey::ArtistTracks(serial) => *serial,
+                _ => return None,
+            };
+            if entry.serial != serial {
+                return None;
+            }
+            match &entry.page {
+                super::pages::Page::Album { load, .. } => {
+                    load.ready().map(|view| view.card.title.clone())
+                }
+                super::pages::Page::Playlist { load, .. } => {
+                    load.ready().map(|view| view.card.title.clone())
+                }
+                super::pages::Page::Artist { load, .. } => {
+                    load.ready().map(|view| view.card.name.clone())
+                }
+                super::pages::Page::ArtistTracks { name, .. } => Some(name.clone()),
+                super::pages::Page::TopArtists { .. } => None,
+            }
+        });
+        self.wave.source = source_text(key, title.as_deref());
+    }
+
     /// Нужны ли кадры: кольца пульсируют, только пока экран волны виден.
     pub(super) fn wave_animating(&self) -> bool {
         if self.section != Section::Wave || !self.stack.is_empty() {
             return false;
         }
-        if self.in_wave() {
-            return self.wave.waiting;
+        match self.wave_screen() {
+            Screen::Wave => self.wave.waiting,
+            // Спектр под чужим треком идёт кадрами визуализатора.
+            Screen::Foreign => false,
+            Screen::Start => matches!(self.wave.phase, Phase::Idle | Phase::Starting),
         }
-        matches!(self.wave.phase, Phase::Idle | Phase::Starting)
     }
 
     /// Цвет волны на экране в момент `now` (с плавным переходом).
@@ -404,6 +496,14 @@ impl Library {
     /// Большая обложка текущего трека волны: для экрана волны (она на виду)
     /// и для VibeColorizer, если в ответе нет ни цвета, ни оттенка.
     pub fn wave_cover(&self) -> Option<&str> {
+        // Чужой трек на экране волны: нужна только большая обложка.
+        if self.wave_screen() == Screen::Foreign {
+            let visible = self.section == Section::Wave && self.stack.is_empty();
+            return self
+                .current_shown()
+                .filter(|_| visible)
+                .and_then(|track| track.cover_uri.as_deref());
+        }
         if !self.in_wave() {
             return None;
         }
@@ -810,9 +910,10 @@ impl Library {
         now: Instant,
         visualizer: bool,
     ) -> Element<'a, App> {
-        let playing = self.in_wave();
+        let screen = self.wave_screen();
+        let playing = screen != Screen::Start;
         let body = if playing {
-            self.wave_playing(covers, turn, now, visualizer)
+            self.wave_playing(covers, turn, now, visualizer, screen == Screen::Foreign)
         } else {
             match &self.wave.phase {
                 Phase::Idle => self.wave_idle(now),
@@ -937,12 +1038,15 @@ impl Library {
     }
 
     /// Волна играет: обложка с круговым спектром, название, кнопки, «Далее».
+    /// `foreign` — играет не волна: сверху таблетка источника и крестик,
+    /// кнопки как в плеере снизу для обычной очереди.
     fn wave_playing<'a>(
         &'a self,
         covers: &'a Covers,
         turn: f32,
         now: Instant,
         visualizer: bool,
+        foreign: bool,
     ) -> Element<'a, App> {
         let Some(queue) = &self.queue else {
             return Space::new().into();
@@ -952,7 +1056,7 @@ impl Library {
         };
         let exhausted = queue.current + 1 >= queue.tracks.len();
         // Очередь кончилась и догрузка не удалась: волна встала.
-        if self.wave.blocked && exhausted && !self.player.loaded && !self.wave.waiting {
+        if !foreign && self.wave.blocked && exhausted && !self.player.loaded && !self.wave.waiting {
             return wave_problem(
                 "Волна прервалась",
                 "Не удалось получить продолжение. Проверьте соединение.".to_owned(),
@@ -1052,9 +1156,12 @@ impl Library {
         };
         let liked = self.liked.contains(&original.id);
         let playing = self.player.playing;
-        // Порядок, как в плеере снизу, без перемешивания: «Не нравится»,
-        // назад, пауза, вперёд, повтор трека, «Нравится».
-        let buttons = row![
+        // Порядок, как в плеере снизу: «Не нравится», назад, пауза, вперёд,
+        // повтор, «Нравится»; вне волны ещё и перемешивание.
+        let dislike: Element<'a, App> = if foreign {
+            // Как в плеере снизу вне волны: «Не нравится» не работает.
+            widgets::icon_button(Icon::Dislike, Size::M, false, None)
+        } else {
             widgets::with_tooltip(
                 widgets::icon_button(
                     Icon::Dislike,
@@ -1064,13 +1171,46 @@ impl Library {
                 ),
                 "Не нравится: пропустить трек",
                 iced::widget::tooltip::Position::Top,
-            ),
+            )
+        };
+        let shuffle: Element<'a, App> = if foreign {
+            widgets::icon_button(
+                Icon::Shuffle,
+                Size::M,
+                self.player.shuffle,
+                Some(Lib(Message::ToggleShuffle)),
+            )
+        } else {
+            Space::new().width(0).into()
+        };
+        let (repeat_icon, repeat_on) = if foreign {
+            (
+                if self.repeat_one() {
+                    Icon::RepeatOne
+                } else {
+                    Icon::Repeat
+                },
+                self.player.repeat != super::Repeat::Off,
+            )
+        } else {
+            (
+                if self.wave.repeat_one {
+                    Icon::RepeatOne
+                } else {
+                    Icon::Repeat
+                },
+                self.wave.repeat_one,
+            )
+        };
+        let buttons = row![
+            dislike,
+            shuffle,
             widgets::icon_button(
                 Icon::PreviousFilled,
                 Size::M,
                 false,
-                // Назад можно, только если в волне уже что-то играло.
-                (queue.current > 0).then_some(Lib(Message::Previous)),
+                // В волне назад можно, только если в ней уже что-то играло.
+                (foreign || queue.current > 0).then_some(Lib(Message::Previous)),
             ),
             widgets::icon_button(
                 if playing {
@@ -1085,16 +1225,16 @@ impl Library {
             widgets::icon_button(Icon::NextFilled, Size::M, false, Some(Lib(Message::Next)),),
             widgets::with_tooltip(
                 widgets::icon_button(
-                    if self.wave.repeat_one {
-                        Icon::RepeatOne
-                    } else {
-                        Icon::Repeat
-                    },
+                    repeat_icon,
                     Size::M,
-                    self.wave.repeat_one,
+                    repeat_on,
                     Some(Lib(Message::CycleRepeat)),
                 ),
-                "Повторять трек",
+                if foreign {
+                    "Повтор"
+                } else {
+                    "Повторять трек"
+                },
                 iced::widget::tooltip::Position::Top,
             ),
             widgets::icon_button(
@@ -1111,7 +1251,9 @@ impl Library {
         .spacing(14)
         .align_y(Alignment::Center);
 
-        let next: Element<'a, App> = if self.wave.waiting {
+        let next: Element<'a, App> = if foreign {
+            Space::new().height(18).into()
+        } else if self.wave.waiting {
             widgets::waiting("Загружаем волну…".to_owned(), turn)
         } else {
             let text = match queue.tracks.get(queue.current + 1) {
@@ -1128,8 +1270,8 @@ impl Library {
                 .clip(true)
                 .into()
         };
-        let quality: Element<'a, App> = match self.player.kbps {
-            Some(kbps) => quality_badge(kbps, true),
+        let quality: Element<'a, App> = match self.player.stream {
+            Some(info) => quality_badge(info, true),
             None => Space::new().height(24).into(),
         };
         // Длинное название прокручивается, как в плеере снизу.
@@ -1137,9 +1279,37 @@ impl Library {
             marquee(track.display_title(), Style::Display, theme::TEXT_PRIMARY).centered(),
         )
         .width(TEXT_WIDTH);
+        // Над названием: «Моя волна» или (чужая очередь) таблетка источника
+        // и крестик, что запускает волну.
+        let head: Element<'a, App> = if foreign {
+            let label = if self.wave.source.is_empty() {
+                "Очередь"
+            } else {
+                self.wave.source.as_str()
+            };
+            row![
+                // Выбор настроения волны — этап 9: пока таблетка не нажимается.
+                source_pill(label.to_owned(), None),
+                widgets::with_tooltip(
+                    widgets::icon_button(
+                        Icon::Close,
+                        Size::S,
+                        false,
+                        Some(Lib(Message::Wave(Msg::Start))),
+                    ),
+                    "Запустить «Мою волну»",
+                    iced::widget::tooltip::Position::Right,
+                ),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into()
+        } else {
+            theme::line("Моя волна", Style::BodyStrong, accent).into()
+        };
         center(
             column![
-                theme::line("Моя волна", Style::BodyStrong, accent),
+                head,
                 art,
                 column![title, artists, tags]
                     .spacing(6)
@@ -1152,6 +1322,31 @@ impl Library {
             .align_x(Alignment::Center),
         )
         .into()
+    }
+}
+
+/// Таблетка источника над названием: подпись и ⌄. `on_press` — выбор
+/// настроения волны (этап 9); без него таблетка не нажимается, без наведения
+/// и курсора-руки.
+fn source_pill<'a>(label: String, on_press: Option<App>) -> Element<'a, App> {
+    let content = row![
+        container(theme::line(label, Style::BodyStrong, theme::TEXT_PRIMARY))
+            .max_width(360)
+            .clip(true),
+        icon(Icon::ChevronDown, 18.0, theme::TEXT_SECONDARY),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+    let pill = container(content)
+        .padding([6, 14])
+        .style(|_| container::Style {
+            background: Some(theme::alpha(theme::TEXT_PRIMARY, 0.1).into()),
+            border: Border::default().rounded(widgets::ROUND),
+            ..container::Style::default()
+        });
+    match on_press {
+        Some(message) => mouse_pointer(button(pill).padding(0).on_press(message)),
+        None => pill.into(),
     }
 }
 
@@ -1189,6 +1384,7 @@ mod tests {
             available: true,
             cover_uri: None,
             warning: api::Warning::None,
+            loudness: None,
         }
     }
 
@@ -1219,6 +1415,44 @@ mod tests {
             hue: None,
             colors: None,
         }
+    }
+
+    #[test]
+    fn screen_follows_what_is_playing() {
+        // Ничего не играет — стартовый вид.
+        assert_eq!(screen_for(false, true, false), Screen::Start);
+        // Волна — её экран, как бы ни было с остальным.
+        assert_eq!(screen_for(true, true, true), Screen::Wave);
+        assert_eq!(screen_for(true, false, true), Screen::Wave);
+        // Чужая очередь — тот же экран с таблеткой.
+        assert_eq!(screen_for(false, true, true), Screen::Foreign);
+        // Волна запускается или не вышла: «Загружаем…» и ошибка, а не трек.
+        assert_eq!(screen_for(false, false, true), Screen::Start);
+    }
+
+    #[test]
+    fn source_label_names_the_list() {
+        assert_eq!(source_text(&ListKey::Liked, None), "Мне нравится");
+        assert_eq!(
+            source_text(&ListKey::LikedFound("a".to_owned()), None),
+            "Мне нравится"
+        );
+        assert_eq!(source_text(&ListKey::Detached, None), "Мне нравится");
+        assert_eq!(
+            source_text(&ListKey::Album(1), Some("Камнем по голове")),
+            "Альбом «Камнем по голове»"
+        );
+        assert_eq!(source_text(&ListKey::Album(1), None), "Альбом");
+        assert_eq!(
+            source_text(&ListKey::Playlist(2), Some("Утро")),
+            "Плейлист «Утро»"
+        );
+        assert_eq!(
+            source_text(&ListKey::ArtistPopular(3), Some("Король и Шут")),
+            "Исполнитель Король и Шут"
+        );
+        assert_eq!(source_text(&ListKey::ArtistTracks(3), None), "Исполнитель");
+        assert_eq!(source_text(&ListKey::SearchTracks(4), None), "Поиск");
     }
 
     #[test]

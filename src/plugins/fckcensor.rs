@@ -876,6 +876,7 @@ mod tests {
             available: true,
             cover_uri: None,
             warning,
+            loudness: None,
         }
     }
 

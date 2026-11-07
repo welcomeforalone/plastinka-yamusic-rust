@@ -7,12 +7,28 @@
 //! (звуковое устройство и сеанс трека), задача загрузки на своём рантайме
 //! tokio и поток декодера на каждый трек. Окно ничего не ждёт.
 
+/// Отладка: строка трассировки потока в stderr, когда задано
+/// `PLASTINKA_TRACE_STREAM=1` (только отладочная сборка). Время в строке —
+/// от начала трека. Ни токена, ни ссылок в трассировке нет.
+macro_rules! trace {
+    ($buffer:expr, $($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        {
+            if $buffer.tracing() {
+                $buffer.trace(format_args!($($arg)*));
+            }
+        }
+    };
+}
+
 mod buffer;
 mod decode;
 mod download;
 #[cfg(debug_assertions)]
 mod fake;
 mod local;
+#[cfg(test)]
+mod measure;
 mod output;
 
 use std::hash::{Hash, Hasher};
@@ -24,7 +40,7 @@ use std::time::Duration;
 use rodio::{CpalError, CpalErrorKind, DeviceSinkBuilder, MixerDeviceSink};
 use tokio::sync::mpsc as async_mpsc;
 
-use crate::api::{self, PlaybackPermit};
+use crate::api::{self, AudioQuality, Codec, PlaybackPermit, StreamInfo};
 use crate::net;
 use crate::storage::token::StoredToken;
 use buffer::{Failure, LinkFailure, StreamBuffer};
@@ -52,26 +68,34 @@ pub enum Command {
         id: u64,
         sound: Sound,
         start: Duration,
+        /// Множитель нормализации громкости трека (1 — без поправки).
+        norm: f32,
     },
     Pause,
     Resume,
     Seek(Duration),
     /// Громкость 0…1, уже с учётом «без звука».
     Volume(f32),
+    /// Качество звука: действует со следующего запроса потока (следующий
+    /// трек), текущий доигрывает как начат.
+    Quality(AudioQuality),
+    /// Множитель нормализации громкости текущего трека (1 — без поправки):
+    /// применяется сразу, без перезапуска.
+    Norm(f32),
     Stop,
 }
 
 /// События для окна.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    /// Позиция трека. `buffering` — звук ждёт сеть. `kbps` — битрейт MP3,
-    /// когда ссылка уже получена. `seeks` — сколько перемоток этого трека
+    /// Позиция трека. `buffering` — звук ждёт сеть. `stream` — кодек и
+    /// битрейт, когда ссылка уже получена. `seeks` — сколько перемоток этого трека
     /// плеер уже получил: по нему окно отбрасывает позицию до перемотки.
     Progress {
         id: u64,
         position: Duration,
         buffering: bool,
-        kbps: Option<u32>,
+        stream: Option<StreamInfo>,
         seeks: u64,
     },
     /// Трек доигран до конца.
@@ -217,6 +241,7 @@ impl Player {
             device_failed: Arc::new(AtomicBool::new(false)),
             volume: Arc::new(Volume::default()),
             tap: tap.clone(),
+            quality: AudioQuality::default(),
             session: None,
             last_progress: None,
         };
@@ -271,8 +296,27 @@ fn device_lost(err: &CpalError) -> bool {
 struct Session {
     id: u64,
     seeks: u64,
+    sound: Sound,
+    norm: f32,
+    /// Поток запрошен запасным путём (MP3 через `download-info`).
+    mp3_only: bool,
     shared: Arc<Shared>,
     download: tokio::task::JoinHandle<()>,
+}
+
+/// Нужно ли молча перезапустить трек запасным путём: поток Яндекса не
+/// открылся или не декодируется, а получен он был не как MP3 и не запасным
+/// путём. Повтор один: у запасного пути `mp3_only` уже `true`.
+fn should_fall_back(
+    error: &PlayError,
+    mp3_only: bool,
+    sound: &Sound,
+    stream: Option<StreamInfo>,
+) -> bool {
+    matches!(error, PlayError::Format(_))
+        && !mp3_only
+        && matches!(sound, Sound::Track(_))
+        && stream.is_some_and(|stream| stream.codec != Codec::Mp3)
 }
 
 impl Session {
@@ -293,6 +337,7 @@ struct Control {
     device_failed: Arc<AtomicBool>,
     volume: Arc<Volume>,
     tap: Arc<Tap>,
+    quality: AudioQuality,
     session: Option<Session>,
     last_progress: Option<Event>,
 }
@@ -320,7 +365,12 @@ impl Control {
 
     fn handle(&mut self, command: Command) {
         match command {
-            Command::Play { id, sound, start } => self.play(id, sound, start),
+            Command::Play {
+                id,
+                sound,
+                start,
+                norm,
+            } => self.play(id, sound, start, norm, false, false, 0),
             Command::Pause => self.with_session(|shared| shared.set_paused(true)),
             Command::Resume => self.with_session(|shared| shared.set_paused(false)),
             Command::Seek(to) => {
@@ -330,6 +380,8 @@ impl Control {
                 }
             }
             Command::Volume(volume) => self.volume.set(volume),
+            Command::Quality(quality) => self.set_quality(quality),
+            Command::Norm(norm) => self.with_session(|shared| shared.set_norm(norm)),
             Command::Stop => {
                 if let Some(session) = self.session.take() {
                     session.stop();
@@ -371,7 +423,44 @@ impl Control {
         Ok(mixer)
     }
 
-    fn play(&mut self, id: u64, sound: Sound, start: Duration) {
+    /// Новое качество. Если сейчас играет поток Яндекса, трек перезапускается
+    /// с той же позиции (пауза сохраняется); свой файл не трогаем.
+    fn set_quality(&mut self, quality: AudioQuality) {
+        if quality == self.quality {
+            return;
+        }
+        self.quality = quality;
+        let Some(session) = self.session.take() else {
+            return;
+        };
+        if !matches!(session.sound, Sound::Track(_)) {
+            self.session = Some(session);
+            return;
+        }
+        let (id, seeks, sound, norm) = (
+            session.id,
+            session.seeks,
+            session.sound.clone(),
+            session.norm,
+        );
+        let (position, paused) = (session.shared.position(), session.shared.is_paused());
+        session.stop();
+        self.play(id, sound, position, norm, false, paused, seeks);
+    }
+
+    /// Запускает трек. `mp3_only` — запасной путь (MP3 через `download-info`);
+    /// `paused` и `seeks` переносятся при перезапуске.
+    #[allow(clippy::too_many_arguments)]
+    fn play(
+        &mut self,
+        id: u64,
+        sound: Sound,
+        start: Duration,
+        norm: f32,
+        mp3_only: bool,
+        paused: bool,
+        seeks: u64,
+    ) {
         if let Some(session) = self.session.take() {
             session.stop();
         }
@@ -386,10 +475,17 @@ impl Control {
             self.tap.clone(),
             start,
         );
+        shared.set_norm(norm);
+        shared.set_paused(paused);
+        trace!(
+            shared.buffer,
+            "старт трека с {start:?}, качество {:?}, только MP3 = {mp3_only}", self.quality
+        );
 
-        let (download, extension) = match sound {
-            Sound::Track(track_id) => (self.stream(&shared, track_id), None),
+        let (download, extension) = match &sound {
+            Sound::Track(track_id) => (self.stream(&shared, track_id.clone(), mp3_only), None),
             Sound::File(path) => {
+                let path = path.clone();
                 let extension = path
                     .extension()
                     .map(|extension| extension.to_string_lossy().to_lowercase());
@@ -407,7 +503,10 @@ impl Control {
             .spawn(move || decode::run(decoder_shared, mixer, extension));
         let session = Session {
             id,
-            seeks: 0,
+            seeks,
+            sound,
+            norm,
+            mp3_only,
             shared,
             download,
         };
@@ -422,20 +521,32 @@ impl Control {
     }
 
     /// Загрузка трека Яндекса потоком в буфер сеанса.
-    fn stream(&self, shared: &Arc<Shared>, track_id: String) -> tokio::task::JoinHandle<()> {
+    fn stream(
+        &self,
+        shared: &Arc<Shared>,
+        track_id: String,
+        mp3_only: bool,
+    ) -> tokio::task::JoinHandle<()> {
         let (http, token) = (self.api_http.clone(), self.token.clone());
+        // Качество берётся один раз на трек: повторные ссылки (перемотка,
+        // обрыв) просят тот же формат, иначе размер файла изменился бы.
+        let quality = self.quality;
         let relink: download::Relink = Box::new(move || {
             let (http, token, track_id) = (http.clone(), token.clone(), track_id.clone());
             Box::pin(async move {
-                api::fetch_stream_source(&http, &token.access_token, &track_id).await
+                if mp3_only {
+                    api::fetch_mp3_source(&http, &token.access_token, &track_id).await
+                } else {
+                    api::fetch_stream_source(&http, &token.access_token, &track_id, quality).await
+                }
             })
         });
-        let (buffer, audio_http, quality) = (
+        let (buffer, audio_http, session) = (
             shared.buffer.clone(),
             self.audio_http.clone(),
             shared.clone(),
         );
-        let on_link = move |source: &api::StreamSource| quality.set_kbps(source.kbps());
+        let on_link = move |source: &api::StreamSource| session.set_stream(source.info());
         self.runtime
             .spawn(download::run(buffer, audio_http, relink, on_link))
     }
@@ -468,9 +579,20 @@ impl Control {
             None
         };
         if let Some(result) = result {
-            if let Some(session) = self.session.take() {
+            let Some(session) = self.session.take() else {
+                return;
+            };
+            // Поток не открылся: один раз молча пробуем MP3 с той же позиции.
+            if let Err(error) = &result
+                && should_fall_back(error, session.mp3_only, &session.sound, shared.stream())
+            {
+                let (sound, norm) = (session.sound.clone(), session.norm);
+                let (position, paused) = (shared.position(), shared.is_paused());
                 session.stop();
+                self.last_progress = None;
+                return self.play(id, sound, position, norm, true, paused, seeks);
             }
+            session.stop();
             return self.emit(match result {
                 Ok(()) => Event::Ended { id },
                 Err(error) => Event::Failed { id, error },
@@ -483,7 +605,7 @@ impl Control {
                 u64::try_from(shared.position().as_millis()).unwrap_or(u64::MAX) / 100 * 100,
             ),
             buffering: shared.buffering(),
-            kbps: shared.kbps(),
+            stream: shared.stream(),
             seeks,
         };
         if self.last_progress.as_ref() != Some(&progress) {
@@ -570,6 +692,74 @@ mod tests {
         );
     }
 
+    /// FLAC из памяти играет до конца, перемотка внутри него работает.
+    /// Проверка форматов на настоящих файлах из каталога, который назван в
+    /// `PLASTINKA_TEST_AUDIO_DIR` (файлы лежат вне репозитория, их делает
+    /// ffmpeg). Каждый файл читается в память и идёт через тот же декодер,
+    /// что и поток Яндекса (без подсказки расширения), затем перематывается
+    /// на середину. Запуск: `cargo test decode_formats_from_dir -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore = "нужны файлы из PLASTINKA_TEST_AUDIO_DIR"]
+    fn decode_formats_from_dir() {
+        let Ok(dir) = std::env::var("PLASTINKA_TEST_AUDIO_DIR") else {
+            return;
+        };
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .collect();
+        names.sort();
+        for path in names {
+            let volume = Arc::new(Volume::default());
+            volume.set(1.0);
+            let shared = Shared::new(
+                StreamBuffer::new(),
+                volume,
+                Arc::new(Tap::default()),
+                Duration::ZERO,
+            );
+            local::run(&shared.buffer, &path);
+            let (mixer, mut source) =
+                rodio::mixer::mixer(NonZero::new(2).unwrap(), NonZero::new(44_100).unwrap());
+            let decoder = shared.clone();
+            std::thread::spawn(move || decode::run(decoder, mixer, None));
+            let started = Instant::now();
+            let mut seeked = false;
+            while !shared.finished() && started.elapsed() < Duration::from_secs(30) {
+                for _ in 0..44_100 {
+                    let _ = source.next();
+                }
+                if !seeked && shared.position() > Duration::ZERO {
+                    shared.request_seek(Duration::from_secs(6));
+                    seeked = true;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let ok = shared.decode_error().is_none() && shared.position() > Duration::from_secs(9);
+            eprintln!(
+                "{:<18} {} позиция {:?} ошибка {:?} перемотка {}",
+                path.file_name().unwrap().to_string_lossy(),
+                if ok { "ОК" } else { "СБОЙ" },
+                shared.position(),
+                shared.decode_error(),
+                seeked,
+            );
+            shared.stop();
+        }
+    }
+
+    #[test]
+    fn flac_plays_and_seeks() {
+        let shared = run_fake("silence-flac", SeekAt::Never);
+        assert_eq!(shared.buffer.failure(), None);
+        assert_eq!(shared.decode_error(), None);
+        assert!(shared.position() > Duration::from_secs(58));
+        let shared = run_fake("silence-flac", SeekAt::Playing(Duration::from_secs(40)));
+        assert_eq!(shared.decode_error(), None);
+        assert!(shared.position() > Duration::from_secs(58));
+    }
+
     #[test]
     fn seek_forward_skips_ahead() {
         let started = Instant::now();
@@ -612,6 +802,37 @@ mod tests {
         assert_eq!(shared.decode_error(), None);
         assert_eq!(shared.buffer.failure(), None);
         assert!(shared.position() > Duration::from_secs(59));
+    }
+
+    /// Запасной путь: один повтор, только для формата и только не-MP3.
+    #[test]
+    fn fallback_happens_once_for_format_errors() {
+        let aac = Some(StreamInfo {
+            codec: Codec::Aac,
+            kbps: Some(256),
+        });
+        let mp3 = Some(StreamInfo {
+            codec: Codec::Mp3,
+            kbps: Some(320),
+        });
+        let track = Sound::Track("1".to_owned());
+        let format = PlayError::Format("x".to_owned());
+        assert!(should_fall_back(&format, false, &track, aac));
+        // Уже запасной путь — второго повтора нет.
+        assert!(!should_fall_back(&format, true, &track, aac));
+        // MP3 повторять нечем; ссылки нет — тоже.
+        assert!(!should_fall_back(&format, false, &track, mp3));
+        assert!(!should_fall_back(&format, false, &track, None));
+        // Сеть и недоступность — не про формат.
+        assert!(!should_fall_back(
+            &PlayError::Unavailable,
+            false,
+            &track,
+            aac
+        ));
+        // Свой файл не трогаем.
+        let file = Sound::File("a.mp3".into());
+        assert!(!should_fall_back(&format, false, &file, aac));
     }
 
     #[test]

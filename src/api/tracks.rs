@@ -63,6 +63,65 @@ pub struct Track {
     pub cover_uri: Option<String>,
     /// Пометка о содержании (`contentWarning`).
     pub warning: Warning,
+    /// Громкость трека (`r128`), если сервис её сообщил: для нормализации.
+    pub loudness: Option<Loudness>,
+}
+
+/// Громкость трека по EBU R128 (поле `r128` ответа).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Loudness {
+    /// Интегральная громкость, LUFS.
+    pub integrated: f64,
+    /// Истинный пик, дБFS (dBTP).
+    pub true_peak: f64,
+}
+
+// Числа конечны (см. `parse`), так что равенство рефлексивно.
+impl Eq for Loudness {}
+
+impl Loudness {
+    /// Целевая громкость нормализации, LUFS. Допущение: так принято у
+    /// потоковых сервисов, у Яндекса значение не документировано.
+    const TARGET_LUFS: f64 = -14.0;
+    /// Пик после усиления не выше этого, дБFS.
+    const PEAK_CEILING: f64 = -1.0;
+    const MIN_GAIN_DB: f64 = -15.0;
+    const MAX_GAIN_DB: f64 = 6.0;
+
+    /// Из объекта `{"i": …, "tp": …}`. Без обоих чисел — `None`.
+    fn parse(value: Option<&Value>) -> Option<Self> {
+        let value = value?;
+        let number = |key: &str| {
+            value
+                .get(key)
+                .and_then(Value::as_f64)
+                .filter(|number| number.is_finite())
+        };
+        Some(Self {
+            integrated: number("i")?,
+            true_peak: number("tp")?,
+        })
+    }
+
+    /// Поправка громкости, дБ: к цели в -14 LUFS, но так, чтобы пик не
+    /// вылез выше -1 дБFS; в пределах от -15 до +6 дБ.
+    pub fn gain_db(self) -> f64 {
+        let wanted = Self::TARGET_LUFS - self.integrated;
+        let allowed = Self::PEAK_CEILING - self.true_peak;
+        wanted
+            .min(allowed)
+            .clamp(Self::MIN_GAIN_DB, Self::MAX_GAIN_DB)
+    }
+}
+
+/// Множитель громкости для трека: 1, если нормализация выключена или у
+/// трека нет данных о громкости.
+pub fn normalization_gain(loudness: Option<Loudness>, enabled: bool) -> f32 {
+    match loudness.filter(|_| enabled) {
+        // Множитель в пределах 0,18…2: в `f32` без потерь.
+        Some(loudness) => 10_f64.powf(loudness.gain_db() / 20.0) as f32,
+        None => 1.0,
+    }
 }
 
 /// Пометка о содержании трека: `explicit` — есть ненормативная лексика,
@@ -99,6 +158,7 @@ impl Track {
             available: false,
             cover_uri: None,
             warning: Warning::None,
+            loudness: None,
         }
     }
 
@@ -459,6 +519,7 @@ pub(super) fn parse_track(value: &Value) -> Option<Track> {
         available: value.get("available").and_then(Value::as_bool) == Some(true) && !error,
         cover_uri: text("coverUri"),
         warning: Warning::parse(value.get("contentWarning")),
+        loudness: Loudness::parse(value.get("r128")),
         id,
     })
 }
@@ -755,6 +816,45 @@ mod tests {
         .unwrap();
         assert!(liked.ids.is_empty());
         assert_eq!(liked.revision, None);
+    }
+
+    fn loudness(integrated: f64, true_peak: f64) -> Loudness {
+        Loudness {
+            integrated,
+            true_peak,
+        }
+    }
+
+    #[test]
+    fn r128_is_parsed_when_complete() {
+        let track = parse_track(&serde_json::json!({
+            "id": "1", "r128": {"i": -9.5, "tp": 0.4}
+        }))
+        .unwrap();
+        assert_eq!(track.loudness, Some(loudness(-9.5, 0.4)));
+        let half = parse_track(&serde_json::json!({"id": "1", "r128": {"i": -9.5}})).unwrap();
+        assert_eq!(half.loudness, None);
+        let none = parse_track(&serde_json::json!({"id": "1"})).unwrap();
+        assert_eq!(none.loudness, None);
+    }
+
+    #[test]
+    fn normalization_gain_is_bounded() {
+        // Нет данных или выключено — без поправки.
+        assert!((normalization_gain(None, true) - 1.0).abs() < 1e-6);
+        assert!((normalization_gain(Some(loudness(-9.0, -3.0)), false) - 1.0).abs() < 1e-6);
+        // Громкий трек (-9 LUFS) тише на 5 дБ.
+        let loud = loudness(-9.0, -0.5).gain_db();
+        assert!((loud + 5.0).abs() < 1e-9, "{loud}");
+        // Тихий трек (-20 LUFS) хочет +6, но пик -2 даёт запас только +1.
+        let quiet = loudness(-20.0, -2.0).gain_db();
+        assert!((quiet - 1.0).abs() < 1e-9, "{quiet}");
+        // Тихий с низким пиком: потолок усиления +6.
+        assert!((loudness(-30.0, -20.0).gain_db() - 6.0).abs() < 1e-9);
+        // Очень громкий: не тише -15.
+        assert!((loudness(5.0, 3.0).gain_db() + 15.0).abs() < 1e-9);
+        let factor = normalization_gain(Some(loudness(-8.0, 0.0)), true);
+        assert!((factor - 10_f32.powf(-6.0 / 20.0)).abs() < 1e-4);
     }
 
     #[test]

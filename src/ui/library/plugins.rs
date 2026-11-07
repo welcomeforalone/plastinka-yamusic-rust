@@ -416,10 +416,15 @@ impl Library {
             return;
         }
         let id = found.flatten().unwrap_or(track);
+        let sound = Sound::Track(id);
+        let norm = self
+            .current()
+            .map_or(1.0, |current| self.sound_norm(&sound, current));
         self.send(Command::Play {
             id: session,
-            sound: Sound::Track(id),
+            sound,
             start: super::seconds(self.player.position),
+            norm,
         });
     }
 
@@ -893,7 +898,7 @@ impl Library {
         if self.replace.take().is_some() {
             return true;
         }
-        self.menu.take().is_some()
+        self.menu.take().is_some() || self.close_sound_panel()
     }
 
     /// Меню трека или диалог замены поверх окна размером `window`.
@@ -1463,6 +1468,7 @@ mod tests {
             available,
             cover_uri: None,
             warning: api::Warning::None,
+            loudness: None,
         }
     }
 

@@ -64,6 +64,7 @@ mod tests {
             available: true,
             cover_uri: None,
             warning: crate::api::Warning::None,
+            loudness: None,
         }
     }
 

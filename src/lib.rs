@@ -4,6 +4,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod discord;
 pub mod net;
 pub mod player;
 pub mod plugins;

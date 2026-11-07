@@ -30,8 +30,9 @@ use iced::window::{self, Direction};
 use iced::{Element, Length, Size, Subscription, Task, keyboard, mouse};
 
 use crate::APP_NAME;
-use crate::api::{self, AccountStatus, ApiError, PlaybackPermit};
+use crate::api::{self, AccountStatus, ApiError, AudioQuality, PlaybackPermit};
 use crate::auth::{self, AuthError, DeviceCode, OAuthApp};
+use crate::discord;
 use crate::net::{self, NetError};
 use crate::plugins::PluginSettings;
 use crate::storage::config::{self, Config};
@@ -199,6 +200,14 @@ pub struct Prefs {
     /// Масштаб окна, проценты.
     pub scale: u32,
     pub visualizer: bool,
+    /// Качество звука и нормализация громкости (раздел «Звук»).
+    pub quality: AudioQuality,
+    pub normalize: bool,
+    /// Discord Rich Presence (блок «Discord»).
+    pub discord: discord::Settings,
+    /// Application ID Discord задан: без него блок «Discord» неактивен.
+    /// В `config.toml` не пишется.
+    pub discord_ready: bool,
 }
 
 impl Default for Prefs {
@@ -208,6 +217,10 @@ impl Default for Prefs {
             accent: theme::Accent::default(),
             scale: config::SCALE_DEFAULT,
             visualizer: true,
+            quality: AudioQuality::default(),
+            normalize: false,
+            discord: discord::Settings::default(),
+            discord_ready: false,
         }
     }
 }
@@ -223,6 +236,37 @@ impl Prefs {
                 .unwrap_or_default(),
             scale: config.scale_percent(),
             visualizer: config.visualizer.unwrap_or(true),
+            quality: config
+                .audio_quality
+                .as_deref()
+                .and_then(AudioQuality::from_key)
+                .unwrap_or_default(),
+            normalize: config.normalize.unwrap_or(false),
+            discord: discord::Settings {
+                enabled: config.discord_enabled.unwrap_or(true),
+                status: config
+                    .discord_status
+                    .as_deref()
+                    .and_then(discord::StatusKind::from_key)
+                    .unwrap_or_default(),
+                on_pause: config.discord_on_pause.unwrap_or(false),
+                button: config.discord_button.unwrap_or(true),
+                lang: config
+                    .discord_lang
+                    .as_deref()
+                    .and_then(discord::Lang::from_key)
+                    .unwrap_or_default(),
+                app: config
+                    .discord_app_name
+                    .as_deref()
+                    .and_then(discord::AppName::from_key)
+                    .unwrap_or_default(),
+            },
+            discord_ready: !discord::app_id(
+                config.discord_app_id.as_deref(),
+                discord::AppName::default(),
+            )
+            .is_empty(),
         }
     }
 
@@ -231,6 +275,14 @@ impl Prefs {
         config.accent = Some(self.accent.key().to_owned());
         config.scale = Some(i64::from(self.scale));
         config.visualizer = Some(self.visualizer);
+        config.audio_quality = Some(self.quality.key().to_owned());
+        config.normalize = Some(self.normalize);
+        config.discord_enabled = Some(self.discord.enabled);
+        config.discord_status = Some(self.discord.status.key().to_owned());
+        config.discord_on_pause = Some(self.discord.on_pause);
+        config.discord_button = Some(self.discord.button);
+        config.discord_lang = Some(self.discord.lang.key().to_owned());
+        config.discord_app_name = Some(self.discord.app.key().to_owned());
     }
 }
 
@@ -288,11 +340,16 @@ pub enum Message {
     Logout,
     LoggedOut(Arc<StoredToken>, Result<(), Failure>),
 
-    ConfigLoaded(Prefs, PluginSettings),
+    ConfigLoaded(Prefs, PluginSettings, Option<String>),
     ToggleSidebar,
     SetAccent(theme::Accent),
     Zoom(Zoom),
     ToggleVisualizer,
+    /// Качество звука и нормализация громкости (панель «Настройки звука»).
+    SetAudioQuality(AudioQuality),
+    SetNormalize(bool),
+    /// Настройки Discord Rich Presence.
+    SetDiscord(discord::Settings),
     /// Новые настройки плагинов.
     SetPlugins(PluginSettings),
     /// Пользователь разрешил Slopless ставить «Не нравится».
@@ -330,6 +387,14 @@ pub struct App {
     sidebar: Animation<bool>,
     /// Вид меню и внешний вид. Запоминаются в `config.toml`.
     prefs: Prefs,
+    /// Discord Rich Presence: фоновая задача, пока открыто главное окно.
+    discord: Option<discord::Rpc>,
+    /// Application ID, с которым запущена задача Discord.
+    discord_app_id: String,
+    /// `discord_app_id` из `config.toml` (своё приложение вместо встроенных).
+    discord_override: Option<String>,
+    /// Окно закрывается: статус Discord уже убран.
+    closing: bool,
     /// Плагины: что включено. Тоже в `config.toml`, таблица `[plugins]`.
     plugins: PluginSettings,
     /// Тема iced с текущим акцентом.
@@ -364,6 +429,10 @@ impl App {
             page: anim::entering(anim::PAGE, now),
             sidebar: anim::settled(false, anim::PANEL),
             prefs: Prefs::default(),
+            discord: None,
+            discord_app_id: String::new(),
+            discord_override: None,
+            closing: false,
             plugins: PluginSettings::default(),
             theme: theme::theme(),
             saving: false,
@@ -378,7 +447,11 @@ impl App {
             // Не прочитались настройки — всё по умолчанию.
             Task::perform(load_config(), |config| {
                 let config = config.unwrap_or_default();
-                Message::ConfigLoaded(Prefs::from_config(&config), plugin_settings(&config))
+                Message::ConfigLoaded(
+                    Prefs::from_config(&config),
+                    plugin_settings(&config),
+                    config.discord_app_id.clone(),
+                )
             }),
         ]);
         (app, task)
@@ -413,7 +486,12 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         self.now = Instant::now();
         let before = self.page_key();
+        // Кадры и секундные тики статус не меняют.
+        let discord_relevant = !matches!(message, Message::Frame(_) | Message::Tick(_));
         let task = self.handle(message);
+        if discord_relevant {
+            self.sync_discord();
+        }
         drag_pulse::set_wanted(self.wants_frames());
         // Сетка карточек строится по ширине раздела справа от меню.
         let sidebar = if self.prefs.sidebar_collapsed {
@@ -438,6 +516,32 @@ impl App {
             self.toast = None;
         }
         task
+    }
+
+    /// Отдаёт задаче Discord RPC, что сейчас играет. Задача сама решает, что
+    /// и когда отправлять; окну ответы не приходят.
+    fn sync_discord(&mut self) {
+        if self.closing {
+            return;
+        }
+        let Screen::Main(library) = &self.screen else {
+            // Вышли из аккаунта или окно не главное: статус очищается.
+            self.discord = None;
+            return;
+        };
+        // Сменили имя в статусе — подключаемся к другому приложению; старое
+        // при этом убирает свой статус.
+        let app_id = discord::app_id(self.discord_override.as_deref(), self.prefs.discord.app);
+        if app_id != self.discord_app_id {
+            self.discord = None;
+        }
+        if self.discord.is_none() {
+            self.discord = discord::Rpc::start(&app_id);
+            self.discord_app_id = app_id;
+        }
+        if let Some(rpc) = &self.discord {
+            rpc.set(library.discord_state(self.prefs.discord));
+        }
     }
 
     /// Какой экран на виду: для перехода между экранами.
@@ -592,7 +696,8 @@ impl App {
                 Err(failure) => self.show_toast(format!("Выйти не удалось: {}", failure.text)),
             },
 
-            Message::ConfigLoaded(prefs, plugins) => {
+            Message::ConfigLoaded(prefs, plugins, discord_override) => {
+                self.discord_override = discord_override;
                 let rescaled = prefs.scale != self.prefs.scale;
                 // Вид меню при запуске — без анимации.
                 self.sidebar = anim::settled(prefs.sidebar_collapsed, anim::PANEL);
@@ -650,6 +755,27 @@ impl App {
                     ..self.prefs
                 };
                 return Task::batch([self.change_prefs(prefs), self.refresh_size()]);
+            }
+            Message::SetAudioQuality(quality) => {
+                let prefs = Prefs {
+                    quality,
+                    ..self.prefs
+                };
+                return self.change_prefs(prefs);
+            }
+            Message::SetDiscord(settings) => {
+                let prefs = Prefs {
+                    discord: settings,
+                    ..self.prefs
+                };
+                return self.change_prefs(prefs);
+            }
+            Message::SetNormalize(normalize) => {
+                let prefs = Prefs {
+                    normalize,
+                    ..self.prefs
+                };
+                return self.change_prefs(prefs);
             }
             Message::ToggleVisualizer => {
                 let prefs = Prefs {
@@ -731,6 +857,9 @@ impl App {
             theme::set_accent(prefs.accent);
             self.theme = theme::theme();
         }
+        if let Screen::Main(library) = &mut self.screen {
+            library.set_sound(prefs.quality, prefs.normalize);
+        }
         self.prefs = prefs;
     }
 
@@ -770,6 +899,9 @@ impl App {
     /// Закрывает окно. Несохранённый токен сначала отзывается, но не дольше
     /// [`REVOKE_ON_CLOSE`]: без сети окно всё равно закроется.
     fn close(&mut self) -> Task<Message> {
+        // Статус в Discord очищается до закрытия окна и больше не появляется.
+        self.discord = None;
+        self.closing = true;
         let (Some(token), Ok(http)) = (self.unsaved.take(), self.http()) else {
             return self.with_window(window::close);
         };
@@ -1132,6 +1264,8 @@ impl App {
             self.http.as_ref().ok(),
             &self.plugins,
         );
+        let mut library = library;
+        library.set_sound(self.prefs.quality, self.prefs.normalize);
         self.screen = Screen::Main(Box::new(library));
         task.map(Message::Library)
     }
@@ -1266,6 +1400,12 @@ impl App {
             );
             if let Some(sheet) = sheet {
                 layers = layers.push(sheet);
+            }
+            if let Some(panel) = library.volume_panel(self.now) {
+                layers = layers.push(panel);
+            }
+            if let Some(panel) = library.sound_panel(&self.prefs, self.now) {
+                layers = layers.push(panel);
             }
             if let Some(overlay) = library.overlay(self.size) {
                 layers = layers.push(overlay);
@@ -1460,5 +1600,40 @@ fn native_handle(window: &dyn window::Window) -> Option<isize> {
     match window.window_handle().ok()?.as_raw() {
         RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Выбор в панели звука доходит до `config.toml` и обратно; неизвестное
+    /// значение даёт «Оптимальное».
+    #[test]
+    fn sound_choice_goes_to_config_and_back() {
+        for quality in [
+            AudioQuality::Lossless,
+            AudioQuality::Normal,
+            AudioQuality::Low,
+        ] {
+            // `discord_ready` не пишется в конфиг, а вычисляется по ID.
+            let prefs = Prefs {
+                quality,
+                normalize: true,
+                discord_ready: Prefs::from_config(&Config::default()).discord_ready,
+                ..Prefs::default()
+            };
+            let mut config = Config::default();
+            prefs.write(&mut config);
+            assert_eq!(config.audio_quality.as_deref(), Some(quality.key()));
+            assert_eq!(config.normalize, Some(true));
+            assert_eq!(Prefs::from_config(&config), prefs);
+        }
+        let config = Config {
+            audio_quality: Some("ultra".to_owned()),
+            ..Config::default()
+        };
+        assert_eq!(Prefs::from_config(&config).quality, AudioQuality::Normal);
+        assert!(!Prefs::from_config(&Config::default()).normalize);
     }
 }

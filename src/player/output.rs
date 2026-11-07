@@ -14,6 +14,7 @@ use std::time::Duration;
 use rodio::Source;
 
 use super::buffer::StreamBuffer;
+use crate::api::StreamInfo;
 
 /// Сколько отсчётов источник забирает из очереди за раз.
 const TAKE: usize = 2048;
@@ -138,8 +139,10 @@ pub struct Shared {
     queue: Mutex<Queue>,
     /// Частота дискретизации, когда декодер её узнал.
     rate: AtomicU32,
-    /// Битрейт потока, кбит/с; 0 — ещё не известен.
-    kbps: AtomicU32,
+    /// Кодек и битрейт потока, когда ссылка уже получена.
+    stream: Mutex<Option<StreamInfo>>,
+    /// Множитель нормализации громкости: биты `f32`.
+    norm: AtomicU32,
     /// Перемотка, которую декодер ещё не выполнил.
     seek: Mutex<Option<Duration>>,
     /// Ошибка декодера (формат не читается).
@@ -181,7 +184,8 @@ impl Shared {
                 ..Queue::default()
             }),
             rate: AtomicU32::new(0),
-            kbps: AtomicU32::new(0),
+            stream: Mutex::new(None),
+            norm: AtomicU32::new(1.0_f32.to_bits()),
             seek: Mutex::new((start > Duration::ZERO).then_some(start)),
             decode_error: Mutex::new(None),
             paused: AtomicBool::new(false),
@@ -207,6 +211,10 @@ impl Shared {
 
     pub fn set_paused(&self, paused: bool) {
         self.paused.store(paused, Ordering::SeqCst);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
     }
 
     /// Прерывание ставится под замком перемотки: иначе декодер мог бы взять
@@ -246,16 +254,30 @@ impl Shared {
         self.drained.load(Ordering::SeqCst) || self.decoder_done.load(Ordering::SeqCst)
     }
 
-    pub fn kbps(&self) -> Option<u32> {
-        Some(self.kbps.load(Ordering::Relaxed)).filter(|kbps| *kbps > 0)
+    pub fn stream(&self) -> Option<StreamInfo> {
+        *lock(&self.stream)
     }
 
     pub fn decode_error(&self) -> Option<String> {
         lock(&self.decode_error).clone()
     }
 
-    pub fn set_kbps(&self, kbps: u32) {
-        self.kbps.store(kbps, Ordering::Relaxed);
+    pub fn set_stream(&self, info: StreamInfo) {
+        *lock(&self.stream) = Some(info);
+    }
+
+    /// Множитель нормализации громкости трека (1 — без поправки).
+    pub fn set_norm(&self, norm: f32) {
+        let norm = if norm.is_finite() && norm > 0.0 {
+            norm
+        } else {
+            1.0
+        };
+        self.norm.store(norm.to_bits(), Ordering::Relaxed);
+    }
+
+    fn norm(&self) -> f32 {
+        f32::from_bits(self.norm.load(Ordering::Relaxed))
     }
 
     // ---------------------------------------------------------- декодер
@@ -415,6 +437,9 @@ impl Output {
             self.silence();
             return true;
         }
+        if !self.ready {
+            trace!(self.shared.buffer, "звук пошёл");
+        }
         self.ready = true;
         self.local.clear();
         self.local.extend(queue.samples.drain(..take));
@@ -454,7 +479,8 @@ impl Iterator for Output {
         if self.silent {
             Some(0.0)
         } else {
-            Some(sample * self.gain * self.gain)
+            // Поправка нормализации не выводит отсчёт за пределы шкалы.
+            Some((sample * self.gain * self.gain * self.shared.norm()).clamp(-1.0, 1.0))
         }
     }
 }

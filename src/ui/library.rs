@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use iced::widget::{
     Space, button, center, column, container, hover, mouse_area, row, scrollable, slider,
-    text_input, toggler, tooltip,
+    text_input, toggler, tooltip, vertical_slider,
 };
 use iced::{Alignment, Border, Color, Element, Length, Padding, Point, Subscription, Task, mouse};
 
@@ -35,8 +35,10 @@ use super::theme::{self, Style};
 use super::visualizer::{self, Analyzer};
 use super::widgets::{self, CoverArt, Kind, Size};
 use super::{Dialog, Failure, FailureKind, Moment, Prefs, Zoom};
-use crate::api::{self, AccountStatus, PlaybackPermit, SearchKind, Track};
-use crate::player::{self as audio, Command, PlayError};
+use crate::api::{
+    self, AccountStatus, AudioQuality, Codec, PlaybackPermit, SearchKind, StreamInfo, Track,
+};
+use crate::player::{self as audio, Command, PlayError, Sound};
 use crate::plugins::PluginSettings;
 use crate::plugins::fckcensor::{Censor, Decision};
 use crate::plugins::slopless::Slop;
@@ -95,12 +97,27 @@ const PLAYER_CHROME: f32 = 20.0 * 2.0 + 16.0 * 2.0 + 1.0;
 const PAGE_TOP: f32 = 32.0;
 const PAGE_SIDE: f32 = 40.0;
 /// Сколько нужно правому краю плеера с полным значком качества
-/// («MP3 · 320») и с коротким («320») при узкой громкости.
-const EXTRAS_WITH_QUALITY: f32 = 330.0;
-const EXTRAS_WITH_SHORT_QUALITY: f32 = 260.0;
-/// Ширина ползунка громкости: обычная и рядом с коротким значком.
-const VOLUME_WIDTH: f32 = 96.0;
-const VOLUME_WIDTH_NARROW: f32 = 72.0;
+/// («MP3 · 320») и с коротким («320»).
+const EXTRAS_WITH_QUALITY: f32 = 230.0;
+const EXTRAS_WITH_SHORT_QUALITY: f32 = 184.0;
+/// Панель «Настройки звука»: ширина карточки и отступ от краёв окна.
+const SOUND_PANEL_WIDTH: f32 = 520.0;
+const SOUND_PANEL_MARGIN: f32 = 16.0;
+/// Высота плеера и его правый отступ.
+const PLAYER_HEIGHT: f32 = 88.0;
+const PLAYER_SIDE: f32 = 20.0;
+/// Значок громкости: сторона кнопки; он последний справа в плеере.
+const VOLUME_ICON_SIDE: f32 = 32.0;
+/// Всплывающая панель громкости: размеры «таблетки», высота ползунка и
+/// зазор до плеера (через него курсор переходит со значка на панель).
+const VOLUME_PANEL_WIDTH: f32 = 44.0;
+const VOLUME_PANEL_HEIGHT: f32 = 212.0;
+const VOLUME_SLIDER_HEIGHT: f32 = 150.0;
+const VOLUME_PANEL_GAP: f32 = 32.0;
+/// Сколько панель громкости остаётся после ухода курсора.
+const VOLUME_CLOSE_DELAY: Duration = Duration::from_millis(250);
+/// Появление и исчезновение панели громкости.
+const VOLUME_PANEL_FADE: Duration = Duration::from_millis(160);
 
 /// Какой значок качества помещается в плеер.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,7 +245,15 @@ pub enum Message {
     ShuffleList(ListKey),
     /// Мышь над ползунком перемотки или ушла с него.
     SeekHover(bool),
+    /// Открыть панель «Настройки звука» (или закрыть, если открыта).
+    ToggleSoundPanel,
+    CloseSoundPanel,
+    /// Мышь над значком громкости или ушла с него.
     VolumeHover(bool),
+    /// Мышь над панелью громкости или ушла с неё.
+    VolumePanelHover(bool),
+    /// Ползунок громкости отпустили.
+    VolumeRelease,
     /// Открыть или закрыть полноэкранный плеер.
     Fullscreen(bool),
     Audio(audio::Event),
@@ -274,8 +299,8 @@ struct Player {
     muted: bool,
     shuffle: bool,
     repeat: Repeat,
-    /// Битрейт текущего потока для значка качества.
-    kbps: Option<u32>,
+    /// Кодек и битрейт текущего потока для значка качества.
+    stream: Option<StreamInfo>,
     /// Номер запуска трека: события прежних запусков не учитываем.
     session: u64,
     /// Сколько перемоток отправлено в этом запуске. Позиция из события, в
@@ -344,6 +369,9 @@ pub struct Library {
     /// Соединение для запросов, которые окно запускает само (плагины).
     http: Option<reqwest::Client>,
     plugins: PluginSettings,
+    /// Настройки звука: качество (уходит плееру) и нормализация громкости.
+    quality: AudioQuality,
+    normalize: bool,
     censor: Censor,
     slop: Slop,
     io: PluginIo,
@@ -371,7 +399,16 @@ struct PlayerMotion {
     cover_fade: Animation<bool>,
     /// Ручка и заливка ползунков проявляются при наведении.
     seek_hover: Animation<bool>,
-    volume_hover: Animation<bool>,
+    /// Панель «Настройки звука»: открыта или закрыта.
+    sound_panel: Animation<bool>,
+    /// Всплывающая панель громкости: показана или спрятана.
+    volume_panel: Animation<bool>,
+    /// Курсор над значком громкости и над панелью; ползунок тянут.
+    volume_over_icon: bool,
+    volume_over_panel: bool,
+    volume_dragging: bool,
+    /// Когда панель закрыть, если курсор так и не вернулся.
+    volume_close_at: Option<Instant>,
     /// Громкость на ползунке: после щелчка по иконке и колеса — плавно.
     volume: Animation<f32>,
 }
@@ -384,7 +421,12 @@ impl PlayerMotion {
             cover_now: None,
             cover_fade: anim::settled(true, anim::COVER),
             seek_hover: anim::settled(false, anim::HOVER),
-            volume_hover: anim::settled(false, anim::HOVER),
+            sound_panel: anim::settled(false, anim::PANEL),
+            volume_panel: anim::settled(false, VOLUME_PANEL_FADE),
+            volume_over_icon: false,
+            volume_over_panel: false,
+            volume_dragging: false,
+            volume_close_at: None,
             volume: still_volume(volume),
         }
     }
@@ -393,9 +435,46 @@ impl PlayerMotion {
         self.pulse.is_animating(now)
             || self.cover_fade.is_animating(now)
             || self.seek_hover.is_animating(now)
-            || self.volume_hover.is_animating(now)
+            || self.sound_panel.is_animating(now)
+            || self.volume_panel.is_animating(now)
+            || self.volume_close_at.is_some()
             || self.volume.is_animating(now)
     }
+
+    /// Панель громкости открыта, пока курсор над значком или панелью либо
+    /// ползунок тянут. Когда держать нечем, закрытие ставится через
+    /// [`VOLUME_CLOSE_DELAY`]: курсору хватает времени перейти со значка на
+    /// панель.
+    fn volume_sync(&mut self, now: Instant) {
+        let held = self.volume_over_icon || self.volume_over_panel || self.volume_dragging;
+        if held {
+            self.volume_close_at = None;
+            if !self.volume_panel.value() {
+                self.volume_panel.go_mut(true, now);
+            }
+        } else if self.volume_panel.value() && self.volume_close_at.is_none() {
+            self.volume_close_at = Some(now + VOLUME_CLOSE_DELAY);
+        }
+    }
+
+    /// Кадр: пора ли закрывать панель громкости.
+    fn volume_tick(&mut self, now: Instant) {
+        if let Some(at) = self.volume_close_at
+            && now >= at
+        {
+            self.volume_close_at = None;
+            self.volume_panel.go_mut(false, now);
+        }
+    }
+}
+
+/// Громкость в целых процентах для подписи на панели: без звука — 0.
+fn volume_percent(volume: f32, muted: bool) -> u32 {
+    if muted || !volume.is_finite() {
+        return 0;
+    }
+    // Значение уже зажато в 0…100, потери при приведении нет.
+    (volume.clamp(0.0, 1.0) * 100.0).round() as u32
 }
 
 /// Громкость без анимации: ползунок тянут, он идёт за мышью.
@@ -403,6 +482,30 @@ fn still_volume(volume: f32) -> Animation<f32> {
     Animation::new(volume)
         .duration(anim::PANEL)
         .easing(iced::animation::Easing::EaseOutCubic)
+}
+
+/// Отладочный хук `PLASTINKA_TEST_START` (только с тестовыми хуками, один
+/// раз за запуск): сообщения, которые окно получило бы от пользователя.
+/// `liked-wave` — играть «Мне нравится» и открыть «Мою волну»; `wave` —
+/// запустить «Мою волну». Ничего не сохраняет.
+#[cfg(debug_assertions)]
+fn test_start() -> Vec<Task<Message>> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if !crate::storage::test_hooks_active() || DONE.swap(true, Ordering::Relaxed) {
+        return Vec::new();
+    }
+    match std::env::var("PLASTINKA_TEST_START").as_deref() {
+        Ok("liked-wave") => vec![
+            Task::done(Message::PlayList(ListKey::Liked)),
+            Task::done(Message::Nav(Section::Wave)),
+        ],
+        Ok("wave") => vec![
+            Task::done(Message::Nav(Section::Wave)),
+            Task::done(Message::Wave(WaveMsg::Start)),
+        ],
+        _ => Vec::new(),
+    }
 }
 
 impl Library {
@@ -453,7 +556,7 @@ impl Library {
                 muted: false,
                 shuffle: false,
                 repeat: Repeat::Off,
-                kbps: None,
+                stream: None,
                 session: 0,
                 seeks: 0,
                 skipped: 0,
@@ -470,6 +573,8 @@ impl Library {
             shown: None,
             http: http.cloned(),
             plugins: PluginSettings::default(),
+            quality: AudioQuality::default(),
+            normalize: false,
             censor: Censor::default(),
             slop: Slop::default(),
             io: PluginIo::default(),
@@ -602,6 +707,7 @@ impl Library {
     /// Кадр визуализатора. `enabled` — он включён в настройках.
     /// Кадр: спектр (`enabled` — визуализатор включён) и плавная прокрутка.
     pub fn frame(&mut self, now: Instant, enabled: bool) -> Task<Message> {
+        self.motion.volume_tick(now);
         if enabled {
             let tap = self.tap.as_deref().filter(|_| self.player.playing);
             self.spectrum.frame(tap, now);
@@ -774,6 +880,8 @@ impl Library {
                     self.liked = tracks.iter().map(|track| track.id.clone()).collect();
                     self.likes = Likes::Ready(tracks);
                     self.shown = filter::matching(&self.haystacks, &self.query);
+                    #[cfg(debug_assertions)]
+                    self.tasks.extend(test_start());
                     None
                 }
                 Err(failure) if failure.kind == FailureKind::Unauthorized => Some(Effect::Relogin),
@@ -836,8 +944,28 @@ impl Library {
                 self.motion.seek_hover.go_mut(over, Instant::now());
                 None
             }
+            Message::ToggleSoundPanel => {
+                let open = !self.motion.sound_panel.value();
+                self.motion.sound_panel.go_mut(open, Instant::now());
+                None
+            }
+            Message::CloseSoundPanel => {
+                self.close_sound_panel();
+                None
+            }
             Message::VolumeHover(over) => {
-                self.motion.volume_hover.go_mut(over, Instant::now());
+                self.motion.volume_over_icon = over;
+                self.motion.volume_sync(Instant::now());
+                None
+            }
+            Message::VolumePanelHover(over) => {
+                self.motion.volume_over_panel = over;
+                self.motion.volume_sync(Instant::now());
+                None
+            }
+            Message::VolumeRelease => {
+                self.motion.volume_dragging = false;
+                self.motion.volume_sync(Instant::now());
                 None
             }
             Message::Fullscreen(open) => {
@@ -907,6 +1035,9 @@ impl Library {
                 None
             }
             Message::Volume(volume) => {
+                // Пока ползунок тянут, панель не закрывается.
+                self.motion.volume_dragging = true;
+                self.motion.volume_sync(Instant::now());
                 self.player.volume = volume;
                 self.player.muted = volume <= 0.0;
                 self.motion.volume = still_volume(volume);
@@ -1093,7 +1224,7 @@ impl Library {
         player.buffering = true;
         player.position = from;
         player.seeking = None;
-        player.kbps = None;
+        player.stream = None;
         player.sounded = false;
         player.session = player.session.wrapping_add(1);
         player.seeks = 0;
@@ -1103,11 +1234,15 @@ impl Library {
             return Some(Effect::Toast(text));
         }
         match decision {
-            Decision::Play(sound) => self.send(Command::Play {
-                id: self.player.session,
-                sound,
-                start: seconds(from),
-            }),
+            Decision::Play(sound) => {
+                let norm = self.sound_norm(&sound, &track);
+                self.send(Command::Play {
+                    id: self.player.session,
+                    sound,
+                    start: seconds(from),
+                    norm,
+                });
+            }
             Decision::Search => {
                 // Прежний трек замолкает, пока ищем версию без цензуры.
                 self.send(Command::Stop);
@@ -1116,6 +1251,147 @@ impl Library {
             Decision::Silent => {}
         }
         None
+    }
+
+    /// Настройки звука из `config.toml`: качество действует со следующего
+    /// запроса потока, нормализация — со следующего трека.
+    pub fn set_sound(&mut self, quality: AudioQuality, normalize: bool) {
+        if self.quality != quality {
+            self.quality = quality;
+            self.send(Command::Quality(quality));
+        }
+        if self.normalize != normalize {
+            self.normalize = normalize;
+            // Нормализация действует на играющий трек сразу.
+            let norm = self
+                .current()
+                .and_then(|track| match self.decide(track) {
+                    Decision::Play(sound) => Some(self.sound_norm(&sound, track)),
+                    _ => None,
+                })
+                .unwrap_or(1.0);
+            self.send(Command::Norm(norm));
+        }
+    }
+
+    /// Что слушаем сейчас — для статуса Discord. Начало трека считается по
+    /// часам: сейчас минус позиция, поэтому на ходу времени оно не меняется.
+    pub fn discord_state(&self, settings: crate::discord::Settings) -> crate::discord::State {
+        let idle = crate::discord::State {
+            settings,
+            ..crate::discord::State::default()
+        };
+        // Трек остановлен (конец, ошибка) — статуса нет; пауза — другое дело.
+        let (Some(shown), Some(current)) = (self.current_shown(), self.current()) else {
+            return idle;
+        };
+        if !self.player.loaded {
+            return idle;
+        }
+        let local = matches!(self.decide(current), Decision::Play(Sound::File(_)));
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+            .unwrap_or(0);
+        let position_ms = (self.player.position.max(0.0) * 1000.0).round() as i64;
+        crate::discord::State {
+            settings,
+            track: Some(crate::discord::Track {
+                id: shown.id.clone(),
+                title: shown.display_title(),
+                artists: shown.artists_text(),
+                album_id: shown.album_id.clone(),
+                album: shown.album_title.clone(),
+                cover: shown.cover_uri.clone(),
+                duration_ms: shown
+                    .duration
+                    .and_then(|duration| u64::try_from(duration.as_millis()).ok()),
+                local,
+            }),
+            playing: self.player.playing,
+            start_ms: now_ms.saturating_sub(position_ms),
+        }
+    }
+
+    /// Закрывает панель «Настройки звука». `false` — она и не была открыта.
+    pub fn close_sound_panel(&mut self) -> bool {
+        let open = self.motion.sound_panel.value();
+        if open {
+            self.motion.sound_panel.go_mut(false, Instant::now());
+        }
+        open
+    }
+
+    /// Панель «Настройки звука» поверх окна: карточка справа над плеером.
+    /// Щелчок вне карточки закрывает её. `None` — панель закрыта.
+    pub fn sound_panel(&self, prefs: &Prefs, now: Instant) -> Option<Element<'_, App>> {
+        let shown = anim::progress(&self.motion.sound_panel, now);
+        if shown <= 0.0 {
+            return None;
+        }
+        let header = row![
+            container(theme::line(
+                "Настройки звука",
+                Style::Title,
+                theme::TEXT_PRIMARY
+            ))
+            .width(Length::Fill),
+            widgets::icon_button(
+                Icon::Close,
+                Size::S,
+                false,
+                Some(Lib(Message::CloseSoundPanel))
+            ),
+        ]
+        .align_y(Alignment::Center);
+        let card = container(column![header, sound_options(prefs)].spacing(12))
+            .width(Length::Fill)
+            .max_width(SOUND_PANEL_WIDTH)
+            .padding(20)
+            .style(|_| container::Style {
+                background: Some(theme::SURFACE_2.into()),
+                border: Border::default()
+                    .rounded(16.0)
+                    .width(1)
+                    .color(theme::BORDER),
+                shadow: widgets::popover_shadow(),
+                ..container::Style::default()
+            });
+        // Появление: поднимается на несколько пикселей и проступает из фона.
+        let hidden = 1.0 - shown;
+        let card = anim::motion(iced::widget::opaque(card))
+            .offset(0.0, 12.0 * hidden)
+            .veil(theme::alpha(theme::BG, hidden), 16.0);
+        let placed = container(card)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::End)
+            .align_y(Alignment::End)
+            .padding(Padding {
+                right: SOUND_PANEL_MARGIN,
+                bottom: PLAYER_HEIGHT + 1.0 + SOUND_PANEL_MARGIN,
+                left: SOUND_PANEL_MARGIN,
+                top: SOUND_PANEL_MARGIN,
+            });
+        Some(iced::widget::opaque(
+            mouse_area(placed).on_press(Lib(Message::CloseSoundPanel)),
+        ))
+    }
+
+    /// Множитель нормализации для звука `sound` трека `track`. Свой файл —
+    /// без поправки; замена из FckCensor берёт громкость трека замены, если
+    /// она известна.
+    fn sound_norm(&self, sound: &Sound, track: &Track) -> f32 {
+        let Sound::Track(id) = sound else {
+            return 1.0;
+        };
+        let shown = self.shown(track);
+        let loudness = [shown, track]
+            .into_iter()
+            .find(|candidate| candidate.id == *id)
+            .and_then(|candidate| candidate.loudness);
+        api::normalization_gain(loudness, self.normalize)
     }
 
     /// Трек остановлен: после конца или ошибки его надо запускать заново.
@@ -1158,12 +1434,12 @@ impl Library {
                 id,
                 position,
                 buffering,
-                kbps,
+                stream,
                 seeks,
             } if id == session && seeks >= self.player.seeks => {
                 self.player.position = position.as_secs_f32();
                 self.player.buffering = buffering;
-                self.player.kbps = kbps;
+                self.player.stream = stream;
                 if !buffering {
                     self.player.skipped = 0;
                     if !self.player.sounded {
@@ -1206,7 +1482,7 @@ impl Library {
     fn failed(&mut self, error: &PlayError) -> Option<Effect> {
         self.halt();
         // Трек не играет — и качество его потока уже ни о чём не говорит.
-        self.player.kbps = None;
+        self.player.stream = None;
         if *error == PlayError::Unauthorized {
             return Some(Effect::Relogin);
         }
@@ -1771,6 +2047,8 @@ impl Library {
             column![
                 theme::line("Настройки", Style::Display, theme::TEXT_PRIMARY),
                 section_block("Внешний вид", appearance(prefs)),
+                section_block("Звук", sound_block(prefs)),
+                section_block("Discord", discord_block(prefs)),
                 section_block("Плагины", self.plugins_block()),
                 section_block("Аккаунт", account_card.into()),
                 section_block("О программе", about_block()),
@@ -2026,7 +2304,6 @@ impl Library {
             .width(if compact { 300.0 } else { CONTROLS });
 
         let volume = if player.muted { 0.0 } else { player.volume };
-        let volume_shown = motion.volume.interpolate_with(|value| value, now);
         let volume_icon = match volume {
             v if v <= 0.0 => Icon::VolumeMute,
             v if v < 0.5 => Icon::VolumeLow,
@@ -2034,18 +2311,13 @@ impl Library {
         };
         let mut extras = row![].spacing(4).align_y(Alignment::Center);
         let shown = player
-            .kbps
+            .stream
             .filter(|_| has_track && quality != Quality::Hidden);
-        if let Some(kbps) = shown {
+        if let Some(info) = shown {
             extras = extras
-                .push(quality_badge(kbps, quality == Quality::Full))
+                .push(quality_badge(info, quality == Quality::Full))
                 .push(Space::new().width(8));
         }
-        let volume_width = if shown.is_some() && quality == Quality::Short {
-            VOLUME_WIDTH_NARROW
-        } else {
-            VOLUME_WIDTH
-        };
         extras = extras
             .push(widgets::with_tooltip(
                 widgets::icon_button(
@@ -2065,26 +2337,16 @@ impl Library {
         }
         let extras = container(
             extras
-                .push(widgets::icon_button(
-                    volume_icon,
-                    Size::S,
-                    false,
-                    Some(Lib(Message::ToggleMute)),
-                ))
+                // Над значком всплывает панель громкости (`volume_panel`).
                 .push(
-                    container(
-                        mouse_area(bar(
-                            0.0..=1.0,
-                            volume_shown,
-                            true,
-                            anim::progress(&motion.volume_hover, now),
-                            |value| Lib(Message::Volume(value)),
-                            None,
-                        ))
-                        .on_enter(Lib(Message::VolumeHover(true)))
-                        .on_exit(Lib(Message::VolumeHover(false))),
-                    )
-                    .width(volume_width),
+                    mouse_area(widgets::icon_button(
+                        volume_icon,
+                        Size::S,
+                        false,
+                        Some(Lib(Message::ToggleMute)),
+                    ))
+                    .on_enter(Lib(Message::VolumeHover(true)))
+                    .on_exit(Lib(Message::VolumeHover(false))),
                 ),
         )
         .align_x(Alignment::End)
@@ -2093,11 +2355,11 @@ impl Library {
         let bar = container(
             row![now_playing, controls, extras]
                 .spacing(16)
-                .padding([0, 20])
+                .padding([0.0, PLAYER_SIDE])
                 .align_y(Alignment::Center),
         )
-        .height(88)
-        .center_y(88);
+        .height(PLAYER_HEIGHT)
+        .center_y(PLAYER_HEIGHT);
         // Спектр — тихим слоем под кнопками.
         let bar: Element<'a, App> = if visualizer && self.spectrum.moving() {
             // Цвет волны: акцент, а с VibeColorizer — цвет трека.
@@ -2127,6 +2389,110 @@ impl Library {
                 }
             })
             .into()
+    }
+
+    /// Всплывающая панель громкости над значком: проценты и вертикальный
+    /// ползунок. Слой на всё окно, прижатый к правому нижнему углу: значок
+    /// последний справа в плеере, а плеер стоит у нижнего края окна, так что
+    /// положение не зависит от ширины окна и масштаба (координаты логические).
+    /// `None` — панель спрятана и ничего не перекрывает.
+    pub fn volume_panel(&self, now: Instant) -> Option<Element<'_, App>> {
+        let shown = anim::progress(&self.motion.volume_panel, now);
+        if shown <= 0.0 {
+            return None;
+        }
+        let player = &self.player;
+        let percent = volume_percent(player.volume, player.muted);
+        let shown_volume = self
+            .motion
+            .volume
+            .interpolate_with(|value| value, now)
+            .clamp(0.0, 1.0);
+        let slider = vertical_slider(0.0..=1.0, shown_volume, |value| Lib(Message::Volume(value)))
+            .on_release(Lib(Message::VolumeRelease))
+            .step(0.01_f32)
+            .width(16)
+            .height(VOLUME_SLIDER_HEIGHT)
+            .style(|_, _| slider::Style {
+                rail: slider::Rail {
+                    backgrounds: (theme::accent().into(), theme::SURFACE_4.into()),
+                    width: 4.0,
+                    border: Border::default().rounded(2),
+                },
+                handle: slider::Handle {
+                    // Ручка-пилюля: поперёк дорожки на всю ширину ползунка.
+                    shape: slider::HandleShape::Rectangle {
+                        width: 6,
+                        border_radius: 3.0.into(),
+                    },
+                    background: theme::TEXT_PRIMARY.into(),
+                    border_width: 0.0,
+                    border_color: Color::TRANSPARENT,
+                },
+            });
+        let card = container(
+            column![
+                theme::line(
+                    format!("{percent}%"),
+                    Style::CaptionStrong,
+                    theme::TEXT_SECONDARY
+                ),
+                slider,
+            ]
+            .spacing(12)
+            .align_x(Alignment::Center),
+        )
+        .width(VOLUME_PANEL_WIDTH)
+        .height(VOLUME_PANEL_HEIGHT)
+        .padding([16.0, 0.0])
+        .center_x(VOLUME_PANEL_WIDTH)
+        .style(|_| container::Style {
+            background: Some(theme::SURFACE_2.into()),
+            border: Border::default()
+                .rounded(VOLUME_PANEL_WIDTH / 2.0)
+                .width(1)
+                .color(theme::BORDER),
+            shadow: widgets::popover_shadow(),
+            ..container::Style::default()
+        });
+        // Появление: поднимается на несколько пикселей, чуть растёт и
+        // проступает из фона.
+        let hidden = 1.0 - shown;
+        let card = anim::motion(card)
+            .offset(0.0, 8.0 * hidden)
+            .scale(0.94 + 0.06 * shown)
+            .veil(theme::alpha(theme::BG, hidden), VOLUME_PANEL_WIDTH / 2.0);
+        // Прозрачная полоса под панелью закрывает зазор до значка: курсор
+        // идёт со значка на панель, не покидая общую область.
+        let region = column![card, Space::new().height(VOLUME_PANEL_GAP)];
+        let region = mouse_area(region)
+            .on_enter(Lib(Message::VolumePanelHover(true)))
+            .on_exit(Lib(Message::VolumePanelHover(false)))
+            .on_scroll(|delta| {
+                let (mouse::ScrollDelta::Lines { y, .. } | mouse::ScrollDelta::Pixels { y, .. }) =
+                    delta;
+                if y == 0.0 {
+                    Lib(Message::Noop)
+                } else {
+                    Lib(Message::VolumeScroll(y))
+                }
+            });
+        // Центр панели над центром значка; низ полосы — на верхнем краю значка.
+        let right = PLAYER_SIDE + (VOLUME_ICON_SIDE - VOLUME_PANEL_WIDTH) / 2.0;
+        let bottom = (PLAYER_HEIGHT + VOLUME_ICON_SIDE) / 2.0;
+        Some(
+            container(iced::widget::opaque(region))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::End)
+                .align_y(Alignment::End)
+                .padding(Padding {
+                    right,
+                    bottom,
+                    ..Padding::ZERO
+                })
+                .into(),
+        )
     }
 }
 
@@ -2331,6 +2697,275 @@ fn appearance<'a>(prefs: &Prefs) -> Element<'a, App> {
     .width(Length::Fill)
     .style(|_| card_style())
     .into()
+}
+
+/// Варианты качества звука: заголовок и описание.
+const QUALITY_CHOICES: [(AudioQuality, &str, &str); 3] = [
+    (
+        AudioQuality::Lossless,
+        "Превосходное",
+        "Музыка в lossless и других высококачественных форматах для быстрого интернета \
+         и хорошей акустики",
+    ),
+    (
+        AudioQuality::Normal,
+        "Оптимальное",
+        "Сбалансированный звук для большинства устройств",
+    ),
+    (
+        AudioQuality::Low,
+        "Экономичное",
+        "Стабильное звучание при медленном интернете",
+    ),
+];
+
+/// Содержимое панели звука: три уровня качества и нормализация. Одно и то
+/// же в панели у значка качества и в «Настройках».
+fn sound_options<'a>(prefs: &Prefs) -> Element<'a, App> {
+    let mut options = column![].spacing(2);
+    for (quality, title, hint) in QUALITY_CHOICES {
+        let selected = prefs.quality == quality;
+        let mark: Element<'a, App> = if selected {
+            icon(Icon::Check, 20.0, theme::accent()).into()
+        } else {
+            Space::new().width(20).into()
+        };
+        options = options.push(
+            button(
+                row![
+                    column![
+                        theme::line(title, Style::BodyStrong, theme::TEXT_PRIMARY),
+                        theme::label(hint, Style::Secondary, theme::TEXT_SECONDARY),
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill),
+                    mark,
+                ]
+                .spacing(16)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([12, 14])
+            .style(|_, status| button::Style {
+                background: match status {
+                    button::Status::Hovered | button::Status::Pressed => {
+                        Some(theme::SURFACE_3.into())
+                    }
+                    _ => None,
+                },
+                border: Border::default().rounded(12.0),
+                ..button::Style::default()
+            })
+            .on_press(App::SetAudioQuality(quality)),
+        );
+    }
+    let normalize = row![
+        column![
+            theme::line(
+                "Нормализация громкости",
+                Style::BodyStrong,
+                theme::TEXT_PRIMARY
+            ),
+            theme::label(
+                "Выравнивает громкость треков",
+                Style::Caption,
+                theme::TEXT_TERTIARY
+            ),
+        ]
+        .spacing(2)
+        .width(Length::Fill),
+        switch(prefs.normalize, App::SetNormalize),
+    ]
+    .spacing(16)
+    .align_y(Alignment::Center)
+    .padding([12, 14]);
+    column![options, widgets::divider(), normalize]
+        .spacing(8)
+        .into()
+}
+
+/// «Discord»: статус «Слушает» с названием трека и обложкой.
+fn discord_block<'a>(prefs: &Prefs) -> Element<'a, App> {
+    use crate::discord::{AppName, Lang, Settings, StatusKind};
+    let settings = prefs.discord;
+    let ready = prefs.discord_ready;
+    // Переключатели неактивны, пока нет Application ID.
+    let toggle = move |on: bool, change: fn(Settings, bool) -> Settings| -> Element<'a, App> {
+        if ready {
+            switch(on, move |value| App::SetDiscord(change(settings, value)))
+        } else {
+            // Без Application ID переключатель приглушён и не отвечает.
+            toggler(on)
+                .size(22)
+                .style(|_, status| {
+                    let on = matches!(
+                        status,
+                        toggler::Status::Active { is_toggled: true }
+                            | toggler::Status::Hovered { is_toggled: true }
+                            | toggler::Status::Disabled { is_toggled: true }
+                    );
+                    toggler::Style {
+                        background: theme::SURFACE_3.into(),
+                        background_border_width: 0.0,
+                        background_border_color: Color::TRANSPARENT,
+                        foreground: theme::TEXT_DISABLED.into(),
+                        foreground_border_width: 0.0,
+                        foreground_border_color: Color::TRANSPARENT,
+                        text_color: None,
+                        border_radius: None,
+                        padding_ratio: if on { 0.12 } else { 0.3 },
+                    }
+                })
+                .into()
+        }
+    };
+    // Выбор из нескольких значений — таблетки.
+    let pills = |items: Vec<(String, bool, Settings, bool)>| -> Element<'a, App> {
+        row(items.into_iter().map(|(title, selected, next, usable)| {
+            let ready = ready && usable;
+            let pill = button(theme::line(
+                title,
+                Style::CaptionStrong,
+                match (selected, ready) {
+                    (_, false) => theme::TEXT_DISABLED,
+                    (true, true) => theme::on_accent(),
+                    (false, true) => theme::TEXT_SECONDARY,
+                },
+            ))
+            .padding([6, 14])
+            .style(move |_, status| button::Style {
+                background: Some(
+                    match (selected, status) {
+                        (true, _) if !ready => theme::SURFACE_4,
+                        (true, _) => theme::accent(),
+                        (false, button::Status::Hovered | button::Status::Pressed) if ready => {
+                            theme::SURFACE_4
+                        }
+                        (false, _) => theme::SURFACE_3,
+                    }
+                    .into(),
+                ),
+                border: Border::default().rounded(widgets::ROUND),
+                ..button::Style::default()
+            });
+            if ready {
+                pill.on_press(App::SetDiscord(next)).into()
+            } else {
+                pill.into()
+            }
+        }))
+        .spacing(8)
+        .into()
+    };
+    let status = pills(
+        StatusKind::ALL
+            .into_iter()
+            .map(|kind| {
+                (
+                    kind.title().to_owned(),
+                    settings.status == kind,
+                    Settings {
+                        status: kind,
+                        ..settings
+                    },
+                    true,
+                )
+            })
+            .collect(),
+    );
+    let app_name = pills(
+        AppName::ALL
+            .into_iter()
+            .map(|app| {
+                (
+                    app.title().to_owned(),
+                    settings.app == app,
+                    Settings { app, ..settings },
+                    app.available(),
+                )
+            })
+            .collect(),
+    );
+    let lang = pills(
+        Lang::ALL
+            .into_iter()
+            .map(|lang| {
+                (
+                    lang.title().to_owned(),
+                    settings.lang == lang,
+                    Settings { lang, ..settings },
+                    true,
+                )
+            })
+            .collect(),
+    );
+    let hint: Element<'a, App> = if ready {
+        Space::new().into()
+    } else {
+        container(theme::line(
+            "Не задан Application ID Discord",
+            Style::Caption,
+            theme::TEXT_TERTIARY,
+        ))
+        .padding(Padding {
+            top: 12.0,
+            right: 18.0,
+            bottom: 0.0,
+            left: 18.0,
+        })
+        .into()
+    };
+    let rows = column![
+        hint,
+        setting_row(
+            "Показывать статус в Discord",
+            "Что вы слушаете, на странице профиля".to_owned(),
+            toggle(settings.enabled, |s, on| Settings { enabled: on, ..s }),
+        ),
+        widgets::divider(),
+        setting_row(
+            "Имя в статусе",
+            "Заголовок «Слушает …» в карточке профиля".to_owned(),
+            app_name,
+        ),
+        widgets::divider(),
+        setting_row(
+            "Что показывать в строке статуса",
+            "«Слушает …» под вашим именем".to_owned(),
+            status,
+        ),
+        widgets::divider(),
+        setting_row(
+            "Показывать на паузе",
+            "Без таймера, с пометкой «пауза». Иначе на паузе статус убирается".to_owned(),
+            toggle(settings.on_pause, |s, on| Settings { on_pause: on, ..s }),
+        ),
+        widgets::divider(),
+        setting_row(
+            "Кнопка «Слушать»",
+            "Ссылка на трек в Яндекс Музыке".to_owned(),
+            toggle(settings.button, |s, on| Settings { button: on, ..s }),
+        ),
+        widgets::divider(),
+        setting_row(
+            "Язык статуса",
+            "Подпись кнопки и пометка паузы".to_owned(),
+            lang
+        ),
+    ];
+    container(rows)
+        .width(Length::Fill)
+        .style(|_| card_style())
+        .into()
+}
+
+/// «Звук» в настройках: карточка с теми же вариантами, что в панели.
+fn sound_block<'a>(prefs: &Prefs) -> Element<'a, App> {
+    container(sound_options(prefs))
+        .padding(6)
+        .width(Length::Fill)
+        .style(|_| card_style())
+        .into()
 }
 
 /// Переключатель настройки в цветах акцента.
@@ -2851,31 +3486,51 @@ fn bar<'a>(
         .into()
 }
 
-/// Значок качества потока: «MP3 · 320» или, когда мало места, «320».
-fn quality_badge<'a>(kbps: u32, full: bool) -> Element<'a, App> {
-    let text = if full {
-        format!("MP3 · {kbps}")
-    } else {
-        kbps.to_string()
+/// Текст значка качества: «FLAC», «AAC · 256», «MP3 · 320»; когда мало
+/// места — только битрейт («256»). У FLAC битрейта нет.
+fn quality_text(info: StreamInfo, full: bool) -> String {
+    let name = match info.codec {
+        Codec::Flac => return "FLAC".to_owned(),
+        Codec::Aac => "AAC",
+        Codec::Mp3 => "MP3",
     };
+    match (info.kbps, full) {
+        (Some(kbps), true) => format!("{name} · {kbps}"),
+        (Some(kbps), false) => kbps.to_string(),
+        (None, _) => name.to_owned(),
+    }
+}
+
+/// Значок качества потока.
+fn quality_badge<'a>(info: StreamInfo, full: bool) -> Element<'a, App> {
+    let text = quality_text(info, full);
+    // Щелчок открывает панель «Настройки звука».
+    let badge = button(theme::line(
+        text,
+        Style::CaptionStrong,
+        theme::TEXT_SECONDARY,
+    ))
+    .padding([3, 8])
+    .style(|_, status| button::Style {
+        background: match status {
+            button::Status::Hovered | button::Status::Pressed => Some(theme::SURFACE_3.into()),
+            _ => None,
+        },
+        text_color: theme::TEXT_SECONDARY,
+        border: Border::default()
+            .rounded(widgets::RADIUS_S)
+            .width(1)
+            .color(theme::BORDER),
+        ..button::Style::default()
+    })
+    .on_press(Lib(Message::ToggleSoundPanel));
     widgets::with_tooltip(
-        container(theme::line(
-            text,
-            Style::CaptionStrong,
-            theme::TEXT_SECONDARY,
-        ))
-        .padding([3, 8])
-        .style(|_| container::Style {
-            border: Border::default()
-                .rounded(widgets::RADIUS_S)
-                .width(1)
-                .color(theme::BORDER),
-            ..container::Style::default()
-        }),
-        if full {
-            "Качество потока"
-        } else {
-            "Качество потока: MP3, кбит/с"
+        badge,
+        match (info.codec, full) {
+            (Codec::Flac, _) => "Качество потока: без потерь".to_owned(),
+            (_, true) => "Качество потока".to_owned(),
+            (Codec::Aac, false) => "Качество потока: AAC, кбит/с".to_owned(),
+            (Codec::Mp3, false) => "Качество потока: MP3, кбит/с".to_owned(),
         },
         tooltip::Position::Top,
     )
@@ -2967,6 +3622,66 @@ fn skeleton<'a>(turn: f32) -> Element<'a, App> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn quality_text_names_codec() {
+        let info = |codec, kbps| StreamInfo { codec, kbps };
+        assert_eq!(quality_text(info(Codec::Flac, None), true), "FLAC");
+        assert_eq!(quality_text(info(Codec::Flac, None), false), "FLAC");
+        assert_eq!(quality_text(info(Codec::Aac, Some(256)), true), "AAC · 256");
+        assert_eq!(quality_text(info(Codec::Aac, Some(256)), false), "256");
+        assert_eq!(quality_text(info(Codec::Aac, None), true), "AAC");
+        assert_eq!(quality_text(info(Codec::Mp3, Some(320)), true), "MP3 · 320");
+        assert_eq!(quality_text(info(Codec::Mp3, Some(320)), false), "320");
+    }
+
+    #[test]
+    fn volume_percent_rounds_and_mutes() {
+        assert_eq!(volume_percent(0.204, false), 20);
+        assert_eq!(volume_percent(0.205, false), 21);
+        assert_eq!(volume_percent(1.0, false), 100);
+        assert_eq!(volume_percent(0.0, false), 0);
+        assert_eq!(volume_percent(0.7, true), 0);
+        assert_eq!(volume_percent(1.7, false), 100);
+        assert_eq!(volume_percent(f32::NAN, false), 0);
+    }
+
+    #[test]
+    fn volume_panel_waits_before_closing() {
+        let start = Instant::now();
+        let mut motion = PlayerMotion::new(0.5);
+        // Наведение открывает панель сразу.
+        motion.volume_over_icon = true;
+        motion.volume_sync(start);
+        assert!(motion.volume_panel.value());
+        assert!(motion.volume_close_at.is_none());
+        // Курсор ушёл со значка: закрытие отложено.
+        motion.volume_over_icon = false;
+        motion.volume_sync(start);
+        assert!(motion.volume_close_at.is_some());
+        motion.volume_tick(start + VOLUME_CLOSE_DELAY / 2);
+        assert!(motion.volume_panel.value());
+        // Курсор перешёл на панель до срока: закрытие отменено.
+        motion.volume_over_panel = true;
+        motion.volume_sync(start + VOLUME_CLOSE_DELAY / 2);
+        assert!(motion.volume_close_at.is_none());
+        motion.volume_tick(start + VOLUME_CLOSE_DELAY * 2);
+        assert!(motion.volume_panel.value());
+        // Ушёл с панели при зажатом ползунке: панель держится.
+        motion.volume_dragging = true;
+        motion.volume_over_panel = false;
+        motion.volume_sync(start + VOLUME_CLOSE_DELAY * 2);
+        assert!(motion.volume_close_at.is_none());
+        // Отпустили: закрытие через задержку.
+        let released = start + VOLUME_CLOSE_DELAY * 3;
+        motion.volume_dragging = false;
+        motion.volume_sync(released);
+        motion.volume_tick(released + VOLUME_CLOSE_DELAY / 2);
+        assert!(motion.volume_panel.value());
+        motion.volume_tick(released + VOLUME_CLOSE_DELAY);
+        assert!(!motion.volume_panel.value());
+        assert!(motion.volume_close_at.is_none());
+    }
+
     fn track(id: &str) -> Track {
         Track {
             id: id.to_owned(),
@@ -2979,6 +3694,7 @@ mod tests {
             available: true,
             cover_uri: None,
             warning: api::Warning::None,
+            loudness: None,
         }
     }
 

@@ -3339,8 +3339,10 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 name = "plastinka"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "clap",
  "directories",
+ "hmac",
  "iced",
  "image",
  "keyring-core",
@@ -3351,6 +3353,7 @@ dependencies = [
  "rodio",
  "serde",
  "serde_json",
+ "sha2",
  "symphonia",
  "thiserror 2.0.21",
  "tokio",

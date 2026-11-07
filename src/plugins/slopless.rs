@@ -347,6 +347,7 @@ mod tests {
             available: true,
             cover_uri: None,
             warning: Warning::None,
+            loudness: None,
         }
     }
 

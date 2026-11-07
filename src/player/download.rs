@@ -49,8 +49,15 @@ pub async fn run(
     mut relink: Relink,
     mut on_link: impl FnMut(&StreamSource) + Send,
 ) {
+    trace!(buffer, "запрашиваем ссылку");
     let mut source = match relink().await {
         Ok(source) => {
+            trace!(
+                buffer,
+                "ссылка: {:?}, хост {}",
+                source.info(),
+                host(&source)
+            );
             on_link(&source);
             source
         }
@@ -63,13 +70,21 @@ pub async fn run(
     #[cfg(debug_assertions)]
     let mut fake = super::fake::Server::for_source(&source);
     let (mut relinks, mut misses) = (0, 0);
+    #[cfg(debug_assertions)]
+    let mut requests = 0_u32;
     loop {
         if buffer.is_cancelled() {
             return;
         }
         let Some(start) = buffer.next_start() else {
+            trace!(buffer, "файл скачан целиком; {}", buffer.trace_layout());
             return;
         };
+        #[cfg(debug_assertions)]
+        {
+            requests += 1;
+        }
+        trace!(buffer, "запрос №{requests} с байта {start}");
         #[cfg(debug_assertions)]
         let result = match &mut fake {
             Some(server) => server.fetch(&buffer, start).await,
@@ -85,12 +100,14 @@ pub async fn run(
                 continue;
             }
             Err(FetchError::Retry { progress, reason }) => {
+                trace!(buffer, "повтор: {reason}");
                 if progress {
                     (relinks, misses) = (0, 0);
                 }
                 reason
             }
             Err(FetchError::Expired) if relinks < MAX_RELINKS => {
+                trace!(buffer, "ссылка протухла, получаем новую");
                 relinks += 1;
                 match relink().await {
                     Ok(fresh) => {
@@ -131,6 +148,18 @@ pub async fn run(
     }
 }
 
+/// Отладка: хост хранилища из ссылки (без пути и подписи).
+#[cfg(debug_assertions)]
+fn host(source: &StreamSource) -> String {
+    match source {
+        StreamSource::Url { url, .. } => reqwest::Url::parse(url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_default(),
+        StreamSource::Fake(name) => format!("поддельный «{name}»"),
+    }
+}
+
 fn link_failure(err: StreamError) -> LinkFailure {
     match err {
         StreamError::Unavailable => LinkFailure::Unavailable,
@@ -167,8 +196,16 @@ async fn fetch(
             reason: NetError::from(err).to_string(),
         })?;
     let (offset, total) = check_response(&response)?;
+    trace!(
+        buffer,
+        "ответ {}: {:?}, файл {total} байт, тело с {offset}",
+        response.status().as_u16(),
+        response.version()
+    );
     buffer.set_total(total).map_err(FetchError::Fatal)?;
     let mut pos = offset;
+    #[cfg(debug_assertions)]
+    let (began, mut mark) = (std::time::Instant::now(), offset);
     // Сервер не понял Range и отдаёт файл с начала: байты до `start` уже
     // есть, их пропускаем. Иначе запрос бросался бы сразу и повторялся без
     // конца.
@@ -181,7 +218,18 @@ async fn fetch(
             buffer.should_restart(pos)
         };
         if restart {
+            trace!(buffer, "запрос брошен на {pos}: {}", buffer.trace_state());
             return Ok(());
+        }
+        #[cfg(debug_assertions)]
+        if pos >= mark.saturating_add(2 * 1024 * 1024) {
+            let seconds = began.elapsed().as_secs_f64().max(0.001);
+            trace!(
+                buffer,
+                "скачано до {pos}, {:.1} МБ/с в этом запросе",
+                (pos - offset) as f64 / seconds / 1_048_576.0
+            );
+            mark = pos;
         }
         match response.chunk().await {
             Ok(Some(bytes)) => {
@@ -330,6 +378,7 @@ mod tests {
         let source = StreamSource::Url {
             url: format!("http://127.0.0.1:{port}/track"),
             kbps: 128,
+            codec: crate::api::Codec::Mp3,
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

@@ -6,8 +6,11 @@ description = "Неофициальный десктопный клиент Ян
 publish = false
 
 [dependencies]
+# Подпись запроса get-file-info (HMAC-SHA256 и base64). Все три — MIT/Apache-2.0.
+base64 = "0.23"
 clap = { version = "4.6.7", features = ["derive"] }
 directories = "6.0.0"
+hmac = "0.13"
 iced = { version = "0.14.0", features = ["tokio", "svg", "image-without-codecs", "advanced"] }
 # Только кодеки для обложек: iced декодирует картинки через этот крейт.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
@@ -20,10 +23,12 @@ rfd = "0.17.2"
 rodio = { version = "0.23", default-features = false, features = ["playback"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.11"
 # MP3 — поток Яндекса; остальное — свои файлы пользователя (FckCensor).
 symphonia = { version = "0.5.5", default-features = false, features = ["mp3", "flac", "ogg", "vorbis", "wav", "pcm", "isomp4", "aac"] }
 thiserror = "2.0.21"
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "signal"] }
+# `net`, `io-util`, `sync` — локальный IPC Discord (свой клиент RPC, без крейтов).
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "signal", "net", "io-util", "sync"] }
 toml = "1.2.0"
 uuid = { version = "1.29.0", features = ["v4"] }
 

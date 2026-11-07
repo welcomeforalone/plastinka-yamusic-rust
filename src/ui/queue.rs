@@ -238,6 +238,7 @@ mod tests {
                     available: *available,
                     cover_uri: None,
                     warning: crate::api::Warning::None,
+                    loudness: None,
                 })
                 .collect(),
         )
