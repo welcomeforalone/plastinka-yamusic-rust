@@ -159,6 +159,55 @@ impl Queue {
         self.order.extend(fresh);
     }
 
+    /// Какие треки пойдут после текущего (до `limit`): по порядку
+    /// перемешивания, если он уже есть, иначе по списку. Только доступные, без
+    /// повтора по кругу. Очередь не меняется.
+    pub fn upcoming(
+        &self,
+        shuffle: bool,
+        playable: &dyn Fn(&Track) -> bool,
+        limit: usize,
+    ) -> Vec<usize> {
+        if shuffle && let Some(at) = self.order.iter().position(|index| *index == self.current) {
+            return self
+                .order
+                .iter()
+                .skip(at + 1)
+                .take(limit)
+                .copied()
+                .collect();
+        }
+        (self.current.saturating_add(1)..self.tracks.len())
+            .filter(|index| self.available(*index, playable))
+            .take(limit)
+            .collect()
+    }
+
+    /// Какие треки шли перед текущим (до `limit`), ближайший первым: по порядку
+    /// перемешивания, если он есть, иначе по списку. Только доступные.
+    pub fn before(
+        &self,
+        shuffle: bool,
+        playable: &dyn Fn(&Track) -> bool,
+        limit: usize,
+    ) -> Vec<usize> {
+        if shuffle && let Some(at) = self.order.iter().position(|index| *index == self.current) {
+            return self
+                .order
+                .iter()
+                .take(at)
+                .rev()
+                .take(limit)
+                .copied()
+                .collect();
+        }
+        (0..self.current.min(self.tracks.len()))
+            .rev()
+            .filter(|index| self.available(*index, playable))
+            .take(limit)
+            .collect()
+    }
+
     /// Соседний доступный трек: по порядку перемешивания или по списку. С
     /// повтором списка (`wrap`) — по кругу.
     pub fn neighbour(
@@ -239,6 +288,7 @@ mod tests {
                     cover_uri: None,
                     warning: crate::api::Warning::None,
                     loudness: None,
+                    lyrics: None,
                 })
                 .collect(),
         )
@@ -266,6 +316,58 @@ mod tests {
             Some(0)
         );
         assert_eq!(queue.first(false, &mut rng, &ok), Some(0));
+    }
+
+    #[test]
+    fn upcoming_follows_list_and_skips_unavailable() {
+        let queue = Queue::new(
+            ListKey::Album(1),
+            tracks(&[true, true, false, true, true]),
+            1,
+        );
+        assert_eq!(queue.upcoming(false, &ok, 10), vec![3, 4]);
+        assert_eq!(queue.upcoming(false, &ok, 1), vec![3]);
+        let last = Queue::new(ListKey::Album(1), tracks(&[true, true]), 1);
+        assert!(last.upcoming(false, &ok, 10).is_empty());
+        let empty = Queue::new(ListKey::Liked, tracks(&[]), 0);
+        assert!(empty.upcoming(false, &ok, 10).is_empty());
+    }
+
+    #[test]
+    fn before_lists_played_tracks_closest_first() {
+        let queue = Queue::new(
+            ListKey::Album(1),
+            tracks(&[true, false, true, true, true]),
+            3,
+        );
+        assert_eq!(queue.before(false, &ok, 10), vec![2, 0]);
+        assert_eq!(queue.before(false, &ok, 1), vec![2]);
+        let first = Queue::new(ListKey::Album(1), tracks(&[true, true]), 0);
+        assert!(first.before(false, &ok, 10).is_empty());
+        // Перемешивание: то, что стояло в порядке до текущего.
+        let mut rng = Rng::seeded(5);
+        let mut shuffled = Queue::new(ListKey::Liked, tracks(&[true; 6]), 2);
+        shuffled.shuffle(Some(2), &mut rng, &ok);
+        shuffled.current = *shuffled.order.get(3).unwrap();
+        let expected: Vec<usize> = shuffled.order.iter().take(3).rev().copied().collect();
+        assert_eq!(shuffled.before(true, &ok, 10), expected);
+    }
+
+    #[test]
+    fn upcoming_follows_shuffle_order() {
+        let mut rng = Rng::seeded(11);
+        let mut queue = Queue::new(ListKey::Liked, tracks(&[true; 8]), 3);
+        queue.shuffle(Some(3), &mut rng, &ok);
+        let order = queue.order.clone();
+        // Текущий первый в порядке: дальше весь остальной порядок.
+        assert_eq!(queue.upcoming(true, &ok, 100), order.get(1..).unwrap());
+        assert_eq!(queue.upcoming(true, &ok, 3).len(), 3);
+        // Перемешивание не начато (порядка нет): показываем по списку.
+        let plain = Queue::new(ListKey::Liked, tracks(&[true; 4]), 0);
+        assert_eq!(plain.upcoming(true, &ok, 10), vec![1, 2, 3]);
+        // Середина порядка: только то, что после текущего.
+        queue.current = *order.get(4).unwrap();
+        assert_eq!(queue.upcoming(true, &ok, 100), order.get(5..).unwrap());
     }
 
     #[test]

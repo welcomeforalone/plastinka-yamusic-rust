@@ -14,11 +14,9 @@ use reqwest::header::AUTHORIZATION;
 use serde_json::{Value, json};
 
 use super::tracks::{Track, parse_track};
+use super::wave_settings::{Activity, WaveSettings, parse_activities};
 use super::{API_BASE, ApiError, MUSIC_CLIENT, auth_header, check_status};
 use crate::net::NetError;
-
-/// Станция «Моя волна».
-const WAVE_SEED: &str = "user:onyourwave";
 
 /// Сколько последних треков отправлять в `queue` при догрузке.
 pub const QUEUE_LEN: usize = 5;
@@ -86,20 +84,54 @@ pub enum WaveEvent {
     Skipped { track_id: String, played: Duration },
 }
 
-/// Запускает «Мою волну» и возвращает первую порцию.
-pub async fn start_wave(http: &reqwest::Client, token: &str) -> Result<WaveBatch, ApiError> {
-    let body = json!({
-        "seeds": [WAVE_SEED],
+/// Тело `POST /rotor/session/new`: seeds по настройкам волны.
+fn new_session_body(settings: &WaveSettings) -> Value {
+    json!({
+        "seeds": settings.seeds(),
         "queue": [],
         "includeTracksInResponse": true,
         "includeWaveModel": true,
         "interactive": true,
-    });
+    })
+}
+
+/// Запускает «Мою волну» с выбранными настройками и возвращает первую
+/// порцию. Настройки — только seeds нового сеанса, в аккаунт ничего не
+/// пишется.
+pub async fn start_wave(
+    http: &reqwest::Client,
+    token: &str,
+    settings: &WaveSettings,
+) -> Result<WaveBatch, ApiError> {
+    let body = new_session_body(settings);
     let (status, text) = send(http, token, "rotor/session/new", &body, Call::New).await?;
     match parse_batch(status, &text, None)? {
         WaveTracks::Batch(batch) => Ok(batch),
         WaveTracks::Expired => Err(ApiError::InvalidResponse),
     }
+}
+
+/// Занятия для меню волны: станции типа `activity` из
+/// `GET /rotor/stations/list?language=ru`. Не загрузились — вызывающий
+/// скрывает раздел, остальное меню работает.
+pub async fn fetch_activities(
+    http: &reqwest::Client,
+    token: &str,
+) -> Result<Vec<Activity>, ApiError> {
+    #[cfg(debug_assertions)]
+    if let Some((status, text)) = test_hook::reply(token, &Call::Stations, &Value::Null).await? {
+        return parse_activities(status, &text);
+    }
+    let response = http
+        .get(format!("{API_BASE}/rotor/stations/list?language=ru"))
+        .header(AUTHORIZATION, auth_header(token)?)
+        .header("X-Yandex-Music-Client", MUSIC_CLIENT)
+        .send()
+        .await
+        .map_err(NetError::from)?;
+    let status = response.status();
+    let text = response.text().await.map_err(NetError::from)?;
+    parse_activities(status, &text)
 }
 
 /// Следующая порция. `queue` — `id:albumId` последних треков сессии, текущий
@@ -149,6 +181,9 @@ enum Call {
     New,
     Tracks,
     Feedback,
+    /// Список станций (GET): нужен только отладочному хуку.
+    #[cfg(debug_assertions)]
+    Stations,
 }
 
 #[cfg_attr(not(debug_assertions), allow(unused_variables))]
@@ -204,7 +239,7 @@ fn feedback_body(batch_id: &str, from: Option<&str>, event: &WaveEvent, now: Sys
 
 /// Время в формате RFC 3339, UTC, с миллисекундами: `2026-11-06T12:00:00.123Z`.
 /// Своя маленькая функция: `chrono` и `time` в проект не подключены.
-fn rfc3339_utc(time: SystemTime) -> String {
+pub(super) fn rfc3339_utc(time: SystemTime) -> String {
     let since = time.duration_since(UNIX_EPOCH).unwrap_or_default();
     let (secs, millis) = (since.as_secs(), since.subsec_millis());
     let (year, month, day) = civil_from_days(secs / 86_400);
@@ -353,6 +388,9 @@ mod fixtures {
         "feedback-503",
         "colors",
         "slow",
+        // Занятия для меню волны (сеансы — как у `sample`).
+        "stations",
+        "stations-503",
     ];
 
     pub const SESSION: &str = "test-session-1";
@@ -363,11 +401,30 @@ mod fixtures {
         New,
         Tracks(u32),
         Feedback,
+        Stations,
     }
+
+    /// Список станций: несколько занятий и чужие станции (их отсев тоже
+    /// проверяется).
+    const STATIONS: &str = r#"{"result":[
+        {"station":{"id":{"type":"activity","tag":"work-background"},"name":"Работа"}},
+        {"station":{"id":{"type":"mood","tag":"winter"},"name":"Зимнее"}},
+        {"station":{"id":{"type":"activity","tag":"workout"},"name":"Тренировка"}},
+        {"station":{"id":{"type":"activity","tag":"road-trip"},"name":"В дороге"}},
+        {"station":{"id":{"type":"activity","tag":"fall-asleep"},"name":"Засыпание"}},
+        {"station":{"id":{"type":"genre","tag":"rock"},"name":"Рок"}}
+    ]}"#;
 
     pub fn reply(name: &str, call: &Call) -> Option<(StatusCode, String)> {
         if !NAMES.contains(&name) {
             return None;
+        }
+        if matches!(call, Call::Stations) {
+            return Some(if name == "stations-503" {
+                (StatusCode::SERVICE_UNAVAILABLE, String::new())
+            } else {
+                (StatusCode::OK, STATIONS.to_owned())
+            });
         }
         let colors = name == "colors";
         let ok = |value: Value| (StatusCode::OK, value.to_string());
@@ -390,6 +447,7 @@ mod fixtures {
                 "feedback-503" => (StatusCode::SERVICE_UNAVAILABLE, String::new()),
                 _ => ok(json!({ "result": "ok" })),
             },
+            Call::Stations => return None,
         })
     }
 
@@ -528,6 +586,7 @@ mod test_hook {
                 }
                 fixtures::Call::Feedback
             }
+            Call::Stations => fixtures::Call::Stations,
         };
         fixtures::reply(&name, &fixture_call)
             .map(Some)
@@ -549,6 +608,45 @@ mod tests {
             WaveTracks::Batch(batch) => batch,
             WaveTracks::Expired => panic!("ожидалась порция"),
         }
+    }
+
+    #[test]
+    fn session_body_carries_seeds() {
+        let plain = new_session_body(&WaveSettings::default());
+        assert_eq!(plain["seeds"], json!(["user:onyourwave"]));
+        assert_eq!(plain["interactive"], json!(true));
+        let chosen = new_session_body(&WaveSettings {
+            diversity: Some(crate::api::Diversity::Favorite),
+            mood: Some(crate::api::Mood::Sad),
+            ..WaveSettings::default()
+        });
+        assert_eq!(
+            chosen["seeds"],
+            json!([
+                "user:onyourwave",
+                "settingDiversity:favorite",
+                "settingMoodEnergy:sad"
+            ])
+        );
+    }
+
+    #[test]
+    fn stations_fixture_gives_only_activities() {
+        let (status, body) = fixtures::reply("stations", &fixtures::Call::Stations).unwrap();
+        let tags: Vec<String> = parse_activities(status, &body)
+            .unwrap()
+            .into_iter()
+            .map(|activity| activity.tag)
+            .collect();
+        assert_eq!(
+            tags,
+            vec!["work-background", "workout", "road-trip", "fall-asleep"]
+        );
+        let (status, body) = fixtures::reply("stations-503", &fixtures::Call::Stations).unwrap();
+        assert!(matches!(
+            parse_activities(status, &body),
+            Err(ApiError::Server(503))
+        ));
     }
 
     #[test]

@@ -5,15 +5,21 @@
 
 mod account;
 mod catalog;
+mod history;
+mod lyrics;
+mod play_audio;
 mod rotor;
 mod stream;
 mod tracks;
+mod wave_settings;
 
 use reqwest::StatusCode;
 use reqwest::header::HeaderValue;
 
 use crate::net::NetError;
 
+#[cfg(test)]
+pub(crate) use account::sample_plus_status;
 pub use account::{
     Account, AccountStatus, Date, PlaybackPermit, PlusDetails, Subscription, fetch_status,
 };
@@ -24,20 +30,30 @@ pub use catalog::{
     fetch_listening_top, fetch_my_albums, fetch_my_artists, fetch_my_playlists, fetch_playlist,
     search, total_duration,
 };
+pub use history::{
+    HistoryContext, HistoryDay, HistoryItem, Ymd, day_label, fetch_history, today_utc,
+};
+pub use lyrics::{LyricsFormat, fetch_lyrics_text};
+pub use play_audio::{PlayReport, Tracker as PlayTracker, new_play_id, send_quietly};
 pub use rotor::{
-    QUEUE_LEN, WaveBatch, WaveColors, WaveEvent, WaveTrack, WaveTracks, fetch_wave_tracks,
-    queue_id, send_wave_feedback, start_wave,
+    QUEUE_LEN, WaveBatch, WaveColors, WaveEvent, WaveTrack, WaveTracks, fetch_activities,
+    fetch_wave_tracks, queue_id, send_wave_feedback, start_wave,
 };
 pub use stream::{
     AudioQuality, Codec, StreamError, StreamInfo, StreamSource, fetch_mp3_source,
     fetch_stream_source,
 };
 pub use tracks::{
-    ArtistRef, LikedIds, Loudness, TRACKS_BATCH, Track, Warning, add_disliked_tracks,
+    ArtistRef, LikedIds, Loudness, LyricsInfo, TRACKS_BATCH, Track, Warning, add_disliked_tracks,
     add_liked_tracks, artists_text, fetch_liked_ids, fetch_tracks, normalization_gain,
     remove_liked_tracks,
 };
 pub(crate) use tracks::{clean, numeric_id, parse_artist_refs, plausible_id};
+pub use wave_settings::{Activity, Diversity, Language, Mood, WaveSettings};
+
+/// Ключ подписи запросов `get-file-info` и текстов (общий для приложений
+/// Яндекса, не секрет пользователя).
+pub(crate) const SIGN_KEY: &str = "p93jhgh689SBReK6ghtw62";
 
 const API_BASE: &str = "https://api.music.yandex.net";
 

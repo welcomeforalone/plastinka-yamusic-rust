@@ -877,6 +877,7 @@ mod tests {
             cover_uri: None,
             warning,
             loudness: None,
+            lyrics: None,
         }
     }
 

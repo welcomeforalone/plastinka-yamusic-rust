@@ -307,6 +307,12 @@ fn parse_date(text: &str) -> Option<Date> {
     Some(Date { year, month, day })
 }
 
+/// Статус с подтверждённым Плюсом для тестов других модулей.
+#[cfg(test)]
+pub fn sample_plus_status() -> AccountStatus {
+    parse_status(StatusCode::OK, fixtures::PLUS).unwrap()
+}
+
 /// Готовые ответы сервиса: для юнит-тестов и отладочного хука.
 #[cfg(any(test, debug_assertions))]
 mod fixtures {

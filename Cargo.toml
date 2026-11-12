@@ -60,6 +60,8 @@ string_slice = "deny"
 
 [target."cfg(windows)".dependencies]
 windows-native-keyring-store = "1.1.0"
+# Системный плеер: медиаклавиши и оверлей Windows (SMTC), MIT.
+souvlaki = { version = "0.9.3", default-features = false }
 # Таймер потока для кадров во время перетаскивания окна (MIT OR Apache-2.0).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
@@ -70,3 +72,5 @@ windows-sys = { version = "0.61", features = [
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
+# Системный плеер: медиаклавиши и MPRIS. `use_zbus` — чистый Rust, без системной libdbus.
+souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }

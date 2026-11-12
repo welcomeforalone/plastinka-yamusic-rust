@@ -65,6 +65,47 @@ pub struct Track {
     pub warning: Warning,
     /// Громкость трека (`r128`), если сервис её сообщил: для нормализации.
     pub loudness: Option<Loudness>,
+    /// Есть ли текст песни у Яндекса (`lyricsInfo`). `None` — сервис не
+    /// сообщил: текст надо пробовать запросить.
+    pub lyrics: Option<LyricsInfo>,
+}
+
+/// Какие тексты песни есть у Яндекса (`lyricsInfo`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LyricsInfo {
+    /// Есть текст с метками времени (LRC).
+    pub synced: bool,
+    /// Есть обычный текст.
+    pub text: bool,
+}
+
+impl LyricsInfo {
+    /// Из объекта трека. Нет `lyricsInfo` — берём `lyricsAvailable: true`
+    /// (текст есть, вид неизвестен); иначе сервис ничего не сказал.
+    fn parse(track: &Value) -> Option<Self> {
+        if let Some(info) = track.get("lyricsInfo").filter(|info| info.is_object()) {
+            let flag = |key: &str| info.get(key).and_then(Value::as_bool);
+            let (synced, text) = (
+                flag("hasAvailableSyncLyrics"),
+                flag("hasAvailableTextLyrics"),
+            );
+            if synced.is_some() || text.is_some() {
+                return Some(Self {
+                    synced: synced.unwrap_or(false),
+                    text: text.unwrap_or(false),
+                });
+            }
+        }
+        (track.get("lyricsAvailable").and_then(Value::as_bool) == Some(true)).then_some(Self {
+            synced: true,
+            text: true,
+        })
+    }
+
+    /// Текста точно нет: запрашивать у Яндекса незачем.
+    pub fn is_empty(self) -> bool {
+        !self.synced && !self.text
+    }
 }
 
 /// Громкость трека по EBU R128 (поле `r128` ответа).
@@ -159,6 +200,7 @@ impl Track {
             cover_uri: None,
             warning: Warning::None,
             loudness: None,
+            lyrics: None,
         }
     }
 
@@ -520,6 +562,7 @@ pub(super) fn parse_track(value: &Value) -> Option<Track> {
         cover_uri: text("coverUri"),
         warning: Warning::parse(value.get("contentWarning")),
         loudness: Loudness::parse(value.get("r128")),
+        lyrics: LyricsInfo::parse(value),
         id,
     })
 }
@@ -751,6 +794,37 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+
+    #[test]
+    fn lyrics_info_is_parsed_softly() {
+        let info = |json: &str| LyricsInfo::parse(&serde_json::from_str(json).unwrap());
+        assert_eq!(
+            info(
+                r#"{"lyricsInfo":{"hasAvailableSyncLyrics":true,"hasAvailableTextLyrics":false}}"#
+            ),
+            Some(LyricsInfo {
+                synced: true,
+                text: false
+            })
+        );
+        let none = info(
+            r#"{"lyricsInfo":{"hasAvailableSyncLyrics":false,"hasAvailableTextLyrics":false}}"#,
+        );
+        assert!(none.is_some_and(LyricsInfo::is_empty));
+        // Нет `lyricsInfo`: `lyricsAvailable: true` — есть, вид неизвестен.
+        assert_eq!(
+            info(r#"{"lyricsAvailable":true}"#),
+            Some(LyricsInfo {
+                synced: true,
+                text: true
+            })
+        );
+        // Ничего не сказано или поля неверного типа — неизвестно.
+        assert_eq!(info(r#"{"lyricsAvailable":false}"#), None);
+        assert_eq!(info(r#"{}"#), None);
+        assert_eq!(info(r#"{"lyricsInfo":"да"}"#), None);
+        assert_eq!(info(r#"{"lyricsInfo":{}}"#), None);
+    }
 
     fn sample_ids() -> LikedIds {
         parse_liked_ids(StatusCode::OK, fixtures::SAMPLE_LIKES).unwrap()

@@ -65,6 +65,7 @@ mod tests {
             cover_uri: None,
             warning: crate::api::Warning::None,
             loudness: None,
+            lyrics: None,
         }
     }
 

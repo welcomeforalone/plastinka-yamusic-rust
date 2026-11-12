@@ -443,6 +443,10 @@ impl Library {
             tasks.push(self.jump(0.0));
         }
         tasks.push(self.load_collection(section, false, http));
+        // История обновляется при каждом открытии вкладки.
+        if section == Section::History {
+            tasks.push(self.history_load(http));
+        }
         if section == Section::Search {
             tasks.push(iced::widget::operation::focus(CATALOG_SEARCH_ID));
         }
@@ -1158,7 +1162,7 @@ fn empty_page<T>() -> api::Page<T> {
     }
 }
 
-fn no_network() -> Failure {
+pub(super) fn no_network() -> Failure {
     Failure {
         kind: FailureKind::Other,
         text: "не удалось подготовить сетевое соединение".to_owned(),

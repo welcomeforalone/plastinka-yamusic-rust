@@ -10,9 +10,12 @@ mod drag_pulse;
 mod filter;
 mod gate;
 mod heartbeat;
+mod history;
 mod icons;
 mod library;
+mod lyrics_view;
 mod marquee;
+mod mini;
 mod pause;
 mod pointer;
 mod queue;
@@ -21,6 +24,7 @@ mod theme;
 mod visualizer;
 mod widgets;
 
+use std::io::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -33,6 +37,7 @@ use crate::APP_NAME;
 use crate::api::{self, AccountStatus, ApiError, AudioQuality, PlaybackPermit};
 use crate::auth::{self, AuthError, DeviceCode, OAuthApp};
 use crate::discord;
+use crate::media_controls;
 use crate::net::{self, NetError};
 use crate::plugins::PluginSettings;
 use crate::storage::config::{self, Config};
@@ -42,13 +47,14 @@ use crate::texts::sentence;
 
 /// Запускает окно. Блокирует поток до закрытия окна.
 pub fn run() -> iced::Result {
-    let mut app = iced::application(App::boot, App::update, App::view)
-        .title(APP_NAME)
+    // Окон два (главное и мини-плеер), поэтому `daemon`: он не закрывается
+    // сам, выход — явный (`iced::exit`) при закрытии главного окна.
+    let mut app = iced::daemon(App::boot, App::update, App::view)
+        .title(App::title)
         .theme(App::theme)
         .scale_factor(App::scale_factor)
         .subscription(App::subscription)
         .default_font(theme::REGULAR)
-        .window(window_settings())
         .antialiasing(true);
     for font in theme::FONTS {
         app = app.font(font);
@@ -203,6 +209,8 @@ pub struct Prefs {
     /// Качество звука и нормализация громкости (раздел «Звук»).
     pub quality: AudioQuality,
     pub normalize: bool,
+    /// Искать текст песни в LRCLib, если у Яндекса его нет.
+    pub lyrics_lrclib: bool,
     /// Discord Rich Presence (блок «Discord»).
     pub discord: discord::Settings,
     /// Application ID Discord задан: без него блок «Discord» неактивен.
@@ -219,6 +227,7 @@ impl Default for Prefs {
             visualizer: true,
             quality: AudioQuality::default(),
             normalize: false,
+            lyrics_lrclib: true,
             discord: discord::Settings::default(),
             discord_ready: false,
         }
@@ -242,6 +251,7 @@ impl Prefs {
                 .and_then(AudioQuality::from_key)
                 .unwrap_or_default(),
             normalize: config.normalize.unwrap_or(false),
+            lyrics_lrclib: config.lyrics_lrclib.unwrap_or(true),
             discord: discord::Settings {
                 enabled: config.discord_enabled.unwrap_or(true),
                 status: config
@@ -277,6 +287,7 @@ impl Prefs {
         config.visualizer = Some(self.visualizer);
         config.audio_quality = Some(self.quality.key().to_owned());
         config.normalize = Some(self.normalize);
+        config.lyrics_lrclib = Some(self.lyrics_lrclib);
         config.discord_enabled = Some(self.discord.enabled);
         config.discord_status = Some(self.discord.status.key().to_owned());
         config.discord_on_pause = Some(self.discord.on_pause);
@@ -306,8 +317,22 @@ pub enum Dialog {
 #[derive(Clone)]
 pub enum Message {
     WindowOpened(Option<window::Id>),
+    /// Размер любого окна (главного или мини-плеера).
+    AnyResized(window::Id, Size),
+    /// Просьба закрыть любое окно (крестик, Alt + F4).
+    CloseRequested(window::Id),
+    /// Мини-плеер: открыть из нижнего плеера; закрепить поверх окон;
+    /// вернуть главное окно; закрыть; тянуть за фон; окно сдвинули.
+    MiniOpen,
+    MiniPin,
+    MiniExpand,
+    MiniClose,
+    MiniDrag,
+    MiniMoved(window::Id, iced::Point),
     /// Системный дескриптор окна (только Windows) для таймера перетаскивания.
     NativeHandle(Option<isize>),
+    /// Команда системного плеера (медиаклавиши, оверлей, MPRIS).
+    Media(media_controls::Command),
     WindowResized(Size),
     /// Свёрнуто ли окно (`None` — платформа не ответила, считаем «нет»).
     Minimized(Option<bool>),
@@ -340,7 +365,13 @@ pub enum Message {
     Logout,
     LoggedOut(Arc<StoredToken>, Result<(), Failure>),
 
-    ConfigLoaded(Prefs, PluginSettings, Option<String>),
+    ConfigLoaded(
+        Prefs,
+        PluginSettings,
+        Option<String>,
+        api::WaveSettings,
+        mini::MiniPrefs,
+    ),
     ToggleSidebar,
     SetAccent(theme::Accent),
     Zoom(Zoom),
@@ -348,6 +379,7 @@ pub enum Message {
     /// Качество звука и нормализация громкости (панель «Настройки звука»).
     SetAudioQuality(AudioQuality),
     SetNormalize(bool),
+    SetLyricsLrclib(bool),
     /// Настройки Discord Rich Presence.
     SetDiscord(discord::Settings),
     /// Новые настройки плагинов.
@@ -393,10 +425,24 @@ pub struct App {
     discord_app_id: String,
     /// `discord_app_id` из `config.toml` (своё приложение вместо встроенных).
     discord_override: Option<String>,
+    /// Системный плеер: медиаклавиши и оверлей; только в главном окне.
+    media: Option<media_controls::Controls>,
+    /// Системный плеер не удалось создать или он отказал: больше не пробуем.
+    media_failed: bool,
+    /// Системный дескриптор окна (Windows); без него SMTC не создать.
+    hwnd: Option<isize>,
+    /// Окно мини-плеера, пока оно открыто (только из главного экрана).
+    mini: Option<window::Id>,
+    /// Закреплено поверх других окон (по умолчанию да).
+    mini_pinned: bool,
+    /// Положение и раскладка мини-плеера (`[mini_player]` в `config.toml`).
+    mini_prefs: mini::MiniPrefs,
     /// Окно закрывается: статус Discord уже убран.
     closing: bool,
     /// Плагины: что включено. Тоже в `config.toml`, таблица `[plugins]`.
     plugins: PluginSettings,
+    /// Выбор в меню «Моей волны» (`[wave_settings]`, в аккаунт не пишется).
+    wave_settings: api::WaveSettings,
     /// Тема iced с текущим акцентом.
     theme: iced::Theme,
     /// Настройки сейчас пишутся; `save_again` — за это время они изменились.
@@ -413,8 +459,9 @@ impl App {
             .ok()
             .map(|dirs| dirs.cache_dir().to_path_buf());
         let now = Instant::now();
+        let (main_window, open_main) = window::open(window_settings());
         let app = Self {
-            window: None,
+            window: Some(main_window),
             size: window_settings().size,
             minimized: false,
             http: net::http_client().map_err(|err| err.to_string()),
@@ -432,8 +479,15 @@ impl App {
             discord: None,
             discord_app_id: String::new(),
             discord_override: None,
+            media: None,
+            media_failed: false,
+            hwnd: None,
+            mini: None,
+            mini_pinned: true,
+            mini_prefs: mini::MiniPrefs::default(),
             closing: false,
             plugins: PluginSettings::default(),
+            wave_settings: api::WaveSettings::default(),
             theme: theme::theme(),
             saving: false,
             save_again: false,
@@ -442,7 +496,7 @@ impl App {
             toast: None,
         };
         let task = Task::batch([
-            window::latest().map(Message::WindowOpened),
+            open_main.map(|id| Message::WindowOpened(Some(id))),
             Task::perform(load_token(), Message::TokenLoaded),
             // Не прочитались настройки — всё по умолчанию.
             Task::perform(load_config(), |config| {
@@ -451,6 +505,8 @@ impl App {
                     Prefs::from_config(&config),
                     plugin_settings(&config),
                     config.discord_app_id.clone(),
+                    api::WaveSettings::from_config(&config.wave_settings),
+                    mini::MiniPrefs::from_config(&config.mini_player),
                 )
             }),
         ]);
@@ -469,11 +525,24 @@ impl App {
         (elapsed.as_millis() % 1000) as f32 / 1000.0
     }
 
-    fn theme(&self) -> iced::Theme {
+    fn title(&self, window: window::Id) -> String {
+        if self.mini == Some(window) {
+            format!("{APP_NAME} — мини-плеер")
+        } else {
+            APP_NAME.to_owned()
+        }
+    }
+
+    fn theme(&self, _window: window::Id) -> iced::Theme {
         self.theme.clone()
     }
 
-    fn scale_factor(&self) -> f32 {
+    fn scale_factor(&self, window: window::Id) -> f32 {
+        // Мини-плеер нарисован под свой размер: масштаб главного окна к нему
+        // не применяется.
+        if self.mini == Some(window) {
+            return 1.0;
+        }
         // Проценты — от 75 до 200: потерь при переводе нет.
         self.prefs.scale as f32 / 100.0
     }
@@ -487,10 +556,15 @@ impl App {
         self.now = Instant::now();
         let before = self.page_key();
         // Кадры и секундные тики статус не меняют.
-        let discord_relevant = !matches!(message, Message::Frame(_) | Message::Tick(_));
+        let discord_relevant = !matches!(
+            message,
+            Message::Frame(_) | Message::Tick(_) | Message::MiniMoved(..)
+        );
         let task = self.handle(message);
+        let task = Task::batch([task, self.sync_mini()]);
         if discord_relevant {
             self.sync_discord();
+            self.sync_media();
         }
         drag_pulse::set_wanted(self.wants_frames());
         // Сетка карточек строится по ширине раздела справа от меню.
@@ -541,6 +615,49 @@ impl App {
         }
         if let Some(rpc) = &self.discord {
             rpc.set(library.discord_state(self.prefs.discord));
+        }
+    }
+
+    /// Системный плеер: создаётся в главном окне после подтверждения Плюса
+    /// (пропуск берётся у библиотеки), убирается при выходе из аккаунта.
+    /// Любая ошибка — окно работает без него, причина в stderr (без токена).
+    fn sync_media(&mut self) {
+        if self.closing {
+            return;
+        }
+        let Screen::Main(library) = &self.screen else {
+            self.media = None;
+            self.media_failed = false;
+            return;
+        };
+        if self.media.is_none() && !self.media_failed {
+            // На Windows ждём окно: без HWND SMTC не создать.
+            if self.window.is_none() || (cfg!(windows) && self.hwnd.is_none()) {
+                return;
+            }
+            let Some(permit) = library.media_permit() else {
+                return;
+            };
+            match media_controls::Controls::start(&permit, self.hwnd) {
+                Ok(controls) => self.media = Some(controls),
+                Err(err) => {
+                    self.media_failed = true;
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "Предупреждение: системный плеер недоступен: {err}"
+                    );
+                }
+            }
+        }
+        if let Some(controls) = &mut self.media
+            && let Err(err) = controls.sync(&library.media_state())
+        {
+            self.media = None;
+            self.media_failed = true;
+            let _ = writeln!(
+                std::io::stderr(),
+                "Предупреждение: системный плеер отключён: {err}"
+            );
         }
     }
 
@@ -603,9 +720,49 @@ impl App {
                     ])
                 });
             }
+            Message::AnyResized(id, size) => {
+                // Размер мини-плеера главному окну не нужен.
+                if self.window == Some(id) {
+                    return self.handle(Message::WindowResized(size));
+                }
+            }
+            Message::CloseRequested(id) => {
+                return if self.mini == Some(id) {
+                    self.close_mini(false)
+                } else {
+                    self.close()
+                };
+            }
+            Message::MiniOpen => return self.open_mini(),
+            Message::MiniPin => {
+                self.mini_pinned = !self.mini_pinned;
+                if let Some(id) = self.mini {
+                    return window::set_level(id, mini::level(self.mini_pinned));
+                }
+            }
+            Message::MiniExpand => return self.close_mini(true),
+            Message::MiniClose => return self.close_mini(false),
+            Message::MiniDrag => {
+                if let Some(id) = self.mini {
+                    return window::drag(id);
+                }
+            }
+            Message::MiniMoved(id, point) => {
+                if self.mini == Some(id) {
+                    self.mini_prefs.moved(point);
+                }
+            }
             Message::NativeHandle(hwnd) => {
                 if let Some(hwnd) = hwnd {
                     drag_pulse::set_window(hwnd);
+                }
+                self.hwnd = hwnd;
+            }
+            Message::Media(command) => {
+                let http = self.http.as_ref().ok();
+                if let Screen::Main(library) = &mut self.screen {
+                    let (task, _) = library.update(library::Message::Media(command), http);
+                    return task.map(Message::Library);
                 }
             }
             Message::WindowResized(size) => {
@@ -696,8 +853,17 @@ impl App {
                 Err(failure) => self.show_toast(format!("Выйти не удалось: {}", failure.text)),
             },
 
-            Message::ConfigLoaded(prefs, plugins, discord_override) => {
+            Message::ConfigLoaded(prefs, plugins, discord_override, wave_settings, mini_prefs) => {
                 self.discord_override = discord_override;
+                // Открытый мини-плеер уже стоит где стоит: берём только раскладку
+                // и положение на следующее открытие.
+                if self.mini.is_none() {
+                    self.mini_prefs = mini_prefs;
+                }
+                if let Screen::Main(library) = &mut self.screen {
+                    library.set_wave_settings(wave_settings.clone());
+                }
+                self.wave_settings = wave_settings;
                 let rescaled = prefs.scale != self.prefs.scale;
                 // Вид меню при запуске — без анимации.
                 self.sidebar = anim::settled(prefs.sidebar_collapsed, anim::PANEL);
@@ -770,6 +936,19 @@ impl App {
                 };
                 return self.change_prefs(prefs);
             }
+            Message::SetLyricsLrclib(lyrics_lrclib) => {
+                let prefs = Prefs {
+                    lyrics_lrclib,
+                    ..self.prefs
+                };
+                let save = self.change_prefs(prefs);
+                // Открытая панель текста перезапрашивает его сразу.
+                let sync = match &mut self.screen {
+                    Screen::Main(library) => library.lyrics_sync().map(Message::Library),
+                    _ => Task::none(),
+                };
+                return Task::batch([save, sync]);
+            }
             Message::SetNormalize(normalize) => {
                 let prefs = Prefs {
                     normalize,
@@ -817,6 +996,8 @@ impl App {
                         self.covers.show(library.visible_covers(), http),
                         self.covers.want_big(library.fullscreen_cover(), http),
                         self.covers.want_big(library.wave_cover(), http),
+                        self.covers
+                            .want_big(self.mini.and(library.mini_cover()), http),
                     ]);
                     let effect = match effect {
                         Some(library::Effect::Relogin) => self.start_login(Some(
@@ -825,6 +1006,11 @@ impl App {
                         Some(library::Effect::Toast(text)) => {
                             self.show_toast(text);
                             Task::none()
+                        }
+                        Some(library::Effect::OpenMini) => self.open_mini(),
+                        Some(library::Effect::WaveSettings(settings)) => {
+                            self.wave_settings = settings;
+                            self.save_prefs()
                         }
                         None => Task::none(),
                     };
@@ -859,6 +1045,7 @@ impl App {
         }
         if let Screen::Main(library) = &mut self.screen {
             library.set_sound(prefs.quality, prefs.normalize);
+            library.set_lyrics_lrclib(prefs.lyrics_lrclib);
         }
         self.prefs = prefs;
     }
@@ -882,7 +1069,12 @@ impl App {
         }
         self.saving = true;
         Task::perform(
-            save_prefs(self.prefs, self.plugins.clone()),
+            save_prefs(
+                self.prefs,
+                self.plugins.clone(),
+                self.wave_settings.clone(),
+                self.mini_prefs,
+            ),
             Message::PrefsSaved,
         )
     }
@@ -896,14 +1088,68 @@ impl App {
         self.window.map_or_else(Task::none, task)
     }
 
+    /// Открывает мини-плеер из нижнего плеера. Главное окно сворачивается
+    /// (мини-плеер занимает его место), его возвращает «развернуть» или
+    /// крестик мини-плеера.
+    fn open_mini(&mut self) -> Task<Message> {
+        let on_main = matches!(self.screen, Screen::Main(_));
+        if !mini::should_open(on_main, self.mini.is_some()) {
+            return Task::none();
+        }
+        let (id, open) = window::open(mini::settings(&self.mini_prefs, self.mini_pinned));
+        self.mini = Some(id);
+        let http = self.http.as_ref().ok();
+        let cover = match &self.screen {
+            Screen::Main(library) => self.covers.want_big(library.mini_cover(), http),
+            _ => Task::none(),
+        };
+        Task::batch([
+            open.map(|_| Message::Noop),
+            self.with_window(|main| window::minimize(main, true)),
+            cover,
+        ])
+    }
+
+    /// Закрывает мини-плеер и возвращает главное окно (`focus` — на передний
+    /// план). Положение окна запоминается.
+    fn close_mini(&mut self, focus: bool) -> Task<Message> {
+        let Some(id) = self.mini.take() else {
+            return Task::none();
+        };
+        let restore = self.with_window(|main| {
+            if focus {
+                Task::batch([window::minimize(main, false), window::gain_focus(main)])
+            } else {
+                window::minimize(main, false)
+            }
+        });
+        Task::batch([window::close(id), restore, self.save_prefs()])
+    }
+
+    /// Мини-плеер сам закрывается, когда главное окно ушло с главного экрана
+    /// (выход из аккаунта).
+    fn sync_mini(&mut self) -> Task<Message> {
+        let on_main = matches!(self.screen, Screen::Main(_));
+        if self.closing || !mini::should_close(on_main, self.mini.is_some()) {
+            return Task::none();
+        }
+        self.close_mini(true)
+    }
+
     /// Закрывает окно. Несохранённый токен сначала отзывается, но не дольше
     /// [`REVOKE_ON_CLOSE`]: без сети окно всё равно закроется.
     fn close(&mut self) -> Task<Message> {
         // Статус в Discord очищается до закрытия окна и больше не появляется.
         self.discord = None;
+        // Мини-плеер закрывается вместе с главным окном: положение
+        // запоминается до выхода.
+        if self.mini.take().is_some() {
+            // Выходим только после записи: иначе выход оборвёт её.
+            return self.save_prefs().chain(Task::done(Message::CloseWindow));
+        }
         self.closing = true;
         let (Some(token), Ok(http)) = (self.unsaved.take(), self.http()) else {
-            return self.with_window(window::close);
+            return iced::exit();
         };
         Task::perform(
             async move {
@@ -921,6 +1167,7 @@ impl App {
         } else if let Screen::Main(library) = &mut self.screen
             && !library.close_overlay()
             && !library.close_fullscreen()
+            && !library.close_lyrics()
             && let Some(task) = library.clear_search()
         {
             return task.map(Message::Library);
@@ -1266,6 +1513,8 @@ impl App {
         );
         let mut library = library;
         library.set_sound(self.prefs.quality, self.prefs.normalize);
+        library.set_lyrics_lrclib(self.prefs.lyrics_lrclib);
+        library.set_wave_settings(self.wave_settings.clone());
         self.screen = Screen::Main(Box::new(library));
         task.map(Message::Library)
     }
@@ -1294,7 +1543,7 @@ impl App {
 
     fn subscription(&self) -> Subscription<Message> {
         let mut subscriptions = vec![
-            window::resize_events().map(|(_, size)| Message::WindowResized(size)),
+            window::resize_events().map(|(id, size)| Message::AnyResized(id, size)),
             keyboard::listen().map(Message::Key),
             // Поле поиска забирает Esc себе и только снимает фокус, а
             // `keyboard::listen` видит лишь незабранные клавиши.
@@ -1312,9 +1561,20 @@ impl App {
                 )) => Some(Message::Library(library::Message::Back)),
                 _ => None,
             }),
-            window::close_requests().map(|_| Message::CloseWindow),
+            window::close_requests().map(Message::CloseRequested),
         ];
-        let ticking = self.toast_anim.value()
+        // Положение мини-плеера запоминаем, только пока оно открыто.
+        if self.mini.is_some() {
+            subscriptions.push(iced::event::listen_with(|event, _, id| match event {
+                iced::Event::Window(window::Event::Moved(point)) => {
+                    Some(Message::MiniMoved(id, point))
+                }
+                _ => None,
+            }));
+        }
+        // Пока открыт мини-плеер, секундный тик обновляет его прогресс.
+        let ticking = self.mini.is_some()
+            || self.toast_anim.value()
             || match &self.screen {
                 Screen::Login(_) => true,
                 Screen::Problem(problem) => problem.retry_at.is_some(),
@@ -1328,6 +1588,14 @@ impl App {
         // заголовок или край, когда таймеры и подписки стоят.
         if let Screen::Main(library) = &self.screen {
             subscriptions.push(library.subscription());
+        }
+        if let Some(controls) = &self.media {
+            subscriptions.push(
+                Subscription::run_with(controls.events(), |events: &media_controls::Events| {
+                    events.stream()
+                })
+                .map(Message::Media),
+            );
         }
         Subscription::batch(subscriptions)
     }
@@ -1350,7 +1618,10 @@ impl App {
         }
     }
 
-    fn view(&self) -> Element<'_, Message> {
+    fn view(&self, window: window::Id) -> Element<'_, Message> {
+        if self.mini == Some(window) {
+            return self.mini_view();
+        }
         let turn = self.turn();
         let moment = self.moment();
         let body: Element<'_, Message> = match &self.screen {
@@ -1375,6 +1646,25 @@ impl App {
             }
         };
         self.decorate(appear(gate::frame(body), moment.page))
+    }
+
+    /// Окно мини-плеера. Вне главного экрана его нет (правило 2), поэтому
+    /// пустое: окно тут же закрывается.
+    fn mini_view(&self) -> Element<'_, Message> {
+        let Screen::Main(library) = &self.screen else {
+            return iced::widget::Space::new().into();
+        };
+        let average = library
+            .mini_cover()
+            .and_then(|uri| self.covers.big(Some(uri), self.now))
+            .and_then(|(big, _)| big.average);
+        library.mini_view(
+            &self.covers,
+            self.mini_prefs.compact,
+            self.mini_pinned,
+            average,
+            self.now,
+        )
     }
 
     /// Заголовок окна, края для изменения размера, диалог и сообщение.
@@ -1406,6 +1696,11 @@ impl App {
             }
             if let Some(panel) = library.sound_panel(&self.prefs, self.now) {
                 layers = layers.push(panel);
+            }
+            let scale = (self.prefs.scale as f32 / 100.0).max(0.1);
+            let window_size = Size::new(self.size.width / scale, self.size.height / scale);
+            if let Some(menu) = library.wave_menu(self.now, window_size, self.moment().sidebar) {
+                layers = layers.push(menu);
             }
             if let Some(overlay) = library.overlay(self.size) {
                 layers = layers.push(overlay);
@@ -1549,12 +1844,19 @@ fn plugin_settings(config: &Config) -> PluginSettings {
 }
 
 /// Запоминает вид меню, внешний вид и плагины. Остальные настройки не трогает.
-async fn save_prefs(prefs: Prefs, plugins: PluginSettings) -> Result<(), Failure> {
+async fn save_prefs(
+    prefs: Prefs,
+    plugins: PluginSettings,
+    wave_settings: api::WaveSettings,
+    mini_prefs: mini::MiniPrefs,
+) -> Result<(), Failure> {
     let path = AppDirs::discover()?.config_file();
     storage::blocking(move || {
         let mut config = Config::load(&path)?;
         prefs.write(&mut config);
         plugins.write(&mut config.plugins);
+        wave_settings.write(&mut config.wave_settings);
+        mini_prefs.write(&mut config.mini_player);
         config.save(&path)
     })
     .await

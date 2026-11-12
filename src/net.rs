@@ -81,6 +81,22 @@ pub fn http_client() -> Result<reqwest::Client, NetError> {
         .map_err(NetError::from)
 }
 
+/// Читает тело ответа не больше `limit` байт. Длиннее — ошибка: так чужой
+/// сервер не заставит держать в памяти гигабайты.
+pub async fn read_limited(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, NetError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > limit {
+            return Err(NetError::Other("ответ сервера слишком большой".to_owned()));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 /// HTTP-клиент для звука. Общего таймаута нет: трек качается долго. Вместо
 /// него таймаут на тишину между кусками ответа. Редиректы разрешены: запросы
 /// без тела и без токена.

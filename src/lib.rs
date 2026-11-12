@@ -5,6 +5,8 @@
 pub mod api;
 pub mod auth;
 pub mod discord;
+pub mod lyrics;
+pub mod media_controls;
 pub mod net;
 pub mod player;
 pub mod plugins;

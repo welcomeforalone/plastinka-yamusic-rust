@@ -15,15 +15,12 @@ use serde_json::Value;
 use sha2::Sha256;
 
 use super::tracks::plausible_id;
-use super::{API_BASE, ApiError, MUSIC_CLIENT, auth_header};
+use super::{API_BASE, ApiError, MUSIC_CLIENT, SIGN_KEY, auth_header};
 use crate::net::NetError;
 
 /// Соль подписи прямой ссылки.
 const SIGN_SALT: &str = "XGRlBW9FXlekgbPrRHuSiA";
 
-/// Ключ подписи `get-file-info` (общий для приложений Яндекса, не секрет
-/// пользователя).
-const FILE_INFO_KEY: &str = "p93jhgh689SBReK6ghtw62";
 /// Транспорт без шифрования: зашифрованный (`encraw`) не используем.
 const FILE_INFO_TRANSPORT: &str = "raw";
 
@@ -261,7 +258,7 @@ fn file_info_sign(ts: &str, track_id: &str, quality: &str, codecs: &str) -> Stri
         "{ts}{track_id}{quality}{}{FILE_INFO_TRANSPORT}",
         codecs.replace(',', "")
     );
-    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(FILE_INFO_KEY.as_bytes()) else {
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(SIGN_KEY.as_bytes()) else {
         return String::new();
     };
     mac.update(message.as_bytes());
@@ -406,7 +403,7 @@ fn pick_variant(status: StatusCode, body: &str) -> Result<(String, u32), StreamE
 }
 
 /// Адрес на хосте Яндекса по https. Ссылки на чужие хосты не открываем.
-fn allowed_url(url: &str) -> bool {
+pub(super) fn allowed_url(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("https://") else {
         return false;
     };

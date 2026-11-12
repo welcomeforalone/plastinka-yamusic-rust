@@ -8,8 +8,12 @@
 //! только видимые строки.
 
 mod browse;
+mod history_screen;
+mod lyrics;
+mod mini;
 mod pages;
 mod plugins;
+mod queue_panel;
 mod wave;
 
 use std::collections::HashSet;
@@ -25,8 +29,9 @@ use iced::{Alignment, Border, Color, Element, Length, Padding, Point, Subscripti
 use super::Message as App;
 use super::Message::Library as Lib;
 use super::anim;
-use super::covers::{Art, Covers};
+use super::covers::{Art, Covers, Grade};
 use super::filter;
+use super::history;
 use super::icons::{Icon, icon, spinner};
 use super::marquee::{marquee, marquee_element};
 use super::queue::{self, ListKey, Queue, Rng};
@@ -38,6 +43,7 @@ use super::{Dialog, Failure, FailureKind, Moment, Prefs, Zoom};
 use crate::api::{
     self, AccountStatus, AudioQuality, Codec, PlaybackPermit, SearchKind, StreamInfo, Track,
 };
+use crate::media_controls;
 use crate::player::{self as audio, Command, PlayError, Sound};
 use crate::plugins::PluginSettings;
 use crate::plugins::fckcensor::{Censor, Decision};
@@ -75,6 +81,9 @@ const SKELETON_DELAY: Duration = Duration::from_millis(300);
 /// Ширина меню: развёрнутого и свёрнутого.
 pub const SIDEBAR: f32 = 232.0;
 pub const SIDEBAR_COLLAPSED: f32 = 72.0;
+/// Боковой отступ содержимого меню и сторона кнопки сворачивания.
+const SIDEBAR_PAD: f32 = 12.0;
+const TOGGLE: f32 = 32.0;
 /// Уже этой ширины меню показывает только иконки (пока сворачивается).
 const SIDEBAR_ICONS_BELOW: f32 = 150.0;
 /// Кнопки и перемотка в середине плеера.
@@ -150,6 +159,7 @@ pub enum Section {
     Playlists,
     Albums,
     Artists,
+    History,
     Settings,
 }
 
@@ -162,6 +172,7 @@ impl Section {
             Self::Playlists => "Плейлисты",
             Self::Albums => "Альбомы",
             Self::Artists => "Исполнители",
+            Self::History => "История",
             Self::Settings => "Настройки",
         }
     }
@@ -174,6 +185,7 @@ impl Section {
             Self::Playlists => Icon::Playlist,
             Self::Albums => Icon::Album,
             Self::Artists => Icon::Artist,
+            Self::History => Icon::History,
             Self::Settings => Icon::Settings,
         }
     }
@@ -261,9 +273,26 @@ pub enum Message {
     Plugin(plugins::Msg),
     /// «Моя волна».
     Wave(wave::Msg),
+    /// Текст песни: панель, загрузка.
+    Lyrics(lyrics::Msg),
     /// Сердце: поставить или снять «Нравится» треку (настоящему треку из
     /// списка, не его подмене FckCensor).
     ToggleLike(Track),
+    /// Серверная история: ответ (номер запроса), «Повторить», играть трек
+    /// (день, группа, номер в группе).
+    HistoryLoaded(u64, Result<Arc<Vec<api::HistoryDay>>, Failure>),
+    HistoryReload,
+    PlayHistoryItem(usize, usize, usize),
+    /// Играть с трека очереди (панель «Очередь»).
+    PlayQueueAt(usize),
+    /// Играть трек из «Недавно играли» (номер в истории).
+    PlayHistory(usize),
+    /// Открыть мини-плеер (окно открывает приложение: см. `Effect::OpenMini`).
+    MiniRequest,
+    /// Команда системного плеера: медиаклавиши, оверлей, MPRIS.
+    Media(media_controls::Command),
+    /// Перемотка на позицию (секунды), без ползунка.
+    SeekTo(f32),
     /// Ответ сервера на сердце: трек, какое состояние просили, результат.
     LikeDone(Track, bool, Result<(), Failure>),
     Noop,
@@ -271,6 +300,10 @@ pub enum Message {
 
 /// Что главное окно просит сделать приложение.
 pub enum Effect {
+    /// Открыть окно мини-плеера.
+    OpenMini,
+    /// Выбор в меню настроек волны изменился: запомнить в `config.toml`.
+    WaveSettings(api::WaveSettings),
     /// Токен больше не действует.
     Relogin,
     /// Всплывающее сообщение.
@@ -293,6 +326,8 @@ struct Player {
     /// Звук ждёт сеть.
     buffering: bool,
     position: f32,
+    /// Когда пришла последняя позиция: от неё текст песни ведёт время сам.
+    position_at: Instant,
     /// Куда отпустят ползунок перемотки, пока его тянут.
     seeking: Option<f32>,
     volume: f32,
@@ -313,6 +348,12 @@ struct Player {
 }
 
 impl Player {
+    /// Новая позиция из события плеера, перемотки или начала трека.
+    fn set_position(&mut self, seconds: f32) {
+        self.position = seconds;
+        self.position_at = Instant::now();
+    }
+
     fn gain(&self) -> f32 {
         if self.muted { 0.0 } else { self.volume }
     }
@@ -386,6 +427,18 @@ pub struct Library {
     chosen: Option<String>,
     /// «Моя волна»: сессия, данные очереди, события обратной связи.
     wave: Wave,
+    /// Текст песни: панель справа и загрузка.
+    lyrics: lyrics::State,
+    /// Последние прослушанные треки за сеанс (панель «Очередь»).
+    history: history::History,
+    /// Настоящий трек, который сейчас запущен: когда он сменится другим, он
+    /// уходит в историю, если успел зазвучать.
+    now_playing: Option<Track>,
+    /// Серверная история (вкладка «История») и номер её последнего запроса.
+    server_history: history_screen::HistoryLoad,
+    history_serial: u64,
+    /// Сообщения Яндексу о прослушивании (`play-audio`).
+    plays: api::PlayTracker,
 }
 
 /// Анимации плеера.
@@ -487,7 +540,9 @@ fn still_volume(volume: f32) -> Animation<f32> {
 /// Отладочный хук `PLASTINKA_TEST_START` (только с тестовыми хуками, один
 /// раз за запуск): сообщения, которые окно получило бы от пользователя.
 /// `liked-wave` — играть «Мне нравится» и открыть «Мою волну»; `wave` —
-/// запустить «Мою волну». Ничего не сохраняет.
+/// запустить «Мою волну»; `lyrics` — играть «Мне нравится» и открыть панель
+/// текста; `queue` — то же с панелью очереди; `fullscreen` — то же с полноэкранным плеером; `wave-menu` —
+/// запустить «Мою волну» и открыть меню её настроек. Ничего не сохраняет.
 #[cfg(debug_assertions)]
 fn test_start() -> Vec<Task<Message>> {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -499,6 +554,28 @@ fn test_start() -> Vec<Task<Message>> {
         Ok("liked-wave") => vec![
             Task::done(Message::PlayList(ListKey::Liked)),
             Task::done(Message::Nav(Section::Wave)),
+        ],
+        Ok("lyrics") => vec![
+            Task::done(Message::PlayList(ListKey::Liked)),
+            Task::done(Message::Lyrics(lyrics::Msg::Toggle)),
+        ],
+        Ok("history") => vec![Task::done(Message::Nav(Section::History))],
+        Ok("queue") => vec![
+            Task::done(Message::PlayList(ListKey::Liked)),
+            Task::done(Message::Lyrics(lyrics::Msg::ToggleQueue)),
+        ],
+        Ok("fullscreen") => vec![
+            Task::done(Message::PlayList(ListKey::Liked)),
+            Task::done(Message::Fullscreen(true)),
+        ],
+        Ok("mini") => vec![
+            Task::done(Message::PlayList(ListKey::Liked)),
+            Task::done(Message::MiniRequest),
+        ],
+        Ok("wave-menu") => vec![
+            Task::done(Message::Nav(Section::Wave)),
+            Task::done(Message::Wave(WaveMsg::Start)),
+            Task::done(Message::Wave(WaveMsg::Menu)),
         ],
         Ok("wave") => vec![
             Task::done(Message::Nav(Section::Wave)),
@@ -551,6 +628,7 @@ impl Library {
                 loaded: false,
                 buffering: false,
                 position: 0.0,
+                position_at: Instant::now(),
                 seeking: None,
                 volume: START_VOLUME,
                 muted: false,
@@ -584,10 +662,19 @@ impl Library {
             replace: None,
             chosen: None,
             wave: Wave::new(),
+            lyrics: lyrics::State::new(),
+            history: history::History::default(),
+            now_playing: None,
+            server_history: history_screen::HistoryLoad::Idle,
+            history_serial: 0,
+            plays: api::PlayTracker::default(),
         };
         let task = library.load_likes(http);
         let plugins = library.plugins_changed(plugins);
-        (library, Task::batch([task, plugins]))
+        // Серверная история нужна панели «Очередь» («Недавно играли»): один
+        // раз в фоне, ошибка тихая.
+        let history = library.history_load(http);
+        (library, Task::batch([task, plugins, history]))
     }
 
     pub fn token(&self) -> Arc<StoredToken> {
@@ -673,6 +760,8 @@ impl Library {
         matches!(self.likes, Likes::Loading { skeleton: true })
             || (self.player.playing && self.player.buffering)
             || self.loading_on_screen()
+            || self.lyrics_loading()
+            || self.history_loading()
             || self.wave_animating()
     }
 
@@ -829,7 +918,9 @@ impl Library {
         let pump = self.pump();
         self.wave_pump();
         let queued = Task::batch(std::mem::take(&mut self.tasks));
-        (Task::batch([task, pump, queued]), effect)
+        // Текст песни: открыли панель или сменился трек — запрашиваем.
+        let lyrics = self.lyrics_sync();
+        (Task::batch([task, pump, queued, lyrics]), effect)
     }
 
     fn handle(
@@ -838,7 +929,10 @@ impl Library {
         http: Option<&reqwest::Client>,
     ) -> (Task<Message>, Option<Effect>) {
         let effect = match message {
-            Message::Nav(section) => return (self.nav(section, http), None),
+            Message::Nav(section) => {
+                self.close_wave_menu();
+                return (self.nav(section, http), None);
+            }
             Message::Open(target) => {
                 // Из полноэкранного плеера (щелчок по исполнителю) — к
                 // странице: плеер сворачивается. Из меню трека — меню
@@ -973,6 +1067,28 @@ impl Library {
                 if !open || self.current().is_some() {
                     self.fullscreen.go_mut(open, Instant::now());
                 }
+                None
+            }
+            Message::Lyrics(msg) => return self.lyrics_msg(msg),
+            Message::PlayQueueAt(index) => self.play_queue_at(index),
+            Message::HistoryLoaded(serial, result) => self.history_loaded(serial, result),
+            Message::HistoryReload => return (self.history_load(http), None),
+            Message::PlayHistoryItem(day, item, index) => self.play_history_item(day, item, index),
+            Message::PlayHistory(index) => self.play_history(index),
+            Message::MiniRequest => return (Task::none(), Some(Effect::OpenMini)),
+            Message::Media(command) => {
+                return match self.media_message(command) {
+                    Some(message) => self.update(message, http),
+                    None => (Task::none(), None),
+                };
+            }
+            Message::SeekTo(position) => {
+                let end = self
+                    .current()
+                    .and_then(|track| track.duration)
+                    .map(|duration| duration.as_secs_f32());
+                let position = position.max(0.0);
+                self.seek_to(end.map_or(position, |end| position.min(end)));
                 None
             }
             Message::Previous => match self.queue.as_ref().map(|queue| queue.current) {
@@ -1194,14 +1310,79 @@ impl Library {
         ))
     }
 
+    /// Новый трек запущен: считается играющим для сообщений Яндексу. Шлём
+    /// только про поток Яндекса: свой файл и поиск версии без цензуры нет.
+    fn report_begin(&mut self, track: &Track, decision: &Decision) {
+        let (id, reportable) = match decision {
+            Decision::Play(Sound::Track(id)) => (id.clone(), true),
+            _ => (track.id.clone(), false),
+        };
+        let shown = self.shown(track);
+        let length = shown.duration.or(track.duration);
+        // У замены FckCensor другой трек: альбом оригинала к нему не относится.
+        let album = (id == track.id).then(|| track.album_id.clone()).flatten();
+        self.plays.begin(
+            &id,
+            album.as_deref(),
+            length,
+            reportable,
+            api::new_play_id(),
+        );
+    }
+
+    /// Звук пошёл: сообщение о начале трека.
+    fn report_start(&mut self) {
+        let uid = self.status.account().uid;
+        if let Some(report) = self.plays.sounded(uid) {
+            self.send_play_report(report);
+        }
+    }
+
+    /// Трек сменился, кончился или встал: сообщение о сыгранном. `ended` —
+    /// доигран до конца (сыграно всё), иначе по позиции.
+    fn report_finish(&mut self, ended: bool) {
+        let played = if ended {
+            self.current_duration().unwrap_or(self.player.position)
+        } else {
+            self.player.position
+        };
+        let uid = self.status.account().uid;
+        if let Some(report) = self.plays.finish(uid, played) {
+            self.send_play_report(report);
+        }
+    }
+
+    /// Отправка в фоне; ошибки молча (строка в stderr), игре не мешают.
+    fn send_play_report(&mut self, report: api::PlayReport) {
+        let Some(http) = self.http.clone() else {
+            return;
+        };
+        let token = self.token.access_token.clone();
+        self.tasks.push(Task::perform(
+            api::send_quietly(http, token, report),
+            |()| Message::Noop,
+        ));
+    }
+
     /// Запускает трек `track` (место `index` в очереди) с секунды `from`.
     fn launch(&mut self, index: usize, track: Track, from: f32) -> Option<Effect> {
         let decision = self.decide(&track);
         if decision == Decision::Silent {
             return None;
         }
+        // Прежний трек закончил играть: сообщаем Яндексу, сколько сыграно
+        // (до `report_begin`: тот заменяет играющий трек).
+        self.report_finish(false);
+        self.report_begin(&track, &decision);
         // Прежний трек волны уходит: событие `skip`, если он успел зазвучать.
         self.wave_leave(Leave::Skip);
+        // Сменившийся трек — в историю (если он зазвучал и это не он же).
+        if let Some(previous) = self.now_playing.take()
+            && previous.id != track.id
+        {
+            self.history.record(previous, self.player.sounded);
+        }
+        self.now_playing = Some(track.clone());
         if let Some(queue) = &mut self.queue {
             queue.current = index;
         }
@@ -1222,7 +1403,7 @@ impl Library {
         player.playing = true;
         player.loaded = true;
         player.buffering = true;
-        player.position = from;
+        player.set_position(from);
         player.seeking = None;
         player.stream = None;
         player.sounded = false;
@@ -1314,6 +1495,57 @@ impl Library {
         }
     }
 
+    /// Пропуск для системного плеера: есть, только пока Плюс подтверждён.
+    pub fn media_permit(&self) -> Option<PlaybackPermit> {
+        self.status.playback_permit()
+    }
+
+    /// Что делать окну по команде системного плеера. `None` — ничего (уже
+    /// играет, уже на паузе).
+    fn media_message(&self, command: media_controls::Command) -> Option<Message> {
+        use media_controls::Command as C;
+        let seek = |forward: bool, by: f32| {
+            let by = if forward { by } else { -by };
+            Message::SeekTo(self.player.position + by)
+        };
+        match command {
+            C::Play => (!self.player.playing).then_some(Message::TogglePlay),
+            C::Pause | C::Stop => self.player.playing.then_some(Message::TogglePlay),
+            C::Toggle => Some(Message::TogglePlay),
+            C::Next => Some(Message::Next),
+            C::Previous => Some(Message::Previous),
+            C::SeekTo(position) => Some(Message::SeekTo(position)),
+            C::SeekBy(forward, by) => Some(seek(forward, by)),
+        }
+    }
+
+    /// Что сейчас играет — для системного плеера (медиаклавиши, оверлей).
+    pub fn media_state(&self) -> media_controls::State {
+        // Трек остановлен (конец, ошибка) — как «ничего не играет».
+        let (Some(shown), Some(current)) = (self.current_shown(), self.current()) else {
+            return media_controls::State::default();
+        };
+        if !self.player.loaded {
+            return media_controls::State::default();
+        }
+        let local = matches!(self.decide(current), Decision::Play(Sound::File(_)));
+        media_controls::State {
+            track: Some(media_controls::Track {
+                id: shown.id.clone(),
+                title: shown.display_title(),
+                artists: shown.artists_text(),
+                album: shown.album_title.clone().unwrap_or_default(),
+                // Для своего файла чужая обложка не нужна.
+                cover: if local { None } else { shown.cover_uri.clone() },
+                duration_ms: shown
+                    .duration
+                    .and_then(|duration| u64::try_from(duration.as_millis()).ok()),
+            }),
+            playing: self.player.playing,
+            position_ms: (self.player.position.max(0.0) * 1000.0).round() as u64,
+        }
+    }
+
     /// Закрывает панель «Настройки звука». `false` — она и не была открыта.
     pub fn close_sound_panel(&mut self) -> bool {
         let open = self.motion.sound_panel.value();
@@ -1396,6 +1628,8 @@ impl Library {
 
     /// Трек остановлен: после конца или ошибки его надо запускать заново.
     fn halt(&mut self) {
+        // Трек остановился (конец, ошибка, смена): сообщаем о сыгранном.
+        self.report_finish(false);
         self.player.playing = false;
         self.player.loaded = false;
         self.player.buffering = false;
@@ -1419,7 +1653,7 @@ impl Library {
     }
 
     fn seek_to(&mut self, position: f32) {
-        self.player.position = position;
+        self.player.set_position(position);
         if self.player.loaded {
             self.player.seeks = self.player.seeks.wrapping_add(1);
             self.player.buffering = self.player.playing;
@@ -1437,19 +1671,22 @@ impl Library {
                 stream,
                 seeks,
             } if id == session && seeks >= self.player.seeks => {
-                self.player.position = position.as_secs_f32();
+                self.player.set_position(position.as_secs_f32());
                 self.player.buffering = buffering;
                 self.player.stream = stream;
                 if !buffering {
                     self.player.skipped = 0;
                     if !self.player.sounded {
                         self.wave_sounded();
+                        self.report_start();
                     }
                     self.player.sounded = true;
                 }
                 None
             }
             audio::Event::Ended { id } if id == session => {
+                // Доигран целиком: сыграно — вся длительность.
+                self.report_finish(true);
                 self.wave_leave(Leave::Finish);
                 self.halt();
                 self.finished()
@@ -1473,7 +1710,7 @@ impl Library {
             None if self.in_wave() => self.wave_exhausted(),
             None => {
                 // Очередь кончилась: трек остаётся выбранным, с начала.
-                self.player.position = 0.0;
+                self.player.set_position(0.0);
                 None
             }
         }
@@ -1555,6 +1792,7 @@ impl Library {
             (None, Section::Liked) => self.liked(covers, turn),
             (None, Section::Wave) => self.wave_view(covers, turn, moment.now, prefs.visualizer),
             (None, Section::Settings) => self.settings(prefs),
+            (None, Section::History) => self.history_view(covers, turn),
             (None, Section::Search) => self.search_view(covers, turn, moment.now),
             (None, Section::Playlists | Section::Albums | Section::Artists) => {
                 self.collection_view(covers, turn, moment.now)
@@ -1574,8 +1812,12 @@ impl Library {
             SIDEBAR
         };
         let quality = quality_for(width - sidebar, compact);
+        let page: Element<'a, App> = match self.lyrics_panel(covers, moment.now, turn) {
+            Some(lyrics) => row![panel, lyrics].height(Length::Fill).into(),
+            None => panel.into(),
+        };
         let right = column![
-            panel,
+            page,
             widgets::divider(),
             self.player_bar(
                 covers,
@@ -1618,7 +1860,7 @@ impl Library {
         }
         let track = self.current_shown();
         let big = track.and_then(|track| covers.big(track.cover_uri.as_deref(), now));
-        let small = track.map(|track| cover_art(covers, track));
+        let small = track.map(|track| player_art(covers, track));
 
         // Фон: размытая обложка. Пока её нет — чёрный, у трека без обложки —
         // цвета заглушки под вуалью.
@@ -1699,19 +1941,7 @@ impl Library {
         ]
         .spacing(28)
         .width(side);
-        let lyrics = center(
-            column![
-                icon(Icon::Lyrics, 40.0, theme::TEXT_TERTIARY),
-                theme::line("Текст появится позже", Style::Title, theme::TEXT_PRIMARY),
-                theme::line(
-                    "Тексты песен добавим на одном из следующих этапов",
-                    Style::Secondary,
-                    theme::TEXT_SECONDARY,
-                ),
-            ]
-            .spacing(12)
-            .align_x(Alignment::Center),
-        );
+        let lyrics = self.lyrics_fullscreen(turn);
         let body = row![about, lyrics]
             .spacing(FULLSCREEN_SIDE)
             .padding([0.0, FULLSCREEN_SIDE])
@@ -1761,17 +1991,24 @@ impl Library {
     fn sidebar(&self, width: f32) -> Element<'_, App> {
         let compact = width < SIDEBAR_ICONS_BELOW;
         let item = |section: Section| nav_item(section, self.section == section, compact);
-        // Кнопка сворачивания появляется, когда мышь над шапкой меню.
+        // Кнопка сворачивания появляется, когда мышь над шапкой меню. Её место
+        // зависит от ширины плавно, а не от смены вида: в раскрытом меню она у
+        // правого края с тем же отступом, что у пунктов (12), в свёрнутом —
+        // по центру узкой колонки; пока меню едет, не прыгает.
+        let share = ((width - SIDEBAR_COLLAPSED) / (SIDEBAR - SIDEBAR_COLLAPSED)).clamp(0.0, 1.0);
+        let toggle_left = (width - 2.0 * SIDEBAR_PAD - TOGGLE - 8.0 * (1.0 - share)).max(0.0);
+        let toggle = container(sidebar_toggle(compact))
+            .padding(Padding::default().left(toggle_left))
+            .width(Length::Fill)
+            .height(48)
+            .center_y(48);
         let brand: Element<'_, App> = if compact {
             hover(
                 container(widgets::logo(28.0))
                     .center_x(Length::Fill)
                     .height(48)
                     .center_y(48),
-                container(sidebar_toggle(true))
-                    .center_x(Length::Fill)
-                    .height(48)
-                    .center_y(48),
+                toggle,
             )
         } else {
             hover(
@@ -1785,9 +2022,7 @@ impl Library {
                 .width(Length::Fill)
                 .height(48)
                 .align_y(Alignment::Center),
-                row![Space::new().width(Length::Fill), sidebar_toggle(false)]
-                    .height(48)
-                    .align_y(Alignment::Center),
+                toggle,
             )
         };
         let collection: Element<'_, App> = if compact {
@@ -1816,6 +2051,7 @@ impl Library {
             item(Section::Playlists),
             item(Section::Albums),
             item(Section::Artists),
+            item(Section::History),
             Space::new().height(Length::Fill),
             item(Section::Settings),
             Space::new().height(8),
@@ -1825,9 +2061,9 @@ impl Library {
         .width(width)
         .padding(Padding {
             top: 4.0,
-            right: 12.0,
+            right: SIDEBAR_PAD,
             bottom: 12.0,
-            left: 12.0,
+            left: SIDEBAR_PAD,
         });
         container(menu).width(width).clip(true).into()
     }
@@ -1835,6 +2071,8 @@ impl Library {
     /// Идёт ли переход внутри главного окна.
     pub fn transitioning(&self, now: Instant) -> bool {
         self.motion.running(now)
+            || self.wave_menu_running(now)
+            || self.lyrics_transitioning(now)
             || self.fullscreen.is_animating(now)
             || self.glide.is_some()
             || self.wave_tint_running(now)
@@ -2048,6 +2286,7 @@ impl Library {
                 theme::line("Настройки", Style::Display, theme::TEXT_PRIMARY),
                 section_block("Внешний вид", appearance(prefs)),
                 section_block("Звук", sound_block(prefs)),
+                section_block("Тексты песен", lyrics_block(prefs)),
                 section_block("Discord", discord_block(prefs)),
                 section_block("Плагины", self.plugins_block()),
                 section_block("Аккаунт", account_card.into()),
@@ -2329,11 +2568,42 @@ impl Library {
                 "Меню трека",
                 tooltip::Position::Top,
             ))
-            .push(widgets::icon_button(Icon::Lyrics, Size::S, false, None));
+            .push(widgets::with_tooltip(
+                widgets::icon_button(
+                    Icon::Lyrics,
+                    Size::S,
+                    self.lyrics_open(),
+                    // В полноэкранном плеере текст всегда на виду.
+                    if fullscreen {
+                        None
+                    } else {
+                        on(Message::Lyrics(lyrics::Msg::Toggle))
+                    },
+                ),
+                "Текст песни",
+                tooltip::Position::Top,
+            ));
         if !compact {
             extras = extras
-                .push(widgets::icon_button(Icon::Queue, Size::S, false, None))
-                .push(widgets::icon_button(Icon::MiniPlayer, Size::S, false, None));
+                .push(widgets::with_tooltip(
+                    widgets::icon_button(
+                        Icon::Queue,
+                        Size::S,
+                        self.queue_open(),
+                        if fullscreen {
+                            None
+                        } else {
+                            on(Message::Lyrics(lyrics::Msg::ToggleQueue))
+                        },
+                    ),
+                    "Очередь",
+                    tooltip::Position::Top,
+                ))
+                .push(widgets::with_tooltip(
+                    widgets::icon_button(Icon::MiniPlayer, Size::S, false, Some(App::MiniOpen)),
+                    "Мини-плеер",
+                    tooltip::Position::Top,
+                ));
         }
         let extras = container(
             extras
@@ -2968,6 +3238,35 @@ fn sound_block<'a>(prefs: &Prefs) -> Element<'a, App> {
         .into()
 }
 
+/// «Тексты песен»: запасной источник LRCLib.
+fn lyrics_block<'a>(prefs: &Prefs) -> Element<'a, App> {
+    let row = row![
+        column![
+            theme::line(
+                "Искать текст в LRCLib",
+                Style::BodyStrong,
+                theme::TEXT_PRIMARY
+            ),
+            theme::label(
+                "Если у Яндекса текста нет. В lrclib.net уходят название и исполнитель трека",
+                Style::Caption,
+                theme::TEXT_TERTIARY
+            ),
+        ]
+        .spacing(2)
+        .width(Length::Fill),
+        switch(prefs.lyrics_lrclib, App::SetLyricsLrclib),
+    ]
+    .spacing(16)
+    .align_y(Alignment::Center)
+    .padding([12, 14]);
+    container(row)
+        .padding(6)
+        .width(Length::Fill)
+        .style(|_| card_style())
+        .into()
+}
+
 /// Переключатель настройки в цветах акцента.
 fn switch<'a>(on: bool, on_toggle: impl Fn(bool) -> App + 'a) -> Element<'a, App> {
     toggler(on)
@@ -3101,6 +3400,16 @@ fn fill<'a>(style: impl Fn() -> container::Style + 'a) -> Element<'a, App> {
         .into()
 }
 
+/// Обложка трека в плеере: 300×300, с запасом под масштаб экрана (56
+/// логических пикселей при 200 % — 112 физических, а в маленькой копии их 100).
+fn player_art<'a>(covers: &'a Covers, track: &Track) -> CoverArt<'a> {
+    match covers.art_of(Grade::Medium, track.cover_uri.as_deref()) {
+        Art::Ready(handle, opacity) => CoverArt::Image(handle, opacity),
+        Art::Loading => CoverArt::Loading,
+        Art::Missing => CoverArt::Placeholder(theme::cover_placeholder(&track.id)),
+    }
+}
+
 fn crossfade_cover<'a>(
     covers: &'a Covers,
     track: &Track,
@@ -3109,8 +3418,8 @@ fn crossfade_cover<'a>(
     size: f32,
     radius: f32,
 ) -> Element<'a, App> {
-    let current = cover_art(covers, track);
-    let previous = from.map(|from| cover_art(covers, from));
+    let current = player_art(covers, track);
+    let previous = from.map(|from| player_art(covers, from));
     match (current, previous) {
         (CoverArt::Image(handle, opacity), Some(CoverArt::Image(old, _))) if shown < 1.0 => {
             iced::widget::stack![
@@ -3135,14 +3444,15 @@ fn cover_art<'a>(covers: &'a Covers, track: &Track) -> CoverArt<'a> {
 /// Кнопка «свернуть / развернуть меню». Фон непрозрачный: в свёрнутом меню
 /// кнопка ложится поверх логотипа.
 fn sidebar_toggle<'a>(collapsed: bool) -> Element<'a, App> {
+    // Шеврон Lucide 16 px строго по центру круга.
     let (name, tip) = if collapsed {
         (Icon::Forward, "Развернуть меню")
     } else {
         (Icon::Back, "Свернуть меню")
     };
-    let toggle = button(center(icon(name, 18.0, theme::TEXT_PRIMARY)))
-        .width(32)
-        .height(32)
+    let toggle = button(center(icon(name, 16.0, theme::TEXT_PRIMARY)))
+        .width(TOGGLE)
+        .height(TOGGLE)
         .padding(0)
         .style(|_, status| button::Style {
             background: Some(
@@ -3622,6 +3932,90 @@ fn skeleton<'a>(turn: f32) -> Element<'a, App> {
 mod tests {
     use super::*;
 
+    /// Библиотека без сети и звука: плеер не создаётся, `launch` сразу
+    /// «останавливается», но запись истории и сообщения о прослушивании идут
+    /// так же, как в работе.
+    pub(super) fn test_library() -> Library {
+        let status = api::sample_plus_status();
+        let permit = status.playback_permit().unwrap();
+        let token = Arc::new(StoredToken {
+            access_token: "test".to_owned(),
+            refresh_token: None,
+            expires_at: None,
+        });
+        Library::new(
+            token,
+            status,
+            permit,
+            800.0,
+            None,
+            &PluginSettings::default(),
+        )
+        .0
+    }
+
+    fn plain_track(id: &str) -> Track {
+        Track {
+            id: id.to_owned(),
+            title: Some(format!("Трек {id}")),
+            version: None,
+            artists: Vec::new(),
+            album_id: None,
+            album_title: None,
+            duration: None,
+            available: true,
+            cover_uri: None,
+            warning: api::Warning::None,
+            loudness: None,
+            lyrics: None,
+        }
+    }
+
+    fn history_ids(library: &Library) -> Vec<String> {
+        library
+            .history
+            .tracks()
+            .map(|track| track.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn history_records_every_change_of_a_track_that_sounded() {
+        let mut library = test_library();
+        let list: Vec<Track> = ["1", "2", "3", "4", "5"]
+            .iter()
+            .map(|id| plain_track(id))
+            .collect();
+        library.queue = Some(Queue::new(ListKey::Liked, Arc::new(list.clone()), 0));
+        library.launch(0, plain_track("1"), 0.0);
+        // Трек не зазвучал: смена его в историю не кладёт.
+        library.launch(1, plain_track("2"), 0.0);
+        assert!(history_ids(&library).is_empty());
+        // Выбор из списка.
+        library.player.sounded = true;
+        library.launch(2, plain_track("3"), 0.0);
+        assert_eq!(history_ids(&library), ["2"]);
+        // «Следующий».
+        library.player.sounded = true;
+        let _ = library.update(Message::Next, None);
+        assert_eq!(history_ids(&library), ["2", "3"]);
+        // «Предыдущий» (позиция в начале трека: переход, а не перемотка).
+        library.player.sounded = true;
+        let _ = library.update(Message::Previous, None);
+        assert_eq!(history_ids(&library), ["2", "3", "4"]);
+        // Автопереход по концу трека.
+        library.player.sounded = true;
+        let session = library.player.session;
+        let _ = library.audio_event(audio::Event::Ended { id: session });
+        assert_eq!(history_ids(&library), ["2", "3", "4", "3"]);
+        // Тот же трек сам себя в историю не кладёт.
+        library.player.sounded = true;
+        let current = library.current().cloned().unwrap();
+        let index = library.queue.as_ref().unwrap().current;
+        library.launch(index, current, 0.0);
+        assert_eq!(history_ids(&library), ["2", "3", "4", "3"]);
+    }
+
     #[test]
     fn quality_text_names_codec() {
         let info = |codec, kbps| StreamInfo { codec, kbps };
@@ -3695,6 +4089,7 @@ mod tests {
             cover_uri: None,
             warning: api::Warning::None,
             loudness: None,
+            lyrics: None,
         }
     }
 

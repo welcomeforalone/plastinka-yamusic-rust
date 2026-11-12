@@ -376,9 +376,23 @@ impl Library {
         let mut uris: Vec<(Grade, &str)> = self
             .current_shown()
             .and_then(|track| track.cover_uri.as_deref())
-            .map(|uri| (Grade::Small, uri))
+            .map(|uri| (Grade::Medium, uri))
             .into_iter()
             .collect();
+        // Вкладка «История».
+        if self.section == Section::History && self.stack.is_empty() {
+            uris.extend(
+                self.history_covers()
+                    .into_iter()
+                    .map(|uri| (Grade::Small, uri)),
+            );
+        }
+        // Строки панели «Очередь».
+        uris.extend(
+            self.queue_covers()
+                .into_iter()
+                .map(|uri| (Grade::Small, uri)),
+        );
         let columns = self.grid_columns();
         let cards = |range: std::ops::Range<usize>| (range.start * columns)..(range.end * columns);
         if let Some(entry) = self.stack.last() {

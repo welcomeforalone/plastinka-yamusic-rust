@@ -15,6 +15,7 @@ use iced::gradient::Linear;
 use iced::widget::{Space, button, center, column, container, row, stack};
 use iced::{Alignment, Background, Border, Color, Degrees, Element, Length, Task, mouse};
 
+use super::super::anim;
 use super::super::covers::Covers;
 use super::super::icons::{Icon, icon, spinner};
 use super::super::marquee::marquee;
@@ -27,10 +28,11 @@ use super::{
     fill, plugins, quality_badge, sentence, state_block,
 };
 use crate::api::{
-    self, QUEUE_LEN, Track, WaveBatch, WaveColors, WaveEvent, WaveTracks, fetch_wave_tracks,
-    send_wave_feedback, start_wave,
+    self, Activity, Diversity, Language, Mood, QUEUE_LEN, Track, WaveBatch, WaveColors, WaveEvent,
+    WaveSettings, WaveTracks, fetch_activities, fetch_wave_tracks, send_wave_feedback, start_wave,
 };
 use crate::plugins::vibe;
+use iced::animation::Animation;
 use iced::time::Instant;
 
 /// Сколько последних идентификаторов сессии помним для отсева повторов.
@@ -70,6 +72,47 @@ pub enum Msg {
     Dislike,
     DislikeDone(Result<(), Failure>),
     FeedbackDone,
+    /// Таблетка источника: открыть или закрыть меню настроек волны.
+    Menu,
+    CloseMenu,
+    /// Ответ со списком занятий.
+    Stations(Result<Vec<Activity>, Failure>),
+    /// Выбор в меню.
+    Pick(Pick),
+}
+
+/// Выбор в меню настроек волны; `None` — «по умолчанию».
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pick {
+    Activity(Option<Activity>),
+    Diversity(Option<Diversity>),
+    Mood(Option<Mood>),
+    Language(Option<Language>),
+    /// Кнопка «Сбросить».
+    Reset,
+}
+
+/// Занятия для меню: грузятся при первом открытии меню. Не загрузились —
+/// раздел скрыт, при следующем открытии пробуем ещё раз.
+#[derive(Clone)]
+enum Stations {
+    Idle,
+    Loading,
+    Ready(Vec<Activity>),
+    Failed,
+}
+
+/// Настройки после выбора: прежние, если выбор ничего не меняет.
+fn picked(current: &WaveSettings, pick: Pick) -> WaveSettings {
+    let mut next = current.clone();
+    match pick {
+        Pick::Activity(activity) => next.activity = activity,
+        Pick::Diversity(diversity) => next.diversity = diversity,
+        Pick::Mood(mood) => next.mood = mood,
+        Pick::Language(language) => next.language = language,
+        Pick::Reset => next = WaveSettings::default(),
+    }
+    next
 }
 
 /// Что видно, пока волна не в очереди.
@@ -317,6 +360,11 @@ pub(super) struct Wave {
     tint: Tint,
     /// Откуда построена очередь, если играет не волна: подпись в таблетке.
     source: String,
+    /// Выбор в меню настроек (в `config.toml`, не в аккаунте).
+    settings: WaveSettings,
+    /// Меню настроек: открыто или закрыто (плавно).
+    menu: Animation<bool>,
+    stations: Stations,
 }
 
 impl Wave {
@@ -339,6 +387,9 @@ impl Wave {
             started: Instant::now(),
             tint: Tint::new(theme::accent()),
             source: String::new(),
+            settings: WaveSettings::default(),
+            menu: anim::settled(false, anim::PANEL),
+            stations: Stations::Idle,
         }
     }
 }
@@ -678,7 +729,7 @@ impl Library {
         self.wave_leave(Leave::Skip);
         self.send(crate::player::Command::Stop);
         self.halt();
-        self.player.position = 0.0;
+        self.player.set_position(0.0);
         self.wave.resume_at = self.queue.as_ref().map_or(0, |queue| queue.tracks.len());
         self.wave.waiting = true;
         self.wave.blocked = false;
@@ -712,8 +763,9 @@ impl Library {
         let http = self.http.clone()?;
         let token = self.token.clone();
         let serial = self.wave.serial;
+        let settings = self.wave.settings.clone();
         Some(Task::perform(
-            async move { start_wave(&http, &token.access_token).await },
+            async move { start_wave(&http, &token.access_token, &settings).await },
             move |result| Message::Wave(Msg::Renewed(serial, result.map_err(Failure::from))),
         ))
     }
@@ -723,6 +775,35 @@ impl Library {
     pub(super) fn wave_update(&mut self, msg: Msg) -> (Task<Message>, Option<Effect>) {
         match msg {
             Msg::Start => self.wave_start(),
+            Msg::Menu => {
+                let open = !self.wave.menu.value();
+                self.wave.menu.go_mut(open, Instant::now());
+                (
+                    if open {
+                        self.wave_load_stations()
+                    } else {
+                        Task::none()
+                    },
+                    None,
+                )
+            }
+            Msg::CloseMenu => {
+                self.close_wave_menu();
+                (Task::none(), None)
+            }
+            Msg::Stations(result) => {
+                match result {
+                    Ok(list) => self.wave.stations = Stations::Ready(list),
+                    Err(failure) if failure.kind == FailureKind::Unauthorized => {
+                        self.wave.stations = Stations::Idle;
+                        return (Task::none(), Some(Effect::Relogin));
+                    }
+                    // Занятий нет: раздел скрыт, остальное меню работает.
+                    Err(_) => self.wave.stations = Stations::Failed,
+                }
+                (Task::none(), None)
+            }
+            Msg::Pick(pick) => self.wave_pick(pick),
             Msg::Started(serial, result) => {
                 if serial != self.wave.serial {
                     return (Task::none(), None);
@@ -820,11 +901,65 @@ impl Library {
         self.wave.fetching = false;
         let token = self.token.clone();
         let serial = self.wave.serial;
+        let settings = self.wave.settings.clone();
         let task = Task::perform(
-            async move { start_wave(&http, &token.access_token).await },
+            async move { start_wave(&http, &token.access_token, &settings).await },
             move |result| Message::Wave(Msg::Started(serial, result.map_err(Failure::from))),
         );
         (task, None)
+    }
+
+    /// Занятия для меню: один запрос на открытие, пока список не получен.
+    fn wave_load_stations(&mut self) -> Task<Message> {
+        if !matches!(self.wave.stations, Stations::Idle | Stations::Failed) {
+            return Task::none();
+        }
+        let Some(http) = self.http.clone() else {
+            self.wave.stations = Stations::Failed;
+            return Task::none();
+        };
+        self.wave.stations = Stations::Loading;
+        let token = self.token.clone();
+        Task::perform(
+            async move { fetch_activities(&http, &token.access_token).await },
+            |result| Message::Wave(Msg::Stations(result.map_err(Failure::from))),
+        )
+    }
+
+    /// Выбор в меню: смена любой настройки — новая сессия волны, она сразу
+    /// запускается. Выбор запоминается в `config.toml` (эффект), в аккаунт не
+    /// пишется.
+    fn wave_pick(&mut self, pick: Pick) -> (Task<Message>, Option<Effect>) {
+        let next = picked(&self.wave.settings, pick);
+        if next == self.wave.settings {
+            return (Task::none(), None);
+        }
+        self.wave.settings = next.clone();
+        // Прежний запуск (если ещё идёт) отменяется номером сессии.
+        if matches!(self.wave.phase, Phase::Starting) {
+            self.wave.phase = Phase::Idle;
+        }
+        let (task, _) = self.wave_start();
+        (task, Some(Effect::WaveSettings(next)))
+    }
+
+    /// Настройки волны из `config.toml`.
+    pub fn set_wave_settings(&mut self, settings: WaveSettings) {
+        self.wave.settings = settings;
+    }
+
+    /// Esc или щелчок вне меню. `false` — оно и не было открыто.
+    pub fn close_wave_menu(&mut self) -> bool {
+        let open = self.wave.menu.value();
+        if open {
+            self.wave.menu.go_mut(false, Instant::now());
+        }
+        open
+    }
+
+    /// Меню движется: ему нужны кадры.
+    pub fn wave_menu_running(&self, now: Instant) -> bool {
+        self.wave.menu.is_animating(now)
     }
 
     fn wave_started(&mut self, result: Result<WaveBatch, Failure>) -> Option<Effect> {
@@ -1288,8 +1423,9 @@ impl Library {
                 self.wave.source.as_str()
             };
             row![
-                // Выбор настроения волны — этап 9: пока таблетка не нажимается.
-                source_pill(label.to_owned(), None),
+                // Таблетка открывает то же меню, что и у волны: выбор
+                // запускает волну с этими настройками.
+                source_pill(label.to_owned(), Some(Lib(Message::Wave(Msg::Menu)))),
                 widgets::with_tooltip(
                     widgets::icon_button(
                         Icon::Close,
@@ -1305,7 +1441,10 @@ impl Library {
             .align_y(Alignment::Center)
             .into()
         } else {
-            theme::line("Моя волна", Style::BodyStrong, accent).into()
+            source_pill(
+                self.wave.settings.label(),
+                Some(Lib(Message::Wave(Msg::Menu))),
+            )
         };
         center(
             column![
@@ -1325,29 +1464,266 @@ impl Library {
     }
 }
 
-/// Таблетка источника над названием: подпись и ⌄. `on_press` — выбор
-/// настроения волны (этап 9); без него таблетка не нажимается, без наведения
-/// и курсора-руки.
+/// Таблетка источника над названием: подпись и ⌄. `on_press` — меню
+/// настроек волны; без него таблетка не нажимается, без наведения и
+/// курсора-руки.
 fn source_pill<'a>(label: String, on_press: Option<App>) -> Element<'a, App> {
+    // Одно целое: подпись и шеврон в одном ряду, равные отступы по краям,
+    // у шеврона ни подложки, ни своей кнопки.
     let content = row![
         container(theme::line(label, Style::BodyStrong, theme::TEXT_PRIMARY))
             .max_width(360)
             .clip(true),
-        icon(Icon::ChevronDown, 18.0, theme::TEXT_SECONDARY),
+        icon(Icon::ChevronDown, 16.0, theme::TEXT_SECONDARY),
     ]
     .spacing(6)
     .align_y(Alignment::Center);
-    let pill = container(content)
-        .padding([6, 14])
-        .style(|_| container::Style {
-            background: Some(theme::alpha(theme::TEXT_PRIMARY, 0.1).into()),
-            border: Border::default().rounded(widgets::ROUND),
-            ..container::Style::default()
-        });
+    let style = |fill: f32| button::Style {
+        background: Some(theme::alpha(theme::TEXT_PRIMARY, fill).into()),
+        border: Border::default().rounded(widgets::ROUND),
+        ..button::Style::default()
+    };
     match on_press {
-        Some(message) => mouse_pointer(button(pill).padding(0).on_press(message)),
-        None => pill.into(),
+        // Наведение подсвечивает всю таблетку.
+        Some(message) => mouse_pointer(
+            button(content)
+                .padding([6, 14])
+                .style(move |_, status| match status {
+                    button::Status::Hovered | button::Status::Pressed => style(0.2),
+                    _ => style(0.1),
+                })
+                .on_press(message),
+        ),
+        None => container(content)
+            .padding([6, 14])
+            .style(move |_| container::Style {
+                background: Some(theme::alpha(theme::TEXT_PRIMARY, 0.1).into()),
+                border: Border::default().rounded(widgets::ROUND),
+                ..container::Style::default()
+            })
+            .into(),
     }
+}
+
+impl Library {
+    /// Меню настроек волны поверх окна: таблетки-переключатели по группам.
+    /// `None` — закрыто.
+    ///
+    /// Стоит по центру области контента: правее бокового меню (`sidebar`),
+    /// между заголовком окна и нижним плеером. Низкое окно — меню ниже не
+    /// становится, содержимое прокручивается внутри него (`window` — размер
+    /// окна в единицах раскладки).
+    pub fn wave_menu(
+        &self,
+        now: Instant,
+        window: iced::Size,
+        sidebar: f32,
+    ) -> Option<Element<'_, App>> {
+        let shown = anim::progress(&self.wave.menu, now);
+        if shown <= 0.0 || self.section != Section::Wave || !self.stack.is_empty() {
+            return None;
+        }
+        let settings = &self.wave.settings;
+        let pick = |pick: Pick| Lib(Message::Wave(Msg::Pick(pick)));
+        let header = row![
+            container(theme::line(
+                "Настройки волны",
+                Style::Title,
+                theme::TEXT_PRIMARY
+            ))
+            .width(Length::Fill),
+            widgets::icon_button(
+                Icon::Close,
+                Size::S,
+                false,
+                Some(Lib(Message::Wave(Msg::CloseMenu))),
+            ),
+        ]
+        .align_y(Alignment::Center);
+        let mut groups = column![].spacing(18);
+        // Занятия — только если список получен.
+        if let Stations::Ready(activities) = &self.wave.stations
+            && !activities.is_empty()
+        {
+            let mut pills = vec![choice_pill(
+                "Любое".to_owned(),
+                settings.activity.is_none(),
+                pick(Pick::Activity(None)),
+            )];
+            for activity in activities {
+                let selected = settings
+                    .activity
+                    .as_ref()
+                    .is_some_and(|chosen| chosen.tag == activity.tag);
+                pills.push(choice_pill(
+                    activity.name.clone(),
+                    selected,
+                    pick(Pick::Activity(Some(activity.clone()))),
+                ));
+            }
+            groups = groups.push(group("Занятие", pills));
+        }
+        groups = groups
+            .push(group(
+                "Характер",
+                choices(
+                    "По умолчанию",
+                    settings.diversity,
+                    Diversity::ALL,
+                    Diversity::title,
+                    |value| pick(Pick::Diversity(value)),
+                ),
+            ))
+            .push(group(
+                "Настроение",
+                choices(
+                    "Любое",
+                    settings.mood,
+                    Mood::ALL,
+                    Mood::title,
+                    |value| pick(Pick::Mood(value)),
+                ),
+            ))
+            .push(group(
+                "Язык",
+                choices(
+                    "Любой",
+                    settings.language,
+                    Language::ALL,
+                    Language::title,
+                    |value| pick(Pick::Language(value)),
+                ),
+            ));
+        let reset = widgets::action(
+            Kind::Secondary,
+            Some(Icon::Retry),
+            "Сбросить",
+            (!settings.is_default()).then(|| pick(Pick::Reset)),
+        );
+        let footer = row![
+            container(theme::label(
+                "Смена настроек запускает новую волну",
+                Style::Caption,
+                theme::TEXT_TERTIARY,
+            ))
+            .width(Length::Fill),
+            reset,
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+        let (top, bottom) = (TITLE_BAR + WAVE_MENU_MARGIN, PLAYER_BAR + WAVE_MENU_MARGIN);
+        let available = menu_height(window.height, top, bottom);
+        let groups = iced::widget::scrollable(groups).width(Length::Fill);
+        let card = container(column![header, groups, footer].spacing(18))
+            .width(Length::Fill)
+            .max_width(WAVE_MENU_WIDTH)
+            .max_height(available)
+            .padding(20)
+            .style(|_| container::Style {
+                background: Some(theme::SURFACE_2.into()),
+                border: Border::default()
+                    .rounded(16.0)
+                    .width(1)
+                    .color(theme::BORDER),
+                shadow: widgets::popover_shadow(),
+                ..container::Style::default()
+            });
+        // Появление: опускается на несколько пикселей и проступает из фона.
+        let hidden = 1.0 - shown;
+        let card = anim::motion(iced::widget::opaque(card))
+            .offset(0.0, -12.0 * hidden)
+            .veil(theme::alpha(theme::BG, hidden), 16.0);
+        let placed = container(card)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .padding(iced::Padding {
+                top,
+                right: WAVE_MENU_MARGIN,
+                bottom,
+                left: sidebar + 1.0 + WAVE_MENU_MARGIN,
+            });
+        Some(iced::widget::opaque(
+            iced::widget::mouse_area(placed).on_press(Lib(Message::Wave(Msg::CloseMenu))),
+        ))
+    }
+}
+
+/// Ширина карточки меню волны.
+const WAVE_MENU_WIDTH: f32 = 460.0;
+/// Отступ карточки от краёв области контента.
+const WAVE_MENU_MARGIN: f32 = 16.0;
+/// Высота заголовка окна и нижнего плеера (с линией): их меню не закрывает.
+const TITLE_BAR: f32 = 36.0;
+const PLAYER_BAR: f32 = super::PLAYER_HEIGHT + 1.0;
+
+/// Наибольшая высота меню в окне высотой `window` при отступах `top` и
+/// `bottom`: не меньше разумного минимума, чтобы в очень низком окне меню не
+/// схлопнулось в ноль.
+fn menu_height(window: f32, top: f32, bottom: f32) -> f32 {
+    (window - top - bottom).max(160.0)
+}
+
+/// Группа таблеток с подписью.
+fn group<'a>(title: &'a str, pills: Vec<Element<'a, App>>) -> Element<'a, App> {
+    column![
+        theme::line(title, Style::Caption, theme::TEXT_TERTIARY),
+        row(pills).spacing(8).wrap().vertical_spacing(8),
+    ]
+    .spacing(8)
+    .into()
+}
+
+/// Таблетки выбора из `all` и «по умолчанию» первой.
+fn choices<'a, T: Copy + PartialEq>(
+    none: &'a str,
+    current: Option<T>,
+    all: &'static [T],
+    title: fn(T) -> &'static str,
+    message: impl Fn(Option<T>) -> App,
+) -> Vec<Element<'a, App>> {
+    let mut pills = vec![choice_pill(
+        none.to_owned(),
+        current.is_none(),
+        message(None),
+    )];
+    for value in all {
+        pills.push(choice_pill(
+            title(*value).to_owned(),
+            current == Some(*value),
+            message(Some(*value)),
+        ));
+    }
+    pills
+}
+
+/// Таблетка-переключатель: выбранная — в цвете акцента.
+fn choice_pill<'a>(title: String, selected: bool, message: App) -> Element<'a, App> {
+    let pill = button(theme::line(
+        title,
+        Style::CaptionStrong,
+        if selected {
+            theme::on_accent()
+        } else {
+            theme::TEXT_SECONDARY
+        },
+    ))
+    .padding([6, 14])
+    .style(move |_, status| button::Style {
+        background: Some(
+            match (selected, status) {
+                (true, _) => theme::accent(),
+                (false, button::Status::Hovered | button::Status::Pressed) => theme::SURFACE_4,
+                (false, _) => theme::SURFACE_3,
+            }
+            .into(),
+        ),
+        border: Border::default().rounded(widgets::ROUND),
+        ..button::Style::default()
+    })
+    .on_press(message);
+    mouse_pointer(pill)
 }
 
 /// Курсор-«рука» над кнопкой.
@@ -1385,7 +1761,74 @@ mod tests {
             cover_uri: None,
             warning: api::Warning::None,
             loudness: None,
+            lyrics: None,
         }
+    }
+
+    #[test]
+    fn wave_track_changes_land_in_history() {
+        let mut library = super::super::tests::test_library();
+        let _ = library.wave_started(Ok(batch(&["1", "2", "3", "4"])));
+        assert!(library.in_wave());
+        // Первый трек зазвучал; «Следующий» — в историю уходит первый.
+        library.player.sounded = true;
+        let _ = library.update(Message::Next, None);
+        let ids = |library: &Library| -> Vec<String> {
+            library
+                .history
+                .tracks()
+                .map(|track| track.id.clone())
+                .collect()
+        };
+        assert_eq!(ids(&library), ["1"]);
+        // Автопереход волны по концу трека.
+        library.player.sounded = true;
+        let session = library.player.session;
+        let _ = library.audio_event(crate::player::Event::Ended { id: session });
+        assert_eq!(ids(&library), ["1", "2"]);
+        // Трек, что не успел зазвучать, пропускают: в историю он не идёт.
+        let _ = library.update(Message::Next, None);
+        assert_eq!(ids(&library), ["1", "2"]);
+        // Треки волны перед текущим тоже попадают в «Недавно играли».
+        let recent: Vec<String> = library
+            .recent_tracks()
+            .into_iter()
+            .map(|track| track.id.clone())
+            .collect();
+        // Порядок источников: сначала сеанс (ближе к текущему), затем очередь.
+        assert_eq!(recent, ["3", "1", "2"]);
+    }
+
+    #[test]
+    fn menu_height_follows_window_with_a_floor() {
+        assert_eq!(menu_height(800.0, 52.0, 105.0), 643.0);
+        // Низкое окно: меню не меньше минимума, остальное — прокрутка внутри.
+        assert_eq!(menu_height(200.0, 52.0, 105.0), 160.0);
+    }
+
+    #[test]
+    fn pick_changes_one_setting_and_reset_clears() {
+        let base = WaveSettings::default();
+        let calm = picked(&base, Pick::Mood(Some(Mood::Calm)));
+        assert_eq!(calm.mood, Some(Mood::Calm));
+        let both = picked(&calm, Pick::Language(Some(Language::Russian)));
+        assert_eq!(both.mood, Some(Mood::Calm));
+        assert_eq!(both.language, Some(Language::Russian));
+        // Тот же выбор ничего не меняет (волна не перезапускается).
+        assert_eq!(picked(&both, Pick::Mood(Some(Mood::Calm))), both);
+        // «Любое» снимает только свою настройку.
+        assert_eq!(
+            picked(&both, Pick::Mood(None)).language,
+            Some(Language::Russian)
+        );
+        assert_eq!(picked(&both, Pick::Mood(None)).mood, None);
+        assert!(picked(&both, Pick::Reset).is_default());
+        let activity = Activity {
+            tag: "workout".to_owned(),
+            name: "Тренировка".to_owned(),
+        };
+        let with = picked(&both, Pick::Activity(Some(activity.clone())));
+        assert_eq!(with.activity, Some(activity));
     }
 
     fn batch(ids: &[&str]) -> WaveBatch {

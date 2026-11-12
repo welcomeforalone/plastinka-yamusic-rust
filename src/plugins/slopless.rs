@@ -348,6 +348,7 @@ mod tests {
             cover_uri: None,
             warning: Warning::None,
             loudness: None,
+            lyrics: None,
         }
     }
 

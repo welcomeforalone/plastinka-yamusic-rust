@@ -898,7 +898,7 @@ impl Library {
         if self.replace.take().is_some() {
             return true;
         }
-        self.menu.take().is_some() || self.close_sound_panel()
+        self.menu.take().is_some() || self.close_sound_panel() || self.close_wave_menu()
     }
 
     /// Меню трека или диалог замены поверх окна размером `window`.
@@ -1469,6 +1469,7 @@ mod tests {
             cover_uri: None,
             warning: api::Warning::None,
             loudness: None,
+            lyrics: None,
         }
     }
 

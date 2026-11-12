@@ -64,12 +64,76 @@ pub struct Config {
     /// Application ID Discord вместо встроенного.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub discord_app_id: Option<String>,
+    /// Запасной источник текстов песен — LRCLib, если у Яндекса текста нет
+    /// (по умолчанию да).
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub lyrics_lrclib: Option<bool>,
+    /// Выбор в меню «Моей волны» (таблица `[wave_settings]`). Только у нас, в
+    /// аккаунт не пишется.
+    #[serde(
+        skip_serializing_if = "WaveConfig::is_empty",
+        deserialize_with = "lenient_table"
+    )]
+    pub wave_settings: WaveConfig,
+    /// Мини-плеер (таблица `[mini_player]`): где стоит окно и какая раскладка.
+    #[serde(
+        skip_serializing_if = "MiniConfig::is_empty",
+        deserialize_with = "lenient_table"
+    )]
+    pub mini_player: MiniConfig,
     /// Плагины (таблица `[plugins]`).
     #[serde(
         skip_serializing_if = "PluginsConfig::is_empty",
         deserialize_with = "lenient_table"
     )]
     pub plugins: PluginsConfig,
+}
+
+/// Таблица `[mini_player]`: положение окна мини-плеера (целые логические
+/// координаты) и раскладка. Значение неверного типа — как будто его нет.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MiniConfig {
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub x: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub y: Option<i64>,
+    /// Низкая горизонтальная раскладка (420 × 132) вместо высокой (320 × 440).
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub compact: Option<bool>,
+}
+
+impl MiniConfig {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Таблица `[wave_settings]`: что выбрано в меню «Моей волны». Значение
+/// неверного типа — как будто его нет.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WaveConfig {
+    /// Тег занятия (`activity:{tag}`) и его подпись, чтобы показать её без сети.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub activity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub activity_name: Option<String>,
+    /// `favorite`, `discover`, `popular`.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub diversity: Option<String>,
+    /// `active`, `fun`, `calm`, `sad`.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub mood: Option<String>,
+    /// `russian`, `not-russian`, `without-words`.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub language: Option<String>,
+}
+
+impl WaveConfig {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// Таблица `[plugins]`: какие плагины включены и их настройки. Значение
@@ -312,6 +376,60 @@ discord_button = \"да\"
         // Ничего не задано — в файл ничего не пишется.
         let text = toml::to_string(&Config::default()).unwrap();
         assert!(!text.contains("discord"));
+    }
+
+    #[test]
+    fn lyrics_lrclib_setting() {
+        let config: Config = toml::from_str(
+            "lyrics_lrclib = false
+",
+        )
+        .unwrap();
+        assert_eq!(config.lyrics_lrclib, Some(false));
+        let config: Config = toml::from_str(
+            "lyrics_lrclib = \"нет\"
+",
+        )
+        .unwrap();
+        assert_eq!(config.lyrics_lrclib, None);
+        assert!(
+            !toml::to_string(&Config::default())
+                .unwrap()
+                .contains("lyrics")
+        );
+    }
+
+    #[test]
+    fn wave_settings_survive_bad_values() {
+        let config: Config = toml::from_str(
+            "[wave_settings]
+mood = \"calm\"
+language = 5
+activity = \"work-background\"
+",
+        )
+        .unwrap();
+        assert_eq!(config.wave_settings.mood.as_deref(), Some("calm"));
+        assert_eq!(config.wave_settings.language, None);
+        // Вся таблица неверного типа — как будто её нет.
+        let config: Config = toml::from_str(
+            "wave_settings = 5
+",
+        )
+        .unwrap();
+        assert_eq!(config.wave_settings, WaveConfig::default());
+        // Пусто — в файл ничего не пишется.
+        assert!(
+            !toml::to_string(&Config::default())
+                .unwrap()
+                .contains("wave_settings")
+        );
+        // Запись и чтение обратно.
+        let mut config = Config::default();
+        config.wave_settings.diversity = Some("popular".to_owned());
+        let text = toml::to_string(&config).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.wave_settings.diversity.as_deref(), Some("popular"));
     }
 
     #[test]
