@@ -77,6 +77,6 @@ souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Токен в Связке ключей (Keychain).
-apple-native-keyring-store = "1.0.2"
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
 # Системный плеер: медиаклавиши и Now Playing.
 souvlaki = { version = "0.9.3", default-features = false }
