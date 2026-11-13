@@ -222,7 +222,7 @@ fn platform_store() -> Result<Arc<CredentialStore>, StorageError> {
 #[cfg(target_os = "macos")]
 fn platform_store() -> Result<Arc<CredentialStore>, StorageError> {
     let store: Arc<CredentialStore> =
-        apple_native_keyring_store::Store::new().map_err(keyring_error)?;
+        apple_native_keyring_store::keychain::Store::new().map_err(keyring_error)?;
     Ok(store)
 }
 
