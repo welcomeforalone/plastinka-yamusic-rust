@@ -74,3 +74,9 @@ windows-sys = { version = "0.61", features = [
 zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
 # Системный плеер: медиаклавиши и MPRIS. `use_zbus` — чистый Rust, без системной libdbus.
 souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Токен в Связке ключей (Keychain).
+apple-native-keyring-store = "1.0.2"
+# Системный плеер: медиаклавиши и Now Playing.
+souvlaki = { version = "0.9.3", default-features = false }

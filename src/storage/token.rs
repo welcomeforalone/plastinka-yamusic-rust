@@ -19,7 +19,10 @@ const ACCOUNT: &str = "oauth-token";
 #[cfg(all(unix, not(target_os = "macos")))]
 pub const UNAVAILABLE_HINT: &str =
     "Нужен запущенный Secret Service: gnome-keyring, KWallet или KeePassXC";
-#[cfg(not(all(unix, not(target_os = "macos"))))]
+#[cfg(target_os = "macos")]
+pub const UNAVAILABLE_HINT: &str =
+    "Разблокируйте «Связку ключей» (Программы → Утилиты → Связка ключей) и повторите";
+#[cfg(not(any(all(unix, not(target_os = "macos")), target_os = "macos")))]
 pub const UNAVAILABLE_HINT: &str = "Проверьте, что служба «Диспетчер учётных данных» запущена";
 
 /// Токен OAuth и сведения для его обновления.
@@ -216,7 +219,14 @@ fn platform_store() -> Result<Arc<CredentialStore>, StorageError> {
     Ok(store)
 }
 
-#[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
+#[cfg(target_os = "macos")]
+fn platform_store() -> Result<Arc<CredentialStore>, StorageError> {
+    let store: Arc<CredentialStore> =
+        apple_native_keyring_store::Store::new().map_err(keyring_error)?;
+    Ok(store)
+}
+
+#[cfg(not(any(windows, all(unix, not(target_os = "macos")), target_os = "macos")))]
 fn platform_store() -> Result<Arc<CredentialStore>, StorageError> {
     Err(StorageError::SecretStoreUnavailable(
         "эта ОС пока не поддерживается".to_owned(),
