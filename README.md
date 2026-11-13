@@ -58,7 +58,7 @@ Arch, CachyOS, Manjaro, Fedora 36+, openSUSE, Ubuntu 22.04+, Debian 12+ и др�
 tar -xzf plastinka-linux-x86_64.tar.gz
 cd plastinka-linux-x86_64
 ./plastinka            # запустить сразу
-./install.sh           # или установить в ~/.local: команда plastinka и ярлык в меню
+./install.sh           # или установить в ~/.local: команда plastinka, ярлык и иконка в меню
 ```
 
 Удаление — `./install.sh --uninstall`. Проверить архив:
@@ -572,6 +572,22 @@ https://id.yandex.ru/personal/data-access.
 Сборка релиза: `cargo build --release`. Бинарник: `target\release\plastinka.exe`
 в Windows, `target/release/plastinka` в Linux.
 
+Релиз под Windows собран как оконное приложение: при запуске из проводника
+или ярлыка консоль не открывается. Команды из терминала (`plastinka login`,
+`--help` и т. д.) подключаются к консоли терминала и пишут в неё; так как
+приложение оконное, `cmd` и PowerShell не ждут его завершения, и приглашение
+может появиться раньше вывода. Если это мешает, запускайте команды через
+`cargo run -- <команда>` (отладочная сборка консольная) или с перенаправлением:
+`plastinka account | more`. Если окно не открылось, релиз показывает ошибку
+в системном диалоге.
+
+Иконка приложения — `assets/app/plastinka.svg`. PNG и ICO из неё рисует
+`python assets/app/make_icon.py` (нужен Pillow). В Windows `build.rs`
+вшивает `plastinka.ico` и сведения о версии в `plastinka.exe` через
+`winresource` (нужен `rc.exe` из Windows SDK — он ставится вместе с
+компонентом C++ в Visual Studio). Окно берёт `plastinka.png` при запуске,
+в Linux её же ставит `install.sh` (имя `plastinka`, как у `.desktop`).
+
 ## Проверки
 
 ```sh
@@ -645,6 +661,8 @@ client_secret, как у всех неофициальных клиентов. �
 | `docs/ui` | Решения по интерфейсу по этапам |
 | `assets/fonts` | Шрифт Inter (SIL OFL 1.1), встроен в бинарник |
 | `assets/icons` | Иконки, которых нет в макете (в стиле Lucide) |
+| `assets/app` | Иконка приложения: исходник SVG, PNG для окна и Linux, ICO для exe, скрипт `make_icon.py` |
+| `build.rs` | Вшивает иконку и сведения о версии в `plastinka.exe` (Windows) |
 | `design` | Бриф и материалы дизайна |
 | `packaging/linux` | Ярлык `.desktop` и `install.sh` для Linux-архива |
 | `.github/workflows` | Сборки релизов: Linux (`build-linux.yml`), macOS (`build-macos.yml`) |

@@ -63,6 +63,7 @@ jobs:
           mkdir -p "out/$name"
           install -m 755 target/release/plastinka "out/$name/plastinka"
           install -m 644 packaging/linux/plastinka.desktop "out/$name/"
+          install -m 644 assets/app/plastinka.png assets/app/plastinka.svg "out/$name/"
           install -m 755 packaging/linux/install.sh "out/$name/"
           echo "$GITHUB_SHA" > "out/$name/COMMIT"
           tar -C out -czf "$name.tar.gz" "$name"

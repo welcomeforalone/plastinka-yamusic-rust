@@ -254,10 +254,11 @@ fn storage_template(raw: &str) -> Option<String> {
     {
         return None;
     }
-    let url = raw
-        .contains("://")
-        .then(|| raw.to_owned())
-        .unwrap_or_else(|| format!("https://{raw}"));
+    let url = if raw.contains("://") {
+        raw.to_owned()
+    } else {
+        format!("https://{raw}")
+    };
     plausible_url(&url).then_some(url)
 }
 

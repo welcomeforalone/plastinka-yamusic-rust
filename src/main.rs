@@ -1,3 +1,7 @@
+// В релизе под Windows окно открывается без консоли. Команды из терминала
+// (`plastinka login` и т. п.) подключаются к консоли родителя, см. `attach_console`.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::fmt::Display;
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -13,6 +17,41 @@ use plastinka::storage::token::TokenStore;
 use plastinka::storage::{self, AppDirs, StorageError};
 use plastinka::texts::tracks_word;
 use plastinka::{APP_NAME, DISCLAIMER};
+
+/// Подключает вывод к консоли терминала, из которого запущена команда.
+///
+/// Релиз под Windows собран как оконное приложение: своей консоли у него нет,
+/// и без этого `--help`, `login` и другие команды ничего бы не вывели. Если
+/// родитель без консоли (запуск из проводника) или вывод уже перенаправлен в
+/// файл, вызов ничего не меняет.
+#[cfg(all(windows, not(debug_assertions)))]
+#[allow(unsafe_code)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    // SAFETY: функция без указателей; при ошибке просто возвращает 0, и
+    // приложение работает дальше без консоли.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+/// В отладке и вне Windows своя консоль уже есть.
+#[cfg(not(all(windows, not(debug_assertions))))]
+fn attach_console() {}
+
+/// Показывает ошибку запуска окна: в релизе под Windows консоли нет, и текст
+/// в stderr пользователь не увидит.
+#[cfg(all(windows, not(debug_assertions)))]
+fn show_startup_error(text: &str) {
+    let _ = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title(APP_NAME)
+        .set_description(text)
+        .show();
+}
+
+#[cfg(not(all(windows, not(debug_assertions))))]
+fn show_startup_error(_text: &str) {}
 
 /// Шаблон справки: clap сам пишет только «Usage», поэтому подписи задаём явно.
 /// Шаблон не наследуется, его нужно указывать у каждой команды.
@@ -99,6 +138,10 @@ enum CliError {
 }
 
 fn main() -> ExitCode {
+    // Есть аргументы — это команда (или `--help`): вывод нужен в терминале.
+    if std::env::args_os().len() > 1 {
+        attach_console();
+    }
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(err) => return report_parse_error(&err),
@@ -108,7 +151,9 @@ fn main() -> ExitCode {
         return match plastinka::ui::run() {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
-                let _ = writeln!(io::stderr(), "Ошибка: не удалось открыть окно: {err}");
+                let text = format!("Ошибка: не удалось открыть окно: {err}");
+                let _ = writeln!(io::stderr(), "{text}");
+                show_startup_error(&text);
                 ExitCode::FAILURE
             }
         };

@@ -91,11 +91,8 @@ pub fn settings(prefs: &MiniPrefs, pinned: bool) -> window::Settings {
         level: level(pinned),
         // Закрытие обрабатываем сами: вместе с окном нужно вернуть главное.
         exit_on_close_request: false,
-        #[cfg(windows)]
-        platform_specific: window::settings::PlatformSpecific {
-            undecorated_shadow: true,
-            ..window::settings::PlatformSpecific::default()
-        },
+        icon: super::app_icon(),
+        platform_specific: super::platform_specific(),
         ..window::Settings::default()
     }
 }

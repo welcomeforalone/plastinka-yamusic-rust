@@ -70,14 +70,39 @@ fn window_settings() -> window::Settings {
         decorations: false,
         // Закрытие обрабатываем сами: несохранённый токен надо отозвать.
         exit_on_close_request: false,
-        #[cfg(windows)]
-        platform_specific: window::settings::PlatformSpecific {
-            undecorated_shadow: true,
-            ..window::settings::PlatformSpecific::default()
-        },
+        icon: app_icon(),
+        platform_specific: platform_specific(),
         ..window::Settings::default()
     }
 }
+
+/// Иконка окна (заголовок, панель задач, Alt+Tab). Без неё — системная.
+pub(crate) fn app_icon() -> Option<window::Icon> {
+    const PNG: &[u8] = include_bytes!("../../assets/app/plastinka.png");
+    let image = image::load_from_memory_with_format(PNG, image::ImageFormat::Png)
+        .ok()?
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    window::icon::from_rgba(image.into_raw(), width, height).ok()
+}
+
+/// Платформенные параметры окна, общие для главного окна и мини-плеера.
+pub(crate) fn platform_specific() -> window::settings::PlatformSpecific {
+    window::settings::PlatformSpecific {
+        // Тень у окна без системной рамки.
+        #[cfg(windows)]
+        undecorated_shadow: true,
+        // Совпадает с именем plastinka.desktop: по нему Wayland и X11 берут
+        // иконку и группируют окна на панели.
+        #[cfg(target_os = "linux")]
+        application_id: APP_ID.to_owned(),
+        ..window::settings::PlatformSpecific::default()
+    }
+}
+
+/// Идентификатор приложения в Linux — имя .desktop-файла без расширения.
+#[cfg(target_os = "linux")]
+const APP_ID: &str = "plastinka";
 
 /// Через сколько повторять запрос, если нет сети.
 const OFFLINE_RETRY: Duration = Duration::from_secs(10);
@@ -1908,6 +1933,11 @@ fn native_handle(window: &dyn window::Window) -> Option<isize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_icon_decodes() {
+        assert!(app_icon().is_some());
+    }
 
     /// Выбор в панели звука доходит до `config.toml` и обратно; неизвестное
     /// значение даёт «Оптимальное».

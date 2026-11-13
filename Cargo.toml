@@ -38,8 +38,9 @@ uuid = { version = "1.29.0", features = ["v4"] }
 opt-level = 2
 
 [lints.rust]
-# Единственное исключение — модуль таймера перетаскивания окна под Windows
-# (src/ui/drag_pulse.rs), там `#[allow(unsafe_code)]`.
+# Исключения под Windows с `#[allow(unsafe_code)]`: таймер перетаскивания окна
+# (src/ui/drag_pulse.rs) и подключение к консоли терминала в релизе
+# (`attach_console` в src/main.rs).
 unsafe_code = "deny"
 
 # Правило проекта: в рабочем коде ничего не паникует. В тестах разрешено (см. clippy.toml).
@@ -62,13 +63,20 @@ string_slice = "deny"
 windows-native-keyring-store = "1.1.0"
 # Системный плеер: медиаклавиши и оверлей Windows (SMTC), MIT.
 souvlaki = { version = "0.9.3", default-features = false }
-# Таймер потока для кадров во время перетаскивания окна (MIT OR Apache-2.0).
+# Таймер потока для кадров во время перетаскивания окна и консоль терминала
+# для команд в релизе (MIT OR Apache-2.0).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_System_Console",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# Иконка и сведения о версии внутри plastinka.exe (build.rs), MIT. Только для
+# сборки под Windows, в бинарник не попадает.
+[target."cfg(windows)".build-dependencies]
+winresource = { version = "0.1.34", default-features = false }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
