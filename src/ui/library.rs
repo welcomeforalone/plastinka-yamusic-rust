@@ -24,7 +24,10 @@ use iced::widget::{
     Space, button, center, column, container, hover, mouse_area, row, scrollable, slider,
     text_input, toggler, tooltip, vertical_slider,
 };
-use iced::{Alignment, Border, Color, Element, Length, Padding, Point, Subscription, Task, mouse};
+use iced::{
+    Alignment, Background, Border, Color, Element, Length, Padding, Point, Subscription, Task,
+    mouse,
+};
 
 use super::Message as App;
 use super::Message::Library as Lib;
@@ -34,6 +37,7 @@ use super::filter;
 use super::history;
 use super::icons::{Icon, icon, spinner};
 use super::marquee::{marquee, marquee_element};
+use super::palette;
 use super::queue::{self, ListKey, Queue, Rng};
 use super::scroll;
 use super::theme::{self, Style};
@@ -1793,10 +1797,12 @@ impl Library {
     // ------------------------------------------------------------ вид
 
     /// `compact` — узкое окно: в плеере меньше кнопок. `width` — ширина окна.
+    #[allow(clippy::too_many_arguments)]
     pub fn view<'a>(
         &'a self,
         covers: &'a Covers,
         prefs: &Prefs,
+        palette: &'a palette::State,
         moment: Moment,
         compact: bool,
         width: f32,
@@ -1807,7 +1813,7 @@ impl Library {
             (Some(entry), _) => self.page_view(entry, covers, turn, moment.now),
             (None, Section::Liked) => self.liked(covers, turn),
             (None, Section::Wave) => self.wave_view(covers, turn, moment.now, prefs.visualizer),
-            (None, Section::Settings) => self.settings(prefs),
+            (None, Section::Settings) => self.settings(prefs, palette),
             (None, Section::History) => self.history_view(covers, turn),
             (None, Section::Search) => self.search_view(covers, turn, moment.now),
             (None, Section::Playlists | Section::Albums | Section::Artists) => {
@@ -1971,8 +1977,10 @@ impl Library {
                 Some(Lib(Message::Fullscreen(false))),
             ),
             "Свернуть · Esc",
-            tooltip::Position::Right,
+            tooltip::Position::Left,
         ))
+        // Справа: там же, где кнопка, которая открывает плеер.
+        .align_right(Length::Fill)
         .padding([0.0, 24.0]);
         let player = self.player_bar(
             covers,
@@ -2254,7 +2262,7 @@ impl Library {
         })
     }
 
-    fn settings(&self, prefs: &Prefs) -> Element<'_, App> {
+    fn settings<'a>(&'a self, prefs: &Prefs, palette: &'a palette::State) -> Element<'a, App> {
         let account = self.status.account();
         let name = account.name();
         let initial = name
@@ -2300,7 +2308,7 @@ impl Library {
         scrollable(
             column![
                 theme::line("Настройки", Style::Display, theme::TEXT_PRIMARY),
-                section_block("Внешний вид", appearance(prefs)),
+                section_block("Внешний вид", appearance(prefs, palette)),
                 section_block("Звук", sound_block(prefs)),
                 section_block("Тексты песен", lyrics_block(prefs)),
                 section_block("Discord", discord_block(prefs)),
@@ -2896,38 +2904,81 @@ fn setting_row<'a>(title: &'a str, hint: String, control: Element<'a, App>) -> E
     .into()
 }
 
+/// Образец акцента в ряду: кружок с галочкой, если он выбран.
+fn swatch<'a>(
+    fill: Background,
+    mark: Element<'a, App>,
+    selected: bool,
+    tip: impl iced::widget::text::IntoFragment<'a>,
+    on_press: App,
+) -> Element<'a, App> {
+    let swatch = button(mark)
+        .width(30)
+        .height(30)
+        .padding(0)
+        .style(move |_, status| button::Style {
+            background: Some(fill),
+            border: Border {
+                color: match (selected, status) {
+                    (true, _) => theme::TEXT_PRIMARY,
+                    (false, button::Status::Hovered) => theme::TEXT_SECONDARY,
+                    _ => Color::TRANSPARENT,
+                },
+                width: 2.0,
+                radius: widgets::ROUND.into(),
+            },
+            ..button::Style::default()
+        })
+        .on_press(on_press);
+    widgets::with_tooltip(swatch, tip, tooltip::Position::Top)
+}
+
 /// «Внешний вид»: акцент, масштаб, визуализатор.
-fn appearance<'a>(prefs: &Prefs) -> Element<'a, App> {
+fn appearance<'a>(prefs: &Prefs, palette: &'a palette::State) -> Element<'a, App> {
     let current = prefs.accent;
-    let swatches = row(theme::Accent::ALL.into_iter().map(|accent| {
+    let mut swatches = row(theme::Accent::PRESETS.into_iter().map(|accent| {
         let selected = accent == current;
         let mark: Element<'a, App> = if selected {
-            center(icon(Icon::Check, 16.0, contrast_on(accent.color()))).into()
+            center(icon(Icon::Check, 16.0, theme::contrast_on(accent.color()))).into()
         } else {
             Space::new().into()
         };
-        let swatch = button(mark)
-            .width(30)
-            .height(30)
-            .padding(0)
-            .style(move |_, status| button::Style {
-                background: Some(accent.color().into()),
-                border: Border {
-                    color: match (selected, status) {
-                        (true, _) => theme::TEXT_PRIMARY,
-                        (false, button::Status::Hovered) => theme::TEXT_SECONDARY,
-                        _ => Color::TRANSPARENT,
-                    },
-                    width: 2.0,
-                    radius: widgets::ROUND.into(),
-                },
-                ..button::Style::default()
-            })
-            .on_press(App::SetAccent(accent));
-        widgets::with_tooltip(swatch, accent.title(), tooltip::Position::Top)
+        swatch(
+            accent.color().into(),
+            mark,
+            selected,
+            accent.title(),
+            App::SetAccent(accent),
+        )
     }))
     .spacing(10)
     .align_y(Alignment::Center);
+
+    // Шестой образец: свой цвет. Радужный, пока выбран готовый акцент.
+    let custom = matches!(current, theme::Accent::Custom(_));
+    let (fill, mark): (Background, Element<'a, App>) = if custom {
+        (
+            current.color().into(),
+            center(icon(Icon::Check, 16.0, theme::contrast_on(current.color()))).into(),
+        )
+    } else {
+        (
+            palette::rainbow(),
+            center(icon(Icon::Plus, 16.0, Color::WHITE)).into(),
+        )
+    };
+    let tip = if custom {
+        current.title()
+    } else {
+        "Свой цвет".into()
+    };
+    swatches = swatches.push(swatch(
+        fill,
+        mark,
+        custom || palette.open,
+        tip,
+        App::Palette(palette::Msg::Toggle),
+    ));
 
     let scale = prefs.scale;
     let zoom = row![
@@ -2961,13 +3012,20 @@ fn appearance<'a>(prefs: &Prefs) -> Element<'a, App> {
 
     let visualizer = switch(prefs.visualizer, |_| App::ToggleVisualizer);
 
-    container(column![
-        setting_row(
-            "Акцент",
-            format!("{} — кнопки, выбранный трек, ползунки", current.title()),
-            swatches.into(),
-        ),
-        widgets::divider(),
+    let mut card = column![setting_row(
+        "Акцент",
+        format!("{} — кнопки, выбранный трек, ползунки", current.title()),
+        swatches.into(),
+    )];
+    if palette.open {
+        card = card.push(container(palette::view(palette)).padding(Padding {
+            top: 0.0,
+            right: 18.0,
+            bottom: 18.0,
+            left: 18.0,
+        }));
+    }
+    container(card.push(widgets::divider()).push(column![
         setting_row(
             "Масштаб",
             "Ctrl + = и Ctrl + − меняют масштаб, Ctrl + 0 — 100 %".to_owned(),
@@ -2979,7 +3037,7 @@ fn appearance<'a>(prefs: &Prefs) -> Element<'a, App> {
             "Спектр звука под плеером".to_owned(),
             visualizer,
         ),
-    ])
+    ]))
     .width(Length::Fill)
     .style(|_| card_style())
     .into()
@@ -3318,16 +3376,6 @@ fn switch<'a>(on: bool, on_toggle: impl Fn(bool) -> App + 'a) -> Element<'a, App
             }
         })
         .into()
-}
-
-/// Белая или чёрная галочка на образце акцента.
-fn contrast_on(color: Color) -> Color {
-    let luma = 0.299 * color.r + 0.587 * color.g + 0.114 * color.b;
-    if luma > 0.6 {
-        Color::BLACK
-    } else {
-        Color::WHITE
-    }
 }
 
 /// «О программе»: версия, обязательная строка правила 4, лицензии.

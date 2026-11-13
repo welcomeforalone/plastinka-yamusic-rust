@@ -1,7 +1,8 @@
 //! Цвета, шрифты и стили текста. Облик с этапа 6.5 — чёрный фон, нейтральные
 //! серые, акцент на выбор пользователя (`docs/ui/stage-6.5.md`).
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::borrow::Cow;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use iced::font::{self, Font};
 use iced::gradient::Linear;
@@ -45,7 +46,8 @@ pub const CLOSE_HOVER: Color = rgb(0xC42B1C);
 // ---------------------------------------------------------------- акцент
 
 /// Акцентный цвет. Выбирается в «Настройки → Внешний вид», хранится в
-/// `config.toml` ключом [`Accent::key`].
+/// `config.toml` ключом [`Accent::key`]: готовый — именем (`red`), свой —
+/// записью `#RRGGBB`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Accent {
     #[default]
@@ -54,10 +56,19 @@ pub enum Accent {
     Orange,
     Violet,
     Blue,
+    /// Свой цвет, `0xRRGGBB`. Строить через [`Accent::custom`]: оно обрезает
+    /// старшие биты, чтобы равные цвета были равны и по `==`.
+    Custom(u32),
 }
 
+/// Маска цвета `0xRRGGBB`.
+const RGB_MASK: u32 = 0x00FF_FFFF;
+/// Признак своего цвета в числе, которое лежит в [`ACCENT`].
+const CUSTOM_FLAG: u32 = 1 << 24;
+
 impl Accent {
-    pub const ALL: [Self; 5] = [
+    /// Готовые акценты, по порядку в настройках.
+    pub const PRESETS: [Self; 5] = [
         Self::Red,
         Self::Teal,
         Self::Orange,
@@ -65,78 +76,124 @@ impl Accent {
         Self::Blue,
     ];
 
-    pub fn key(self) -> &'static str {
+    pub fn custom(rgb: u32) -> Self {
+        Self::Custom(rgb & RGB_MASK)
+    }
+
+    /// Ключ для `config.toml`: имя готового акцента или `#RRGGBB`.
+    pub fn key(self) -> Cow<'static, str> {
         match self {
-            Self::Red => "red",
-            Self::Teal => "teal",
-            Self::Orange => "orange",
-            Self::Violet => "violet",
-            Self::Blue => "blue",
+            Self::Red => Cow::Borrowed("red"),
+            Self::Teal => Cow::Borrowed("teal"),
+            Self::Orange => Cow::Borrowed("orange"),
+            Self::Violet => Cow::Borrowed("violet"),
+            Self::Blue => Cow::Borrowed("blue"),
+            Self::Custom(rgb) => Cow::Owned(format_hex(rgb)),
         }
     }
 
-    /// Акцент по ключу из настроек. Неизвестный ключ — `None`.
+    /// Акцент по ключу из настроек. Непонятный ключ — `None`.
     pub fn from_key(key: &str) -> Option<Self> {
-        Self::ALL
+        let key = key.trim();
+        Self::PRESETS
             .into_iter()
-            .find(|accent| accent.key().eq_ignore_ascii_case(key.trim()))
+            .find(|accent| accent.key().eq_ignore_ascii_case(key))
+            .or_else(|| parse_hex(key).map(Self::custom))
     }
 
-    pub fn title(self) -> &'static str {
+    pub fn title(self) -> Cow<'static, str> {
         match self {
-            Self::Red => "Красный",
-            Self::Teal => "Бирюзовый",
-            Self::Orange => "Оранжевый",
-            Self::Violet => "Фиолетовый",
-            Self::Blue => "Синий",
+            Self::Red => Cow::Borrowed("Красный"),
+            Self::Teal => Cow::Borrowed("Бирюзовый"),
+            Self::Orange => Cow::Borrowed("Оранжевый"),
+            Self::Violet => Cow::Borrowed("Фиолетовый"),
+            Self::Blue => Cow::Borrowed("Синий"),
+            Self::Custom(rgb) => Cow::Owned(format!("Свой цвет {}", format_hex(rgb))),
         }
     }
 
-    pub fn color(self) -> Color {
-        rgb(match self {
+    /// Цвет как число `0xRRGGBB`.
+    pub fn rgb(self) -> u32 {
+        match self {
             Self::Red => 0xFA2D48,
             Self::Teal => 0x3DD6C3,
             Self::Orange => 0xFF8A3D,
             Self::Violet => 0x9D7BFF,
             Self::Blue => 0x3D8BFF,
-        })
+            Self::Custom(rgb) => rgb & RGB_MASK,
+        }
+    }
+
+    pub fn color(self) -> Color {
+        rgb(self.rgb())
     }
 
     /// Текст и иконки на акценте: белые на тёмных акцентах, почти чёрные на
     /// светлых.
     fn on(self) -> Color {
-        match self {
-            Self::Red | Self::Violet | Self::Blue => rgb(0xFFFFFF),
-            Self::Teal | Self::Orange => rgb(0x0A0A0A),
-        }
+        contrast_on(self.color())
     }
 
-    fn index(self) -> u8 {
+    /// Число для [`ACCENT`]: номер готового акцента или цвет с признаком.
+    fn encode(self) -> u32 {
         match self {
             Self::Red => 0,
             Self::Teal => 1,
             Self::Orange => 2,
             Self::Violet => 3,
             Self::Blue => 4,
+            Self::Custom(rgb) => CUSTOM_FLAG | (rgb & RGB_MASK),
         }
     }
+
+    fn decode(value: u32) -> Self {
+        if value & CUSTOM_FLAG != 0 {
+            return Self::custom(value);
+        }
+        Self::PRESETS
+            .into_iter()
+            .find(|accent| accent.encode() == value)
+            .unwrap_or_default()
+    }
+}
+
+/// Цвет текста и значков на фоне `color`: белый на тёмном, почти чёрный на
+/// светлом.
+pub fn contrast_on(color: Color) -> Color {
+    let luma = 0.299 * color.r + 0.587 * color.g + 0.114 * color.b;
+    if luma > 0.6 {
+        rgb(0x0A0A0A)
+    } else {
+        rgb(0xFFFFFF)
+    }
+}
+
+/// Разбор `#RRGGBB`: пробелы по краям и регистр не важны, `#` обязателен.
+pub fn parse_hex(text: &str) -> Option<u32> {
+    let digits = text.trim().strip_prefix('#')?;
+    if digits.len() != 6 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(digits, 16).ok()
+}
+
+/// Запись цвета `#RRGGBB` прописными.
+pub fn format_hex(rgb: u32) -> String {
+    format!("#{:06X}", rgb & RGB_MASK)
 }
 
 /// Текущий акцент. Стили iced рисуются из многих мест (замыкания стилей,
 /// цвета иконок), поэтому значение общее для всего окна, а не передаётся
-/// каждому виду. Меняет его только `App` (настройки и их загрузка).
-static ACCENT: AtomicU8 = AtomicU8::new(0);
+/// каждому виду. Меняет его только `App` (настройки и их загрузка). Одно
+/// число без блокировок: номер готового акцента или свой цвет с признаком.
+static ACCENT: AtomicU32 = AtomicU32::new(0);
 
 pub fn set_accent(accent: Accent) {
-    ACCENT.store(accent.index(), Ordering::Relaxed);
+    ACCENT.store(accent.encode(), Ordering::Relaxed);
 }
 
 pub fn current_accent() -> Accent {
-    let index = ACCENT.load(Ordering::Relaxed);
-    Accent::ALL
-        .into_iter()
-        .find(|accent| accent.index() == index)
-        .unwrap_or_default()
+    Accent::decode(ACCENT.load(Ordering::Relaxed))
 }
 
 /// Смесь цветов: `t` = 0 — `from`, 1 — `to`. Альфа смешивается тоже.
@@ -330,12 +387,60 @@ mod tests {
 
     #[test]
     fn accent_keys_round_trip() {
-        for accent in Accent::ALL {
-            assert_eq!(Accent::from_key(accent.key()), Some(accent));
+        for accent in Accent::PRESETS {
+            assert_eq!(Accent::from_key(&accent.key()), Some(accent));
         }
+        let custom = Accent::custom(0x12AB9F);
+        assert_eq!(Accent::from_key(&custom.key()), Some(custom));
+        assert_eq!(custom.key(), "#12AB9F");
         assert_eq!(Accent::from_key(" RED "), Some(Accent::Red));
         assert_eq!(Accent::from_key("фиолетовый"), None);
         assert_eq!(Accent::from_key(""), None);
+        assert_eq!(
+            Accent::from_key("  #fa2d48 "),
+            Some(Accent::Custom(0xFA2D48))
+        );
+        // Без `#`, не та длина и не шестнадцатеричные цифры — не цвет.
+        assert_eq!(Accent::from_key("FA2D48"), None);
+        assert_eq!(Accent::from_key("#FA2D4"), None);
+        assert_eq!(Accent::from_key("#FA2D488"), None);
+        assert_eq!(Accent::from_key("#GG2D48"), None);
+        assert_eq!(Accent::from_key("#+A2D48"), None);
+    }
+
+    #[test]
+    fn hex_parse_and_format() {
+        assert_eq!(parse_hex("#000000"), Some(0));
+        assert_eq!(parse_hex("#ffffff"), Some(0xFFFFFF));
+        assert_eq!(parse_hex("#"), None);
+        assert_eq!(parse_hex("#ЯЯЯ"), None);
+        assert_eq!(format_hex(0), "#000000");
+        assert_eq!(format_hex(0xABCDEF), "#ABCDEF");
+        // Лишние старшие биты отбрасываются.
+        assert_eq!(format_hex(0xFF12_3456), "#123456");
+    }
+
+    #[test]
+    fn accent_encoding_round_trips() {
+        let all = Accent::PRESETS.into_iter().chain([
+            Accent::custom(0),
+            Accent::custom(0xFFFFFF),
+            Accent::custom(7),
+        ]);
+        for accent in all {
+            assert_eq!(Accent::decode(accent.encode()), accent);
+        }
+        assert_eq!(Accent::custom(0x1FF0000), Accent::Custom(0xFF0000));
+        // Неизвестный номер — акцент по умолчанию.
+        assert_eq!(Accent::decode(99), Accent::default());
+    }
+
+    #[test]
+    fn contrast_follows_luma() {
+        assert_eq!(Accent::Red.on(), rgb(0xFFFFFF));
+        assert_eq!(Accent::Teal.on(), rgb(0x0A0A0A));
+        assert_eq!(Accent::custom(0x000000).on(), rgb(0xFFFFFF));
+        assert_eq!(Accent::custom(0xFFFFFF).on(), rgb(0x0A0A0A));
     }
 
     #[test]

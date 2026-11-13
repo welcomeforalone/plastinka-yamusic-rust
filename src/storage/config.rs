@@ -331,6 +331,16 @@ visualizer = \"yes\"
     }
 
     #[test]
+    fn custom_accent_is_kept_as_text() {
+        let config: Config = toml::from_str(
+            "accent = \"#12ab9f\"
+",
+        )
+        .unwrap();
+        assert_eq!(config.accent.as_deref(), Some("#12ab9f"));
+    }
+
+    #[test]
     fn sound_settings_survive_bad_values() {
         let config: Config = toml::from_str(
             "accent = \"teal\"

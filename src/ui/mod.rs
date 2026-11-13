@@ -16,6 +16,7 @@ mod library;
 mod lyrics_view;
 mod marquee;
 mod mini;
+mod palette;
 mod pause;
 mod pointer;
 mod queue;
@@ -307,7 +308,7 @@ impl Prefs {
 
     fn write(self, config: &mut Config) {
         config.sidebar_collapsed = self.sidebar_collapsed;
-        config.accent = Some(self.accent.key().to_owned());
+        config.accent = Some(self.accent.key().into_owned());
         config.scale = Some(i64::from(self.scale));
         config.visualizer = Some(self.visualizer);
         config.audio_quality = Some(self.quality.key().to_owned());
@@ -399,6 +400,8 @@ pub enum Message {
     ),
     ToggleSidebar,
     SetAccent(theme::Accent),
+    /// Палитра своего акцента.
+    Palette(palette::Msg),
     Zoom(Zoom),
     ToggleVisualizer,
     /// Качество звука и нормализация громкости (панель «Настройки звука»).
@@ -444,6 +447,8 @@ pub struct App {
     sidebar: Animation<bool>,
     /// Вид меню и внешний вид. Запоминаются в `config.toml`.
     prefs: Prefs,
+    /// Палитра своего акцента в настройках.
+    palette: palette::State,
     /// Discord Rich Presence: фоновая задача, пока открыто главное окно.
     discord: Option<discord::Rpc>,
     /// Application ID, с которым запущена задача Discord.
@@ -514,6 +519,7 @@ impl App {
             plugins: PluginSettings::default(),
             wave_settings: api::WaveSettings::default(),
             theme: theme::theme(),
+            palette: palette::State::default(),
             saving: false,
             save_again: false,
             started: now,
@@ -929,8 +935,10 @@ impl App {
                     accent,
                     ..self.prefs
                 };
+                self.palette.sync(accent);
                 return self.change_prefs(prefs);
             }
+            Message::Palette(message) => return self.palette_message(message),
             Message::Zoom(zoom) => {
                 let scale = match zoom {
                     Zoom::In => self.prefs.scale.saturating_add(config::SCALE_STEP),
@@ -1073,6 +1081,58 @@ impl App {
             library.set_lyrics_lrclib(prefs.lyrics_lrclib);
         }
         self.prefs = prefs;
+    }
+
+    /// Палитра своего акцента. Перетаскивание только показывает цвет
+    /// (во всём окне), запись в `config.toml` — когда кнопку отпустили.
+    fn palette_message(&mut self, message: palette::Msg) -> Task<Message> {
+        use palette::Msg;
+        match message {
+            Msg::Toggle => {
+                self.palette.open = !self.palette.open;
+                if self.palette.open {
+                    self.palette.sync(self.prefs.accent);
+                }
+                Task::none()
+            }
+            Msg::Field(x, y) => {
+                self.palette.pick(x, y);
+                self.preview_accent();
+                Task::none()
+            }
+            Msg::Hue(x) => {
+                self.palette.pick_hue(x);
+                self.preview_accent();
+                Task::none()
+            }
+            Msg::Released => {
+                if self.palette.take_dirty() {
+                    self.save_prefs()
+                } else {
+                    Task::none()
+                }
+            }
+            Msg::Hex(text) => match self.palette.input(text) {
+                Some(accent) if accent != self.prefs.accent => {
+                    let prefs = Prefs {
+                        accent,
+                        ..self.prefs
+                    };
+                    self.change_prefs(prefs)
+                }
+                _ => Task::none(),
+            },
+        }
+    }
+
+    /// Цвет из палитры сразу становится акцентом окна, но не пишется на диск.
+    fn preview_accent(&mut self) {
+        let accent = self.palette.accent();
+        if accent != self.prefs.accent {
+            self.prefs.accent = accent;
+            theme::set_accent(accent);
+            self.theme = theme::theme();
+        }
     }
 
     /// Новые настройки: применить и записать в `config.toml`.
@@ -1663,6 +1723,7 @@ impl App {
                 return self.decorate(library.view(
                     &self.covers,
                     &self.prefs,
+                    &self.palette,
                     moment,
                     self.compact(),
                     self.size.width,
