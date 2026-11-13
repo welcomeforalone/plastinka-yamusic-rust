@@ -419,30 +419,6 @@ fn screen_for(in_wave: bool, idle: bool, has_track: bool) -> Screen {
     }
 }
 
-/// Есть ли у трека волны свой цвет из ответа (цвета или оттенок): тогда
-/// большая обложка для VibeColorizer не нужна. Не волна — своего цвета нет.
-fn has_own_color(meta: Option<&Meta>) -> bool {
-    meta.is_some_and(|meta| {
-        meta.hue.is_some()
-            || meta
-                .colors
-                .as_ref()
-                .is_some_and(|colors| colors.accent.is_some() || colors.average.is_some())
-    })
-}
-
-/// Источники цвета для VibeColorizer: данные волны (если играет она) и
-/// средний цвет обложки (для любого трека).
-fn vibe_sources(meta: Option<&Meta>, cover: Option<[u8; 3]>) -> vibe::Sources<'_> {
-    let colors = meta.and_then(|meta| meta.colors.as_ref());
-    vibe::Sources {
-        accent: colors.and_then(|c| c.accent.as_deref()),
-        average: colors.and_then(|c| c.average.as_deref()),
-        hue: meta.and_then(|meta| meta.hue),
-        cover,
-    }
-}
-
 /// Подпись источника очереди для таблетки. `title` — название страницы
 /// (альбома, плейлиста, исполнителя), если оно известно.
 fn source_text(key: &ListKey, title: Option<&str>) -> String {
@@ -536,27 +512,29 @@ impl Library {
         self.wave.tint.animating(now)
     }
 
-    /// Данные волны для играющего трека: есть, только когда играет волна.
-    fn current_wave_meta(&self) -> Option<&Meta> {
-        if !self.in_wave() {
-            return None;
-        }
-        self.wave.items.get(self.queue.as_ref()?.current)
-    }
-
     /// Какого цвета должна быть волна: акцент, а с VibeColorizer — цвет
-    /// играющего трека из любого источника. У трека волны сначала цвета и
-    /// оттенок из ответа, у остальных — только среднее обложки.
+    /// текущего трека (цвета из ответа, оттенок, среднее обложки).
     fn wave_target(&self, covers: &Covers) -> Color {
         let accent = theme::accent();
-        if !self.plugins.vibe {
+        if !self.plugins.vibe || !self.in_wave() {
             return accent;
         }
-        let Some(track) = self.current_shown() else {
+        let Some(queue) = &self.queue else {
             return accent;
         };
-        let cover = covers.average(track.cover_uri.as_deref());
-        vibe::pick(vibe_sources(self.current_wave_meta(), cover)).unwrap_or(accent)
+        let Some(meta) = self.wave.items.get(queue.current) else {
+            return accent;
+        };
+        let cover = self
+            .current_shown()
+            .and_then(|track| covers.average(track.cover_uri.as_deref()));
+        vibe::pick(vibe::Sources {
+            accent: meta.colors.as_ref().and_then(|c| c.accent.as_deref()),
+            average: meta.colors.as_ref().and_then(|c| c.average.as_deref()),
+            hue: meta.hue,
+            cover,
+        })
+        .unwrap_or(accent)
     }
 
     /// Обновляет цель перехода цвета. Зовётся после каждого сообщения окна
@@ -566,15 +544,28 @@ impl Library {
         self.wave.tint.retarget(target, now);
     }
 
-    /// Большая обложка играющего трека: для экрана волны (она на виду) и
-    /// для VibeColorizer, если своего цвета у трека нет (не волна или в
-    /// ответе волны нет ни цвета, ни оттенка).
+    /// Большая обложка текущего трека волны: для экрана волны (она на виду)
+    /// и для VibeColorizer, если в ответе нет ни цвета, ни оттенка.
     pub fn wave_cover(&self) -> Option<&str> {
-        // На стартовом экране волны обложки не видно.
-        let visible = self.section == Section::Wave
-            && self.stack.is_empty()
-            && self.wave_screen() != Screen::Start;
-        let needs_color = self.plugins.vibe && !has_own_color(self.current_wave_meta());
+        // Чужой трек на экране волны: нужна только большая обложка.
+        if self.wave_screen() == Screen::Foreign {
+            let visible = self.section == Section::Wave && self.stack.is_empty();
+            return self
+                .current_shown()
+                .filter(|_| visible)
+                .and_then(|track| track.cover_uri.as_deref());
+        }
+        if !self.in_wave() {
+            return None;
+        }
+        let index = self.queue.as_ref()?.current;
+        let meta = self.wave.items.get(index)?;
+        let visible = self.section == Section::Wave && self.stack.is_empty();
+        let has_color = meta
+            .colors
+            .as_ref()
+            .is_some_and(|colors| colors.accent.is_some() || colors.average.is_some());
+        let needs_color = self.plugins.vibe && !has_color && meta.hue.is_none();
         if !(visible || needs_color) {
             return None;
         }
@@ -1772,78 +1763,6 @@ mod tests {
             loudness: None,
             lyrics: None,
         }
-    }
-
-    fn colored_meta(hue: Option<f64>, accent: Option<&str>) -> Meta {
-        Meta {
-            session: "s".to_owned(),
-            batch_id: "b".to_owned(),
-            from: None,
-            liked: false,
-            hue,
-            colors: accent.map(|accent| WaveColors {
-                accent: Some(accent.to_owned()),
-                average: None,
-            }),
-        }
-    }
-
-    #[test]
-    fn own_color_only_for_wave_tracks_with_data() {
-        // Не волна: своего цвета нет, нужна обложка.
-        assert!(!has_own_color(None));
-        assert!(!has_own_color(Some(&colored_meta(None, None))));
-        assert!(has_own_color(Some(&colored_meta(Some(10.0), None))));
-        assert!(has_own_color(Some(&colored_meta(None, Some("#FF0000")))));
-        // Не волна: цвет только из обложки.
-        let sources = vibe_sources(None, Some([0, 0, 255]));
-        assert_eq!(sources.accent, None);
-        assert_eq!(sources.hue, None);
-        assert_eq!(sources.cover, Some([0, 0, 255]));
-        // Волна: цвет из ответа идёт первым.
-        let wave = colored_meta(Some(120.0), Some("#FF0000"));
-        let sources = vibe_sources(Some(&wave), Some([0, 0, 255]));
-        assert_eq!(sources.accent, Some("#FF0000"));
-        assert_eq!(sources.hue, Some(120.0));
-    }
-
-    /// Играет «Мне нравится», не волна: с VibeColorizer цвет берётся из
-    /// обложки, без плагина — акцент.
-    #[test]
-    fn vibe_colors_any_playing_source() {
-        use super::super::super::covers::Big;
-        use iced::widget::image;
-
-        let uri = "avatars.yandex.net/get-music-content/1/cover/%%";
-        let mut song = track("1");
-        song.cover_uri = Some(uri.to_owned());
-        let mut library = super::super::tests::test_library();
-        library.queue = Some(Queue::new(ListKey::Liked, Arc::new(vec![song]), 0));
-        assert!(!library.in_wave());
-        let mut covers = Covers::new(None);
-        let pixel = || image::Handle::from_rgba(1, 1, vec![0, 0, 255, 255]);
-        covers.big_finished(
-            uri.to_owned(),
-            Some(Arc::new(Big {
-                cover: pixel(),
-                backdrop: pixel(),
-                average: Some([0, 0, 255]),
-            })),
-        );
-
-        // Без плагина обложка не нужна, цвет — акцент.
-        library.plugins.vibe = false;
-        assert_eq!(library.wave_cover(), None);
-        assert_eq!(library.wave_target(&covers), theme::accent());
-
-        library.plugins.vibe = true;
-        assert_eq!(library.wave_cover(), Some(uri));
-        let color = library.wave_target(&covers);
-        assert_ne!(color, theme::accent());
-        assert!(color.b > color.r && color.b > color.g, "{color:?}");
-        let now = Instant::now();
-        library.sync_wave_tint(&covers, now);
-        assert_eq!(library.wave_color(now + TINT_FADE), color);
     }
 
     #[test]

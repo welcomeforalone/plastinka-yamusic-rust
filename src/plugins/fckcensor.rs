@@ -211,8 +211,7 @@ pub fn parse_list(body: &[u8]) -> Result<CensorList, ListError> {
                 .flat_map(|tracks| tracks.keys())
                 .filter_map(|key| list_id(key))
                 .collect();
-            list.censored
-                .extend(ids.iter().cloned().chain(keys.iter().cloned()));
+            list.censored.extend(ids.iter().cloned().chain(keys.iter().cloned()));
 
             let template = storage
                 .get("urlTemplate")
@@ -1012,24 +1011,15 @@ mod tests {
                           "8":"http://plain.example.org/y.mp3"}}]}]}"#,
         )
         .unwrap();
-        assert_eq!(
-            list.replacement_url("5"),
-            Some("https://cdn.example.org/t/5")
-        );
-        assert_eq!(
-            list.replacement_url("6"),
-            Some("https://a.example.org/x.mp3")
-        );
+        assert_eq!(list.replacement_url("5"), Some("https://cdn.example.org/t/5"));
+        assert_eq!(list.replacement_url("6"), Some("https://a.example.org/x.mp3"));
         assert_eq!(
             list.replacement_url("7"),
             Some("https://cdn.example.org/t/8"),
             "объект: url-номер подставляется в шаблон"
         );
         assert_eq!(list.replacement_url("8"), None, "http отклоняется");
-        assert_eq!(
-            list.replacement_url("7019818"),
-            Some("https://cdn.example.org/t/7019818")
-        );
+        assert_eq!(list.replacement_url("7019818"), Some("https://cdn.example.org/t/7019818"));
 
         // Шаблон без `%%` и пустой — хранилище без ссылок.
         let broken = parse_list(
@@ -1050,10 +1040,10 @@ mod tests {
         );
 
         // Ручная замена важнее прямой ссылки.
-        censor
-            .replacements
-            .tracks
-            .insert("5".to_owned(), Replacement::file(PathBuf::from("a.flac")));
+        censor.replacements.tracks.insert(
+            "5".to_owned(),
+            Replacement::file(PathBuf::from("a.flac")),
+        );
         let manual = track("5", "x", ("", "y"), 1, Warning::None);
         assert_eq!(
             censor.sound(&manual, true),
