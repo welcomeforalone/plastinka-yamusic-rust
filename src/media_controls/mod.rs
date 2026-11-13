@@ -29,6 +29,9 @@ pub enum Command {
     SeekTo(f32),
     /// Перемотка на сдвиг: вперёд (`true`) или назад (секунды).
     SeekBy(bool, f32),
+    /// Громкость от 0 до 1 (MPRIS `Volume`: ползунок апплета, колесо мыши
+    /// над виджетом плеера, `playerctl volume`).
+    SetVolume(f32),
 }
 
 /// Сдвиг «перемотать» без указания размера (кнопки FastForward/Rewind).
@@ -36,7 +39,7 @@ const SEEK_STEP: Duration = Duration::from_secs(10);
 
 impl Command {
     /// Событие souvlaki → команда окна. Незнакомые и ненужные события
-    /// (`Raise`, `Quit`, громкость, `OpenUri`) пропускаются: окно не
+    /// (`Raise`, `Quit`, `OpenUri`) пропускаются: окно не
     /// закрывается и не открывает ссылки по просьбе системы.
     pub fn from_event(event: &souvlaki::MediaControlEvent) -> Option<Self> {
         use souvlaki::{MediaControlEvent as E, SeekDirection};
@@ -51,6 +54,11 @@ impl Command {
             E::SetPosition(position) => Self::SeekTo(position.0.as_secs_f32()),
             E::Seek(direction) => Self::SeekBy(forward(direction), SEEK_STEP.as_secs_f32()),
             E::SeekBy(direction, by) => Self::SeekBy(forward(direction), by.as_secs_f32()),
+            // Не число — пропускаем; вне 0..1 (MPRIS разрешает больше 1) —
+            // обрезаем до допустимого.
+            E::SetVolume(volume) if volume.is_finite() => {
+                Self::SetVolume(volume.clamp(0.0, 1.0) as f32)
+            }
             _ => return None,
         })
     }
@@ -75,6 +83,8 @@ pub struct State {
     pub track: Option<Track>,
     pub playing: bool,
     pub position_ms: u64,
+    /// Слышимая громкость в процентах (0, если звук выключен).
+    pub volume_percent: u32,
 }
 
 /// Метаданные для системы. Поля всегда заполнены: на Windows `None` не
@@ -108,6 +118,9 @@ pub struct Playback {
 pub enum Action {
     Metadata(Meta),
     Playback(Playback),
+    /// Громкость в процентах. Её показывает только MPRIS (Linux): в SMTC
+    /// громкости нет.
+    Volume(u32),
 }
 
 /// На сколько позиция должна разойтись с ожидаемой, чтобы считать это
@@ -126,12 +139,15 @@ struct Sent {
 #[derive(Default)]
 pub struct Syncer {
     sent: Option<Sent>,
+    /// Сообщённая громкость, проценты.
+    sent_volume: Option<u32>,
 }
 
 impl Syncer {
     /// Забыть всё сообщённое (системный плеер создан заново).
     pub fn reset(&mut self) {
         self.sent = None;
+        self.sent_volume = None;
     }
 
     /// Что сообщить по новому снимку. Пустой список — ничего не изменилось.
@@ -172,6 +188,10 @@ impl Syncer {
                 at: now,
             });
         }
+        if self.sent_volume != Some(state.volume_percent) {
+            self.sent_volume = Some(state.volume_percent);
+            actions.push(Action::Volume(state.volume_percent));
+        }
         actions
     }
 }
@@ -207,6 +227,7 @@ mod tests {
             track: Some(track(id)),
             playing,
             position_ms,
+            volume_percent: 70,
         }
     }
 
@@ -230,13 +251,40 @@ mod tests {
             Command::from_event(&E::SeekBy(SeekDirection::Forward, Duration::from_secs(5))),
             Some(Command::SeekBy(true, 5.0))
         );
+        assert_eq!(
+            Command::from_event(&E::SetVolume(0.5)),
+            Some(Command::SetVolume(0.5))
+        );
+    }
+
+    #[test]
+    fn volume_is_clamped_and_nan_dropped() {
+        assert_eq!(
+            Command::from_event(&E::SetVolume(1.7)),
+            Some(Command::SetVolume(1.0))
+        );
+        assert_eq!(
+            Command::from_event(&E::SetVolume(-0.2)),
+            Some(Command::SetVolume(0.0))
+        );
+        assert_eq!(Command::from_event(&E::SetVolume(f64::NAN)), None);
+    }
+
+    #[test]
+    fn volume_is_reported_on_change_only() {
+        let mut syncer = Syncer::default();
+        let start = Instant::now();
+        syncer.plan(&state("1", true, 0), start);
+        let mut louder = state("1", true, 0);
+        louder.volume_percent = 85;
+        assert_eq!(syncer.plan(&louder, start), vec![Action::Volume(85)]);
+        assert!(syncer.plan(&louder, start).is_empty());
     }
 
     #[test]
     fn unwanted_events_are_ignored() {
         assert_eq!(Command::from_event(&E::Quit), None);
         assert_eq!(Command::from_event(&E::Raise), None);
-        assert_eq!(Command::from_event(&E::SetVolume(0.5)), None);
         assert_eq!(Command::from_event(&E::OpenUri("x".to_owned())), None);
     }
 
@@ -245,7 +293,8 @@ mod tests {
         let mut syncer = Syncer::default();
         let now = Instant::now();
         let actions = syncer.plan(&state("1", true, 0), now);
-        assert_eq!(actions.len(), 2);
+        assert_eq!(actions.len(), 3);
+        assert_eq!(actions.get(2), Some(&Action::Volume(70)));
         let Some(Action::Metadata(meta)) = actions.first() else {
             return;
         };
@@ -338,7 +387,11 @@ mod tests {
         let mut syncer = Syncer::default();
         let start = Instant::now();
         syncer.plan(&state("1", true, 0), start);
-        let stopped = syncer.plan(&State::default(), start + Duration::from_secs(1));
+        let idle = State {
+            volume_percent: 70,
+            ..State::default()
+        };
+        let stopped = syncer.plan(&idle, start + Duration::from_secs(1));
         assert_eq!(
             stopped,
             vec![Action::Playback(Playback {
@@ -348,7 +401,7 @@ mod tests {
         );
         assert!(
             syncer
-                .plan(&State::default(), start + Duration::from_secs(2))
+                .plan(&idle, start + Duration::from_secs(2))
                 .is_empty()
         );
     }
@@ -359,6 +412,6 @@ mod tests {
         let start = Instant::now();
         syncer.plan(&state("1", true, 0), start);
         syncer.reset();
-        assert_eq!(syncer.plan(&state("1", true, 0), start).len(), 2);
+        assert_eq!(syncer.plan(&state("1", true, 0), start).len(), 3);
     }
 }

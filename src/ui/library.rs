@@ -250,6 +250,8 @@ pub enum Message {
     /// Ползунок отпустили.
     SeekCommit,
     Volume(f32),
+    /// Громкость из системного плеера (MPRIS): панель громкости не трогаем.
+    VolumeSet(f32),
     /// Колесо мыши над плеером: вверх — громче.
     VolumeScroll(f32),
     ToggleMute,
@@ -1160,6 +1162,15 @@ impl Library {
                 self.send(Command::Volume(self.player.gain()));
                 None
             }
+            Message::VolumeSet(volume) => {
+                self.player.volume = volume.clamp(0.0, 1.0);
+                self.player.muted = self.player.volume <= 0.0;
+                self.motion
+                    .volume
+                    .go_mut(self.player.gain(), Instant::now());
+                self.send(Command::Volume(self.player.gain()));
+                None
+            }
             Message::VolumeScroll(direction) => {
                 let step = if direction > 0.0 {
                     VOLUME_STEP
@@ -1516,17 +1527,23 @@ impl Library {
             C::Previous => Some(Message::Previous),
             C::SeekTo(position) => Some(Message::SeekTo(position)),
             C::SeekBy(forward, by) => Some(seek(forward, by)),
+            C::SetVolume(volume) => Some(Message::VolumeSet(volume)),
         }
     }
 
     /// Что сейчас играет — для системного плеера (медиаклавиши, оверлей).
     pub fn media_state(&self) -> media_controls::State {
+        let volume_percent = volume_percent(self.player.volume, self.player.muted);
         // Трек остановлен (конец, ошибка) — как «ничего не играет».
+        let idle = media_controls::State {
+            volume_percent,
+            ..media_controls::State::default()
+        };
         let (Some(shown), Some(current)) = (self.current_shown(), self.current()) else {
-            return media_controls::State::default();
+            return idle;
         };
         if !self.player.loaded {
-            return media_controls::State::default();
+            return idle;
         }
         let local = matches!(self.decide(current), Decision::Play(Sound::File(_)));
         media_controls::State {
@@ -1543,6 +1560,7 @@ impl Library {
             }),
             playing: self.player.playing,
             position_ms: (self.player.position.max(0.0) * 1000.0).round() as u64,
+            volume_percent,
         }
     }
 

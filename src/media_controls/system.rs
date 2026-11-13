@@ -2,9 +2,8 @@
 //! действий. Логики решений здесь нет (она в `super`), только вызовы.
 //!
 //! Платформы: Windows — SMTC, нужен HWND окна; Linux — MPRIS по D-Bus
-//! (бэкенд `use_zbus`, свой поток службы внутри souvlaki). Linux-ветка здесь
-//! не собиралась (сборка только под Windows); `#[cfg]` разводит ветки по
-//! смыслу, различие — только в HWND.
+//! (бэкенд `use_zbus`, свой поток службы внутри souvlaki). `#[cfg]` разводит
+//! ветки: HWND нужен только Windows, громкость есть только в MPRIS.
 
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -108,6 +107,7 @@ impl Controls {
                     duration: meta.duration,
                 }),
                 Action::Playback(playback) => self.inner.set_playback(to_souvlaki(playback)),
+                Action::Volume(percent) => set_volume(&mut self.inner, f64::from(percent) / 100.0),
             };
             result.map_err(|err| err.to_string())?;
         }
@@ -122,6 +122,18 @@ fn to_souvlaki(playback: Playback) -> MediaPlayback {
         Status::Paused => MediaPlayback::Paused { progress },
         Status::Playing => MediaPlayback::Playing { progress },
     }
+}
+
+/// Громкость в MPRIS: апплеты и `playerctl volume` видят текущее значение.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
+fn set_volume(inner: &mut MediaControls, volume: f64) -> Result<(), souvlaki::Error> {
+    inner.set_volume(volume)
+}
+
+/// В SMTC (Windows) и в macOS громкости в системном плеере нет.
+#[cfg(not(all(unix, not(any(target_os = "macos", target_os = "ios")))))]
+fn set_volume(_inner: &mut MediaControls, _volume: f64) -> Result<(), souvlaki::Error> {
+    Ok(())
 }
 
 /// HWND для souvlaki. Windows: обязателен. Остальные: не нужен.
