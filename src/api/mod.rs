@@ -24,11 +24,11 @@ pub use account::{
     Account, AccountStatus, Date, PlaybackPermit, PlusDetails, Subscription, fetch_status,
 };
 pub use catalog::{
-    ARTIST_TRACKS_PAGE, Album, AlbumCard, AlbumKind, Artist, ArtistCard, Found, ListeningTop,
-    MyAlbums, MyArtists, MyPlaylists, Page, Playlist, PlaylistCard, SEARCH_LAST_PAGE, SearchKind,
+    ARTIST_TRACKS_PAGE, Album, AlbumCard, AlbumKind, Artist, ArtistCard, Found, MonthTop, MyAlbums,
+    MyArtists, MyPlaylists, Page, Playlist, PlaylistCard, SEARCH_LAST_PAGE, SearchKind,
     SearchResult, TopArtist, Trend, compact_number, fetch_album, fetch_artist, fetch_artist_tracks,
-    fetch_listening_top, fetch_my_albums, fetch_my_artists, fetch_my_playlists, fetch_playlist,
-    search, total_duration,
+    fetch_month_top, fetch_my_albums, fetch_my_artists, fetch_my_playlists, fetch_playlist, search,
+    total_duration,
 };
 pub use history::{
     HistoryContext, HistoryDay, HistoryItem, Ymd, day_label, fetch_history, today_utc,

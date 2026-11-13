@@ -459,6 +459,7 @@ fn source_text(key: &ListKey, title: Option<&str>) -> String {
             Some(name) => format!("Исполнитель {name}"),
             None => "Исполнитель".to_owned(),
         },
+        ListKey::TopTracks(_) => "Топ месяца".to_owned(),
         ListKey::SearchTracks(_) => "Поиск".to_owned(),
         ListKey::Wave => "Моя волна".to_owned(),
     }

@@ -7,14 +7,6 @@ pub fn tracks_word(count: usize) -> &'static str {
     plural(count, ["трек", "трека", "треков"])
 }
 
-/// «прослушивание» в нужной форме: топ по истории.
-pub fn plays_word(count: u32) -> &'static str {
-    plural(
-        usize::try_from(count).unwrap_or(usize::MAX),
-        ["прослушивание", "прослушивания", "прослушиваний"],
-    )
-}
-
 /// Форма слова для числа: [1, 2–4, 5–20].
 pub fn plural(count: usize, forms: [&'static str; 3]) -> &'static str {
     let [one, few, many] = forms;

@@ -260,7 +260,11 @@ impl Library {
                         censor.note(paged.items.iter());
                     }
                 }
-                super::pages::Page::TopArtists { .. } => {}
+                super::pages::Page::TopArtists { load } => {
+                    if let Some(top) = load.ready() {
+                        censor.note(top.tracks.iter());
+                    }
+                }
             }
         }
         if let Some(super::pages::Load::Ready(paged)) = &self.search.tracks {

@@ -21,7 +21,7 @@ use super::{
     ROW, Section, list_header, skeleton, state_block,
 };
 use crate::api::{
-    self, AlbumCard, AlbumKind, ArtistCard, ArtistRef, ListeningTop, PlaylistCard, SearchKind,
+    self, AlbumCard, AlbumKind, ArtistCard, ArtistRef, MonthTop, PlaylistCard, SearchKind,
     TopArtist, Track, Trend,
 };
 use crate::texts::{self, plural, sentence};
@@ -170,16 +170,27 @@ fn grid_rows(items: usize, columns: usize) -> usize {
     items.div_ceil(columns.max(1))
 }
 
-/// Высота блока над сеткой страницы «Топ исполнителей»: «Назад», шапка и,
-/// если топ пуст, строка об этом.
-fn top_page_top(top: Option<&ListeningTop>) -> f32 {
-    let empty = top.is_some_and(|top| top.artists.is_empty());
-    TOP_PAD
-        + BACK_ROW
-        + BACK_GAP
-        + COLLECTION_HEADER
-        + HEADER_GAP
-        + if empty { EMPTY_NOTE } else { 0.0 }
+/// Высота блока над сеткой страницы «Топ месяца»: «Назад», шапка, строки
+/// треков с заголовком раздела и заголовок раздела исполнителей. Пустая
+/// страница — строка об этом.
+fn top_page_top(top: Option<&MonthTop>) -> f32 {
+    let mut height = TOP_PAD + BACK_ROW + BACK_GAP + COLLECTION_HEADER + HEADER_GAP;
+    if let Some(top) = top {
+        let tracks = top.tracks.len();
+        if tracks > 0 {
+            height += SECTION_TITLE + 8.0 + span_of(tracks, ROW);
+        }
+        if !top.artists.is_empty() {
+            if tracks > 0 {
+                height += SECTION_GAP;
+            }
+            height += SECTION_TITLE + 16.0;
+        }
+        if tracks == 0 && top.artists.is_empty() {
+            height += EMPTY_NOTE;
+        }
+    }
+    height
 }
 
 /// Высота блока над альбомами исполнителя.
@@ -428,6 +439,7 @@ impl Library {
                 }
                 Page::TopArtists { load } => {
                     if let Some(top) = load.ready() {
+                        uris.extend(self.small(&top.tracks, 0..top.tracks.len()));
                         uris.extend(cards(first..last).filter_map(|index| {
                             top.artists
                                 .get(index)
@@ -570,7 +582,11 @@ impl Library {
                         out.extend(paged.items.iter().skip(first).take(rows));
                     }
                 }
-                Page::TopArtists { .. } => {}
+                Page::TopArtists { load } => {
+                    if let Some(top) = load.ready() {
+                        out.extend(top.tracks.iter());
+                    }
+                }
             }
             return out;
         }
@@ -754,29 +770,28 @@ impl Library {
                 Load::Failed(failure) => failed_page("Не удалось загрузить треки", failure),
             },
             Page::TopArtists { load } => match load {
-                Load::Ready(top) => self.top_page(top, covers),
+                Load::Ready(top) => self.top_page(entry.serial, top, covers),
                 Load::Loading(since) => loading_page(*since, now, turn),
                 Load::Failed(failure) => failed_page("Не удалось собрать топ", failure),
             },
         }
     }
 
-    /// Весь топ исполнителей по истории прослушивания.
-    fn top_page<'a>(&'a self, top: &'a ListeningTop, covers: &'a Covers) -> Element<'a, App> {
-        let count = top.artists.len();
-        let subtitle = if count == 0 {
-            "История прослушивания пока пуста".to_owned()
-        } else {
-            format!(
-                "{count} {} · по истории прослушивания за {} {}",
-                plural(count, ["исполнитель", "исполнителя", "исполнителей"]),
-                top.days,
-                plural(top.days, ["день", "дня", "дней"]),
-            )
-        };
+    /// Топ месяца: треки (играют списком), ниже — сетка исполнителей.
+    fn top_page<'a>(
+        &'a self,
+        serial: u64,
+        top: &'a MonthTop,
+        covers: &'a Covers,
+    ) -> Element<'a, App> {
+        let key = ListKey::TopTracks(serial);
         let header = column![
-            theme::line("Топ исполнителей", Style::Display, theme::TEXT_PRIMARY),
-            theme::line(subtitle, Style::Body, theme::TEXT_SECONDARY),
+            theme::line("Топ месяца", Style::Display, theme::TEXT_PRIMARY),
+            theme::line(
+                "Исполнители и треки, которые вы слушали больше всего за месяц",
+                Style::Body,
+                theme::TEXT_SECONDARY,
+            ),
         ]
         .spacing(4);
         let mut head = column![
@@ -786,10 +801,27 @@ impl Library {
             container(header).height(COLLECTION_HEADER),
             Space::new().height(HEADER_GAP),
         ];
-        if count == 0 {
+        let tracks = top.tracks.len();
+        if tracks > 0 {
+            head = head
+                .push(section_title("Треки месяца", None))
+                .push(Space::new().height(8));
+            for (index, track) in top.tracks.iter().enumerate() {
+                head = head.push(self.track_row(&key, index, index + 1, track, covers));
+            }
+        }
+        if !top.artists.is_empty() {
+            if tracks > 0 {
+                head = head.push(Space::new().height(SECTION_GAP));
+            }
+            head = head
+                .push(section_title("Исполнители", None))
+                .push(Space::new().height(16));
+        }
+        if tracks == 0 && top.artists.is_empty() {
             head = head.push(
                 container(theme::line(
-                    "Послушайте музыку — здесь появятся исполнители, которых вы слушаете чаще всего.",
+                    "Послушайте музыку — здесь появится ваш топ за месяц.",
                     Style::Body,
                     theme::TEXT_SECONDARY,
                 ))
@@ -2120,15 +2152,7 @@ fn top_artist_card<'a>(covers: &'a Covers, top: &'a TopArtist, side: f32) -> Ele
             Style::Secondary,
             theme::TEXT_SECONDARY,
         );
-        // В топе по истории ещё и сколько раз слушали — в подсказке.
-        line = match top.plays {
-            Some(plays) => line.push(widgets::with_tooltip(
-                time,
-                format!("{plays} {}", texts::plays_word(plays)),
-                tooltip::Position::Top,
-            )),
-            None => line.push(time),
-        };
+        line = line.push(time);
     }
     let artist = &top.card;
     card(
