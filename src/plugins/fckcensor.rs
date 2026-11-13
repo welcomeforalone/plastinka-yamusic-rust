@@ -1,17 +1,18 @@
 //! FckCensor: названия, обложки и исполнители без цензуры из списка
-//! `Hazzz895/FckCensorData` (`list_v2.json`) и звук без цензуры — только с
-//! Яндекса или из файла, который выбрал сам пользователь (правило 7).
+//! `Hazzz895/FckCensorData` (`list_v2.json`) и звук без цензуры — из
+//! хранилищ списка, с Яндекса или из файла, который выбрал сам пользователь.
 //!
 //! Откуда берётся звук трека, по порядку ([`Censor::sound`]):
 //!
 //! 1. ручная замена пользователя — трек Яндекса или свой файл;
 //! 2. `__fckCensor.audioSourceId` из списка — трек Яндекса;
-//! 3. версия того же трека с `contentWarning: explicit`, найденная поиском;
-//! 4. сам трек.
+//! 3. прямая ссылка из хранилищ списка (`tracksStorages`): файлы без цензуры
+//!    лежат в том же репозитории, что и список, `urlTemplate` с `%%` —
+//!    подстановка номера файла, как в оригинальном аддоне;
+//! 4. версия того же трека с `contentWarning: explicit`, найденная поиском;
+//! 5. сам трек.
 //!
-//! Хранилища звука из списка (`tracksStorages`) не загружаются: из них
-//! берутся только номера треков как признак «трек цензурный». Формат и
-//! источники — `docs/api/stage-7.5.md`.
+//! Ссылки хранилищ — только https. Формат и источники — `docs/api/stage-7.5.md`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -98,6 +99,9 @@ pub struct CensorList {
     pub albums: HashMap<String, AlbumPatch>,
     /// Треки, у которых на Яндексе цензурная версия.
     pub censored: HashSet<String>,
+    /// Прямые ссылки на звук без цензуры из хранилищ списка: номер трека →
+    /// https-адрес файла (репозиторий списка).
+    pub urls: HashMap<String, String>,
 }
 
 impl CensorList {
@@ -144,6 +148,11 @@ impl CensorList {
         self.tracks.get(id)?.sound.as_deref()
     }
 
+    /// Прямая ссылка на звук без цензуры из хранилищ списка.
+    pub fn replacement_url(&self, id: &str) -> Option<&str> {
+        self.urls.get(id).map(String::as_str)
+    }
+
     /// Нужна ли треку версия без цензуры.
     pub fn censored(&self, track: &Track) -> bool {
         track.warning != Warning::Explicit
@@ -180,26 +189,53 @@ pub fn parse_list(body: &[u8]) -> Result<CensorList, ListError> {
                 list.albums.insert(id, album_patch(album));
             }
         }
-        // Из хранилищ — только номера треков: звук оттуда не берём.
+        // Хранилища звука: прямые ссылки на файлы без цензуры (как в
+        // оригинальном аддоне) и номера треков как признак цензуры.
         for storage in source
             .get("tracksStorages")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
         {
-            let numbered = storage
+            let ids: Vec<String> = storage
                 .get("trackIds")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(|item| api::numeric_id(item.get("id").unwrap_or(item)));
-            let keyed = storage
+                .filter_map(|item| api::numeric_id(item.get("id").unwrap_or(item)))
+                .collect();
+            let keys: Vec<String> = storage
                 .get("tracks")
                 .and_then(Value::as_object)
                 .into_iter()
                 .flat_map(|tracks| tracks.keys())
-                .filter_map(|key| list_id(key));
-            list.censored.extend(numbered.chain(keyed));
+                .filter_map(|key| list_id(key))
+                .collect();
+            list.censored.extend(ids.iter().cloned().chain(keys.iter().cloned()));
+
+            let template = storage
+                .get("urlTemplate")
+                .and_then(Value::as_str)
+                .and_then(storage_template);
+            let Some(template) = template else {
+                continue;
+            };
+            // `trackIds`: файл звука — шаблон с номером самого трека.
+            for id in ids {
+                list.urls.insert(id.clone(), template.replace("%%", &id));
+            }
+            // `tracks`: номер трека → номер файла, готовая ссылка или объект
+            // с полем `url`.
+            if let Some(files) = storage.get("tracks").and_then(Value::as_object) {
+                for (key, value) in files {
+                    let Some(id) = list_id(key) else {
+                        continue;
+                    };
+                    if let Some(url) = file_url(value, &template) {
+                        list.urls.insert(id, url);
+                    }
+                }
+            }
         }
     }
     Ok(list)
@@ -207,6 +243,53 @@ pub fn parse_list(body: &[u8]) -> Result<CensorList, ListError> {
 
 fn list_id(key: &str) -> Option<String> {
     api::numeric_id(&Value::String(key.to_owned()))
+}
+
+/// Шаблон ссылки хранилища: обязателен `%%`, без схемы подразумевается
+/// https (хранилище списка живёт на GitHub).
+fn storage_template(raw: &str) -> Option<String> {
+    if raw.len() > 1800
+        || !raw.contains("%%")
+        || raw.chars().any(|ch| ch.is_whitespace() || ch.is_control())
+    {
+        return None;
+    }
+    let url = raw
+        .contains("://")
+        .then(|| raw.to_owned())
+        .unwrap_or_else(|| format!("https://{raw}"));
+    plausible_url(&url).then_some(url)
+}
+
+/// Адрес файла звука из значения хранилища: номер или строка без схемы —
+/// подстановка в шаблон, готовая ссылка — как есть.
+fn file_url(value: &Value, template: &str) -> Option<String> {
+    let raw: String = match value {
+        Value::Number(number) => number.to_string(),
+        Value::String(text) => text.clone(),
+        Value::Object(fields) => match fields.get("url")? {
+            Value::Number(number) => number.to_string(),
+            Value::String(text) => text.clone(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if raw.chars().any(|ch| ch.is_whitespace() || ch.is_control()) || raw.len() > 1800 {
+        return None;
+    }
+    let url = if raw.contains("://") {
+        raw
+    } else {
+        template.replace("%%", &raw)
+    };
+    plausible_url(&url).then_some(url)
+}
+
+/// Ссылка хранилища: только https, разумной длины, без мусора.
+fn plausible_url(url: &str) -> bool {
+    url.starts_with("https://")
+        && url.len() <= 2000
+        && !url.chars().any(|ch| ch.is_whitespace() || ch.is_control())
 }
 
 /// Адрес обложки из списка: шаблон без схемы, с `%%`.
@@ -779,6 +862,9 @@ impl Censor {
             || self
                 .list()
                 .is_some_and(|list| list.sound_of(&track.id).is_some())
+            || self
+                .list()
+                .is_some_and(|list| list.replacement_url(&track.id).is_some())
     }
 
     /// Откуда брать звук трека (см. начало модуля).
@@ -794,6 +880,10 @@ impl Censor {
         let list = self.list();
         if let Some(id) = list.and_then(|list| list.sound_of(&track.id)) {
             return Decision::Play(Sound::Track(id.to_owned()));
+        }
+        // Звук без цензуры из хранилищ списка: прямая ссылка на файл.
+        if let Some(url) = list.and_then(|list| list.replacement_url(&track.id)) {
+            return Decision::Play(Sound::Url(url.to_owned()));
         }
         if !track.available {
             return Decision::Silent;
@@ -856,7 +946,6 @@ pub const SAMPLE_LIST: &str = r#"{
     { "tracksStorages": [{ "urlTemplate": "example.invalid/%%", "tracks": { "500002": 1 } }] }
   ]
 }"#;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -894,8 +983,95 @@ mod tests {
         let mut censored: Vec<_> = list.censored.iter().cloned().collect();
         censored.sort();
         assert_eq!(censored, ["500000", "500001", "500002"]);
+        // Ссылки хранилищ: шаблон с подстановкой номера, без схемы — https.
+        assert_eq!(
+            list.replacement_url("500000"),
+            Some("https://example.invalid/500000")
+        );
+        assert_eq!(
+            list.replacement_url("500001"),
+            Some("https://example.invalid/500001")
+        );
+        assert_eq!(
+            list.replacement_url("500002"),
+            Some("https://example.invalid/1"),
+            "значение-номер — это номер файла, не трека"
+        );
         assert!(matches!(parse_list(b"{}"), Err(ListError::Broken)));
         assert!(matches!(parse_list(b"<html>"), Err(ListError::Broken)));
+    }
+
+    #[test]
+    fn storage_urls_resolve_like_the_addon() {
+        let list = parse_list(
+            br#"{"sources":[{"tracks":{"7019818":{"__fckCensor":{"audioSourceId":"9"}}},
+                "tracksStorages":[{"urlTemplate":"cdn.example.org/t/%%",
+                "trackIds":[7019818,5],
+                "tracks":{"6":"https://a.example.org/x.mp3","7":{"url":8,"durationMs":1},
+                          "8":"http://plain.example.org/y.mp3"}}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(list.replacement_url("5"), Some("https://cdn.example.org/t/5"));
+        assert_eq!(list.replacement_url("6"), Some("https://a.example.org/x.mp3"));
+        assert_eq!(
+            list.replacement_url("7"),
+            Some("https://cdn.example.org/t/8"),
+            "объект: url-номер подставляется в шаблон"
+        );
+        assert_eq!(list.replacement_url("8"), None, "http отклоняется");
+        assert_eq!(list.replacement_url("7019818"), Some("https://cdn.example.org/t/7019818"));
+
+        // Шаблон без `%%` и пустой — хранилище без ссылок.
+        let broken = parse_list(
+            br#"{"sources":[{"tracksStorages":[{"urlTemplate":"no-placeholder.example.org","trackIds":[1]}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(broken.replacement_url("1"), None);
+        assert!(broken.censored.contains("1"), "признак цензуры остаётся");
+
+        let mut censor = Censor::default();
+        censor.loaded(
+            Loaded {
+                list: Arc::new(list),
+                fetched: 0,
+                stale: None,
+            },
+            None,
+        );
+
+        // Ручная замена важнее прямой ссылки.
+        censor.replacements.tracks.insert(
+            "5".to_owned(),
+            Replacement::file(PathBuf::from("a.flac")),
+        );
+        let manual = track("5", "x", ("", "y"), 1, Warning::None);
+        assert_eq!(
+            censor.sound(&manual, true),
+            Decision::Play(Sound::File(PathBuf::from("a.flac")))
+        );
+
+        // audioSourceId из списка важнее ссылки хранилища.
+        let sourced = track("7019818", "x", ("", "y"), 1, Warning::Clean);
+        assert_eq!(
+            censor.sound(&sourced, true),
+            Decision::Play(Sound::Track("9".to_owned()))
+        );
+
+        // Ссылка хранилища важнее автопоиска: играют файл, а не поиск.
+        let linked = track("6", "x", ("", "y"), 1, Warning::Clean);
+        assert_eq!(
+            censor.sound(&linked, true),
+            Decision::Play(Sound::Url("https://a.example.org/x.mp3".to_owned()))
+        );
+
+        // Недоступный трек со ссылкой в хранилище играет.
+        let mut gone = track("7", "x", ("", "y"), 1, Warning::None);
+        gone.available = false;
+        assert!(censor.playable(&gone));
+        assert_eq!(
+            censor.sound(&gone, true),
+            Decision::Play(Sound::Url("https://cdn.example.org/t/8".to_owned()))
+        );
     }
 
     #[test]

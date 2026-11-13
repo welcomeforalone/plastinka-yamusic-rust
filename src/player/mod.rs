@@ -50,13 +50,14 @@ pub use output::{TAP_LEN, Tap};
 /// Как часто поток управления сообщает позицию.
 const TICK: Duration = Duration::from_millis(200);
 
-/// Откуда звук: поток трека Яндекса или файл, который выбрал сам
-/// пользователь (замена в плагине FckCensor). Других источников нет
-/// (правило 7).
+/// Откуда звук: поток трека Яндекса, файл, который выбрал сам пользователь
+/// (замена в плагине FckCensor), или прямая ссылка из хранилищ списка
+/// FckCensor (только https, тот же источник, что и сам список).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sound {
     Track(String),
     File(PathBuf),
+    Url(String),
 }
 
 /// Команды окна.
@@ -484,6 +485,7 @@ impl Control {
 
         let (download, extension) = match &sound {
             Sound::Track(track_id) => (self.stream(&shared, track_id.clone(), mp3_only), None),
+            Sound::Url(url) => (self.direct(&shared, url.clone()), None),
             Sound::File(path) => {
                 let path = path.clone();
                 let extension = path
@@ -539,6 +541,30 @@ impl Control {
                 } else {
                     api::fetch_stream_source(&http, &token.access_token, &track_id, quality).await
                 }
+            })
+        });
+        let (buffer, audio_http, session) = (
+            shared.buffer.clone(),
+            self.audio_http.clone(),
+            shared.clone(),
+        );
+        let on_link = move |source: &api::StreamSource| session.set_stream(source.info());
+        self.runtime
+            .spawn(download::run(buffer, audio_http, relink, on_link))
+    }
+
+    /// Загрузка звука по прямой ссылке из списка FckCensor. Ссылка
+    /// постоянная: «переполучение» возвращает её же. Кодек в значке — MP3,
+    /// битрейт неизвестен; формат определяет декодер.
+    fn direct(&self, shared: &Arc<Shared>, url: String) -> tokio::task::JoinHandle<()> {
+        let relink: download::Relink = Box::new(move || {
+            let url = url.clone();
+            Box::pin(async move {
+                Ok(api::StreamSource::Url {
+                    url,
+                    kbps: 0,
+                    codec: api::Codec::Mp3,
+                })
             })
         });
         let (buffer, audio_http, session) = (

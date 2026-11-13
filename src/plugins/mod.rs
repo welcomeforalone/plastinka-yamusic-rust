@@ -1,6 +1,6 @@
 //! Встроенные плагины: свои модули на Rust по мотивам аддонов PulseSync.
-//! Код аддонов не переносим, только поведение. Каждый плагин по умолчанию
-//! выключен и включается в «Настройки → Плагины».
+//! Код аддонов не переносим, только поведение. FckCensor включён по умолчанию,
+//! остальные выключены и включаются в «Настройки → Плагины».
 //!
 //! - [`fckcensor`] — названия, обложки и исполнители без цензуры из списка
 //!   `Hazzz895/FckCensorData`, звук — только с Яндекса или из своего файла.
@@ -44,7 +44,8 @@ pub struct PluginSettings {
 impl Default for PluginSettings {
     fn default() -> Self {
         Self {
-            fckcensor: false,
+            // Автозамена зацензуренных треков работает сразу, без настроек.
+            fckcensor: true,
             explicit_search: true,
             slopless: false,
             autoskip: true,
@@ -167,7 +168,7 @@ mod tests {
     fn settings_round_trip_and_defaults() {
         let defaults = PluginSettings::from_config(&PluginsConfig::default());
         assert_eq!(defaults, PluginSettings::default());
-        assert!(!defaults.fckcensor && !defaults.slopless && !defaults.copy_name && !defaults.vibe);
+        assert!(defaults.fckcensor && !defaults.slopless && !defaults.copy_name && !defaults.vibe);
         assert!(!defaults.dislike, "запись в аккаунт — только по согласию");
 
         let mut changed = PluginSettings {
