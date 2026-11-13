@@ -152,7 +152,7 @@ pub enum Page {
         load: Load<Paged<Track>>,
     },
     TopArtists {
-        load: Load<api::ListeningTop>,
+        load: Load<api::MonthTop>,
     },
 }
 
@@ -172,7 +172,7 @@ pub enum Loaded {
     Playlist(Result<api::Playlist, Failure>),
     Artist(Result<api::Artist, Failure>),
     Tracks(Result<api::Page<Track>, Failure>),
-    Top(Result<api::ListeningTop, Failure>),
+    Top(Result<api::MonthTop, Failure>),
 }
 
 /// Что пришло для раздела коллекции.
@@ -525,7 +525,7 @@ impl Library {
                             .map_err(Failure::from),
                     ),
                     Target::TopArtists => Loaded::Top(
-                        api::fetch_listening_top(&http, token)
+                        api::fetch_month_top(&http, token)
                             .await
                             .map_err(Failure::from),
                     ),
@@ -1005,7 +1005,7 @@ impl Library {
                 Page::Playlist { load, .. } => load.ready().map(|playlist| playlist.tracks.clone()),
                 Page::Artist { load, .. } => load.ready().map(|artist| artist.popular.clone()),
                 Page::ArtistTracks { load, .. } => load.ready().map(|paged| paged.items.clone()),
-                Page::TopArtists { .. } => None,
+                Page::TopArtists { load } => load.ready().map(|top| top.tracks.clone()),
             }
         };
         match key {
@@ -1023,7 +1023,8 @@ impl Library {
             ListKey::Album(serial)
             | ListKey::Playlist(serial)
             | ListKey::ArtistPopular(serial)
-            | ListKey::ArtistTracks(serial) => page_tracks(*serial),
+            | ListKey::ArtistTracks(serial)
+            | ListKey::TopTracks(serial) => page_tracks(*serial),
             ListKey::Detached | ListKey::Wave => None,
             ListKey::SearchTracks(generation) => match &self.search.tracks {
                 Some(Load::Ready(paged)) if *generation == self.search.generation => {
@@ -1095,14 +1096,14 @@ impl Entry {
     }
 }
 
-/// Ключ списка треков страницы. У топа исполнителей треков нет.
+/// Ключ списка треков страницы.
 pub fn entry_key(entry: &Entry) -> Option<ListKey> {
     Some(match entry.page {
         Page::Album { .. } => ListKey::Album(entry.serial),
         Page::Playlist { .. } => ListKey::Playlist(entry.serial),
         Page::Artist { .. } => ListKey::ArtistPopular(entry.serial),
         Page::ArtistTracks { .. } => ListKey::ArtistTracks(entry.serial),
-        Page::TopArtists { .. } => return None,
+        Page::TopArtists { .. } => ListKey::TopTracks(entry.serial),
     })
 }
 

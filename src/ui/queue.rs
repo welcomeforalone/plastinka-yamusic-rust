@@ -26,6 +26,8 @@ pub enum ListKey {
     Playlist(u64),
     ArtistPopular(u64),
     ArtistTracks(u64),
+    /// Треки страницы «Топ месяца».
+    TopTracks(u64),
     /// Треки поиска по номеру запроса.
     SearchTracks(u64),
     /// «Моя волна»: очередь растёт по мере догрузки.

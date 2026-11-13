@@ -6,7 +6,7 @@
 //! и без токена, поэтому его 403 — «нет доступа», а не «войдите заново».
 //! Подробности в `docs/api/stage-7.md`.
 
-use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::StatusCode;
@@ -36,9 +36,6 @@ const LIKED_PLAYLIST_KIND: &str = "3";
 const MET_ARTISTS: u32 = 16;
 const NEW_RELEASES: u32 = 30;
 const PERSONAL_PLAYLISTS: u32 = 10;
-/// Сколько треков истории просить с полными данными (исполнители,
-/// длительность). У остальных только идентификаторы, в топ они не идут.
-const HISTORY_MODELS: u32 = 5000;
 
 // ------------------------------------------------------------- модель
 
@@ -151,17 +148,18 @@ pub struct TopArtist {
     pub position: Option<u32>,
     pub trend: Option<Trend>,
     pub listened: Duration,
-    /// Сколько раз слушали: есть только в топе по истории.
-    pub plays: Option<u32>,
 }
 
-/// Полный топ исполнителей по истории прослушивания. Топ месяца у сервиса —
-/// не больше пяти, история — все прослушанные за последние дни.
+/// Страница «Топ месяца»: исполнители и треки за один период. Сервис
+/// отдаёт не больше пяти исполнителей и десяти треков.
 #[derive(Debug, Clone, Default)]
-pub struct ListeningTop {
-    /// За сколько дней история.
-    pub days: usize,
+pub struct MonthTop {
     pub artists: Vec<TopArtist>,
+    /// Общий список: очередь воспроизведения держит его же.
+    pub tracks: Arc<Vec<Track>>,
+    /// Сколько раз слушали каждый трек, в том же порядке; 0 — сервис число
+    /// не прислал.
+    pub plays: Vec<u32>,
 }
 
 /// Раздел «Исполнители»: топ месяца, встреченные в «Моей волне» и
@@ -314,14 +312,14 @@ enum Request {
     LikedArtists(u64),
     /// Топ исполнителей месяца.
     TopArtists,
+    /// Топ треков месяца.
+    TopTracks,
     /// «Встречали в Моей волне».
     MetArtists,
     /// Новые релизы для пользователя.
     NewReleases,
     /// «Собираем для вас»: плейлист дня, «Дежавю», «Премьера».
     PersonalPlaylists,
-    /// История прослушивания по дням.
-    History,
 }
 
 /// Кто отвечает: каталог (работает и без токена) или коллекция
@@ -338,8 +336,7 @@ impl Request {
             Self::MyPlaylists(_)
             | Self::LikedPlaylists(_)
             | Self::LikedAlbums(_)
-            | Self::LikedArtists(_)
-            | Self::History => Scope::Collection,
+            | Self::LikedArtists(_) => Scope::Collection,
             _ => Scope::Catalog,
         }
     }
@@ -387,6 +384,7 @@ impl Request {
                 vec![("with-timestamps", "true".to_owned())],
             ),
             Self::TopArtists => ("/personal/top/artists/month".to_owned(), Vec::new()),
+            Self::TopTracks => ("/personal/top/tracks/month".to_owned(), Vec::new()),
             Self::MetArtists => (
                 "/landing-blocks/artists".to_owned(),
                 vec![("count", MET_ARTISTS.to_string())],
@@ -399,10 +397,6 @@ impl Request {
                 "/landing-blocks/personal-playlists".to_owned(),
                 vec![("count", PERSONAL_PLAYLISTS.to_string())],
             ),
-            Self::History => (
-                "/music-history".to_owned(),
-                vec![("fullModelsCount", HISTORY_MODELS.to_string())],
-            ),
         }
     }
 
@@ -411,7 +405,11 @@ impl Request {
     fn bare(&self) -> bool {
         matches!(
             self,
-            Self::TopArtists | Self::MetArtists | Self::NewReleases | Self::PersonalPlaylists
+            Self::TopArtists
+                | Self::TopTracks
+                | Self::MetArtists
+                | Self::NewReleases
+                | Self::PersonalPlaylists
         )
     }
 }
@@ -712,16 +710,38 @@ pub async fn fetch_my_artists(
     })
 }
 
-/// Полный топ исполнителей по истории прослушивания.
-pub async fn fetch_listening_top(
-    http: &reqwest::Client,
-    token: &str,
-) -> Result<ListeningTop, ApiError> {
-    let value = fetch(http, token, &Request::History).await?;
-    if !value.is_object() {
+/// Страница «Топ месяца»: исполнители и треки. Ошибка любого из двух
+/// запросов — ошибка страницы. Данные треков (воспроизведение, обложки,
+/// доступность) догружаются по идентификаторам в порядке топа.
+pub async fn fetch_month_top(http: &reqwest::Client, token: &str) -> Result<MonthTop, ApiError> {
+    let (artists, tracks) = tokio::join!(
+        fetch(http, token, &Request::TopArtists),
+        fetch(http, token, &Request::TopTracks),
+    );
+    let (artists, tracks) = (artists?, tracks?);
+    if !artists.is_object() || !tracks.is_object() {
         return Err(ApiError::InvalidResponse);
     }
-    Ok(listening_top(&value))
+    let entries = top_track_entries(&tracks);
+    let ids: Vec<String> = entries.iter().map(|(id, _)| id.clone()).collect();
+    let loaded = if ids.is_empty() {
+        Vec::new()
+    } else {
+        load_tracks(
+            &ids,
+            |batch| {
+                let (http, token) = (http.clone(), token.to_owned());
+                async move { post_batch(&http, &token, &batch).await }
+            },
+            |_| {},
+        )
+        .await?
+    };
+    Ok(MonthTop {
+        artists: top_artists(&artists),
+        tracks: Arc::new(loaded),
+        plays: entries.into_iter().map(|(_, plays)| plays).collect(),
+    })
 }
 
 /// Идентификатор для адреса: только число. Иначе — «не найдено», запроса
@@ -835,76 +855,24 @@ fn top_artists(value: &Value) -> Vec<TopArtist> {
                         .and_then(Value::as_u64)
                         .unwrap_or(0),
                 ),
-                plays: None,
             })
         })
         .collect()
 }
 
-/// Полный топ по истории: `{"historyTabs":[{"date","items":[{"context",
-/// "tracks":[{"data":{"fullModel":трек}}]}]}]}`. Время — сумма длительностей
-/// прослушанных треков: история не говорит, дослушан ли трек. Места — по
-/// времени, при равенстве — по числу прослушиваний, дальше — кого история
-/// показала раньше. «Сборники» (`various`) в топ не идут.
-fn listening_top(value: &Value) -> ListeningTop {
-    struct Tally {
-        card: ArtistCard,
-        plays: u32,
-        millis: u64,
-        order: usize,
-    }
-    let tabs = items_of(value, "historyTabs");
-    let mut tally: HashMap<String, Tally> = HashMap::new();
-    let models = tabs
+/// Топ треков месяца: `{"tracks":[{"track":{"track":{"id":…},…},
+/// "playCount":8}]}`. Берём идентификатор и число прослушиваний, остальное
+/// догружается отдельно. Элемент без годного идентификатора пропускается,
+/// нет `playCount` — 0 прослушиваний (в строке число тогда не показывается).
+fn top_track_entries(value: &Value) -> Vec<(String, u32)> {
+    items_of(value, "tracks")
         .iter()
-        .flat_map(|tab| items_of(tab, "items"))
-        .flat_map(|item| items_of(item, "tracks"))
-        .filter_map(|track| track.get("data")?.get("fullModel"));
-    for model in models {
-        let millis = model.get("durationMs").and_then(Value::as_u64).unwrap_or(0);
-        let mut counted: Vec<String> = Vec::new();
-        let artists = items_of(model, "artists")
-            .iter()
-            .filter(|artist| artist.get("various").and_then(Value::as_bool) != Some(true))
-            .filter_map(artist_card);
-        for card in artists {
-            // Один исполнитель дважды в треке — одно прослушивание.
-            if counted.contains(&card.id) {
-                continue;
-            }
-            counted.push(card.id.clone());
-            let order = tally.len();
-            let entry = tally.entry(card.id.clone()).or_insert(Tally {
-                card,
-                plays: 0,
-                millis: 0,
-                order,
-            });
-            entry.plays = entry.plays.saturating_add(1);
-            entry.millis = entry.millis.saturating_add(millis);
-        }
-    }
-    let mut ranked: Vec<Tally> = tally.into_values().collect();
-    ranked.sort_by(|a, b| {
-        b.millis
-            .cmp(&a.millis)
-            .then(b.plays.cmp(&a.plays))
-            .then(a.order.cmp(&b.order))
-    });
-    ListeningTop {
-        days: tabs.len(),
-        artists: ranked
-            .into_iter()
-            .zip(1u32..)
-            .map(|(tally, place)| TopArtist {
-                card: tally.card,
-                position: Some(place),
-                trend: None,
-                listened: Duration::from_millis(tally.millis),
-                plays: Some(tally.plays),
-            })
-            .collect(),
-    }
+        .filter_map(|item| {
+            let id = id_text(item.get("track")?.get("track")?.get("id")?)?;
+            plausible_id(&id).then_some(())?;
+            Some((id, count_of(item.get("playCount")).unwrap_or(0)))
+        })
+        .collect()
 }
 
 /// «Встречали в Моей волне»: `{"items":[{"data":{"artist":…}}]}`.
@@ -1199,10 +1167,10 @@ mod fixtures {
             Request::LikedArtists(_) => liked_artists(empty),
             // Новые адреса отвечают без обёртки `result`.
             Request::TopArtists => return Some(bare(top_artists(empty))),
+            Request::TopTracks => return Some(bare(top_tracks(empty))),
             Request::MetArtists => return Some(bare(met_artists(empty))),
             Request::NewReleases => return Some(bare(new_releases(empty))),
             Request::PersonalPlaylists => return Some(bare(personal_playlists(empty))),
-            Request::History => history(empty, many),
         }))
     }
 
@@ -1231,66 +1199,29 @@ mod fixtures {
         json!({ "artists": artists })
     }
 
-    /// История за 10 дней: исполнители из `ARTISTS` (чем выше в списке, тем
-    /// чаще) и «из волны»; плюс трек без данных, «сборник» и исполнитель,
-    /// записанный в треке дважды. `many` — ещё 300 исполнителей.
-    fn history(empty: bool, many: bool) -> Value {
-        if empty {
-            return json!({ "historyTabs": [] });
-        }
-        let model = |id: u64, artists: Vec<Value>| {
-            json!({ "type": "track", "data": {
-                "itemId": { "trackId": id.to_string() },
-                "fullModel": {
-                    "id": id.to_string(),
-                    "title": format!("Трек {id}"),
-                    "durationMs": 200_000,
-                    "artists": artists,
-                },
-            }})
-        };
-        let mut tabs = Vec::new();
-        for day in 0..10u64 {
-            let mut tracks = Vec::new();
-            for (index, (id, name)) in (0u64..).zip(ARTISTS) {
-                for play in 0..(4 - index) {
-                    tracks.push(model(
-                        day * 100 + index * 10 + play,
-                        vec![artist_value(id, name)],
-                    ));
-                }
-            }
-            let wave = (2000 + day % 6).to_string();
-            tracks.push(model(
-                day * 100 + 90,
-                vec![artist_value(&wave, &format!("Из волны {wave}"))],
-            ));
-            tracks.push(json!({ "type": "track", "data": { "itemId": { "trackId": "1" } } }));
-            tracks.push(model(
-                day * 100 + 91,
-                vec![json!({ "id": 171, "name": "Various artists", "various": true })],
-            ));
-            if let Some((id, name)) = ARTISTS.get(1) {
-                tracks.push(model(
-                    day * 100 + 92,
-                    vec![artist_value(id, name), artist_value(id, name)],
-                ));
-            }
-            tabs.push(json!({
-                "date": format!("2026-11-{:02}", 10 - day),
-                "items": [{ "context": { "type": "wave" }, "tracks": tracks }],
-            }));
-        }
-        if many {
-            let tracks: Vec<Value> = (0..300u64)
+    /// Топ треков месяца: десять треков с числом прослушиваний, плюс элемент
+    /// без идентификатора. Остальное догружается как «Догруженный трек».
+    fn top_tracks(empty: bool) -> Value {
+        let tracks: Vec<Value> = if empty {
+            Vec::new()
+        } else {
+            (0..10u64)
                 .map(|n| {
-                    let id = (3000 + n).to_string();
-                    model(9000 + n, vec![artist_value(&id, &format!("Ещё {n}"))])
+                    let id = 69_810 + n;
+                    json!({
+                        "track": {
+                            "track": { "id": id, "title": format!("Трек {id}") },
+                            "artists": [artist_ref(n)],
+                            "album": { "id": 21_078_440 },
+                            "durationMs": 237_900,
+                        },
+                        "playCount": 8 - n.min(7),
+                    })
                 })
-                .collect();
-            tabs.push(json!({ "date": "2026-10-31", "items": [{ "tracks": tracks }] }));
-        }
-        json!({ "historyTabs": tabs })
+                .chain([json!({ "track": { "track": {} }, "playCount": 1 })])
+                .collect()
+        };
+        json!({ "tracks": tracks })
     }
 
     fn met_artists(empty: bool) -> Value {
@@ -1928,39 +1859,38 @@ mod tests {
     }
 
     #[test]
-    fn listening_top_counts_history() {
-        let (status, body) = fixtures::reply("sample", &Request::History).unwrap();
-        let top = listening_top(&envelope(Scope::Collection, status, &body).unwrap());
-        assert_eq!(top.days, 10);
-        // Четыре исполнителя из `ARTISTS` и шесть «из волны»; «сборник» и
-        // трек без данных не считаются.
-        assert_eq!(top.artists.len(), 10);
-        let first = &top.artists[0];
-        assert_eq!(first.card.name, "Король и Шут");
-        assert_eq!(first.position, Some(1));
-        assert_eq!(first.plays, Some(40));
-        assert_eq!(first.listened, Duration::from_secs(40 * 200));
-        // Tame Impala: 3 трека в день и трек, где он записан дважды, — 40,
-        // как у первого; при равенстве выше тот, кто в истории раньше.
-        assert_eq!(top.artists[1].card.name, "Tame Impala");
-        assert_eq!(top.artists[1].plays, Some(40));
-        assert_eq!(top.artists[2].plays, Some(20));
-        assert!(top.artists.iter().all(|artist| artist.card.id != "171"));
-        let places: Vec<_> = top.artists.iter().filter_map(|a| a.position).collect();
-        assert_eq!(places, (1..=10).collect::<Vec<u32>>());
+    fn top_tracks_keep_order_and_play_counts() {
+        let entries = top_track_entries(&bare_sample(&Request::TopTracks));
+        // Элемент без идентификатора пропущен.
+        assert_eq!(entries.len(), 10);
+        assert_eq!(entries[0], ("69810".to_owned(), 8));
+        assert_eq!(entries[9], ("69819".to_owned(), 1));
+        let ids: Vec<&str> = entries.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
 
-        let empty = fixtures::reply("empty", &Request::History).unwrap();
-        let empty = listening_top(&envelope(Scope::Collection, empty.0, &empty.1).unwrap());
-        assert_eq!((empty.days, empty.artists.len()), (0, 0));
-        // Мусор вместо дней и треков — пустой топ, не паника.
-        let junk = serde_json::json!({"historyTabs":[1,{"items":"x"},{"items":[{"tracks":[
-            {"data":{"fullModel":{"durationMs":-5,"artists":[{"id":"x"},{"id":7,"name":"Ок"}]}}},
-            {"data":{"fullModel":{"durationMs":18446744073709551615u64,"artists":[{"id":7,"name":"Ок"}]}}}
-        ]}]}]});
-        let junk = listening_top(&junk);
-        assert_eq!(junk.days, 3);
-        assert_eq!(junk.artists.len(), 1);
-        assert_eq!(junk.artists[0].plays, Some(2));
+        let (status, body) = fixtures::reply("empty", &Request::TopTracks).unwrap();
+        assert!(top_track_entries(&bare_envelope(status, &body).unwrap()).is_empty());
+
+        // Ответ, как у сервиса: id числом; мусор и нет `playCount`.
+        let live = serde_json::json!({"tracks":[
+            {"track":{"track":{"id":69810},"album":{"id":21078440}},"playCount":8},
+            {"track":{"track":{"id":"12"}}},
+            {"track":{"track":{"id":-5}},"playCount":3},
+            {"track":{"track":{"id":"../x"}},"playCount":3},
+            {"track":{"track":{}},"playCount":3},
+            {"track":"нет","playCount":3},
+            7,
+            {"track":{"track":{"id":99}},"playCount":-1}]});
+        let entries = top_track_entries(&live);
+        assert_eq!(
+            entries,
+            vec![
+                ("69810".to_owned(), 8),
+                ("12".to_owned(), 0),
+                ("99".to_owned(), 0)
+            ]
+        );
+        assert!(top_track_entries(&serde_json::json!({"tracks":"нет"})).is_empty());
     }
 
     #[test]
