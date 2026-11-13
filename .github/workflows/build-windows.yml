@@ -1,0 +1,84 @@
+name: build-windows
+
+# Сборка под Windows x64 (MSVC). Иконку и свойства файла вшивает build.rs
+# через rc.exe из Windows SDK — он есть в образе windows-latest.
+# Ручной запуск с `release_tag` кладёт архив в уже созданный релиз.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "assets/**"
+      - "build.rs"
+      - ".github/workflows/build-windows.yml"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Тег релиза, куда положить архив (пусто — только артефакт)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      # Релиз собран с подсистемой windows: PowerShell не ждёт такой exe,
+      # поэтому ждём явно и смотрим код выхода.
+      - name: Smoke test
+        run: |
+          $p = Start-Process -FilePath target\release\plastinka.exe `
+            -ArgumentList '--version' -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) { throw "plastinka --version: код $($p.ExitCode)" }
+
+      - name: Package
+        run: |
+          $name = 'plastinka-windows-x64'
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item target\release\plastinka.exe out\
+          Set-Content -Path out\COMMIT -Value $env:GITHUB_SHA -Encoding ascii
+          Compress-Archive -Path out\* -DestinationPath "$name.zip" -Force
+          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "$name.zip.sha256" -Value "$hash  $name.zip" -Encoding ascii
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plastinka-windows-x64
+          path: |
+            plastinka-windows-x64.zip
+            plastinka-windows-x64.zip.sha256
+          retention-days: 30
+
+  release:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: plastinka-windows-x64
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release upload "$TAG" --clobber --repo "$GITHUB_REPOSITORY" \
+            plastinka-windows-x64.zip plastinka-windows-x64.zip.sha256

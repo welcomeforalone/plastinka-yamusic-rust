@@ -79,14 +79,20 @@ sudo dnf install alsa-lib libxkbcommon vulkan-loader
 Secret Service) или KeePassXC. В KDE Plasma (CachyOS по умолчанию) KWallet
 обычно уже работает.
 
-### Как выпустить Linux-сборку
+### Как выпустить сборки
 
-Workflow `.github/workflows/build-linux.yml` собирает архив в контейнере
-Ubuntu 22.04, проверяет запуск на Arch Linux и, если указан тег, кладёт архив в
-релиз:
+Три workflow в `.github/workflows`, каждый по push в `main` собирает архив, а
+при ручном запуске с тегом кладёт его в уже созданный релиз (с заменой):
+
+- `build-linux.yml` — контейнер Ubuntu 22.04, проверка запуска на Arch Linux;
+- `build-windows.yml` — Windows x64 (MSVC), иконка и свойства файла из
+  `build.rs`, в архиве `plastinka.exe` и `COMMIT`, рядом `.sha256`;
+- `build-macos.yml` — универсальный бинарник (Apple Silicon и Intel).
 
 ```sh
 gh workflow run build-linux.yml --ref main -f release_tag=v0.0.1
+gh workflow run build-windows.yml --ref main -f release_tag=v0.0.1
+gh workflow run build-macos.yml --ref main -f release_tag=v0.0.1
 ```
 
 Без `release_tag` архив остаётся артефактом запуска (30 дней).
@@ -695,7 +701,7 @@ client_secret, как у всех неофициальных клиентов. �
 | `build.rs` | Вшивает иконку и сведения о версии в `plastinka.exe` (Windows) |
 | `design` | Бриф и материалы дизайна |
 | `packaging/linux` | Ярлык `.desktop` и `install.sh` для Linux-архива |
-| `.github/workflows` | Сборки релизов: Linux (`build-linux.yml`), macOS (`build-macos.yml`) |
+| `.github/workflows` | Сборки релизов: Linux (`build-linux.yml`), Windows (`build-windows.yml`), macOS (`build-macos.yml`) |
 
 ## Тестовые сценарии
 
