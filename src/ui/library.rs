@@ -476,7 +476,7 @@ impl PlayerMotion {
             cover_now: None,
             cover_fade: anim::settled(true, anim::COVER),
             seek_hover: anim::settled(false, anim::HOVER),
-            sound_panel: anim::settled(false, anim::PANEL),
+            sound_panel: anim::popover(false),
             volume_panel: anim::settled(false, VOLUME_PANEL_FADE),
             volume_over_icon: false,
             volume_over_panel: false,
@@ -1576,8 +1576,8 @@ impl Library {
     /// Панель «Настройки звука» поверх окна: карточка справа над плеером.
     /// Щелчок вне карточки закрывает её. `None` — панель закрыта.
     pub fn sound_panel(&self, prefs: &Prefs, now: Instant) -> Option<Element<'_, App>> {
-        let shown = anim::progress(&self.motion.sound_panel, now);
-        if shown <= 0.0 {
+        let frame = anim::Popover::at(&self.motion.sound_panel, now);
+        if !frame.visible() {
             return None;
         }
         let header = row![
@@ -1595,24 +1595,19 @@ impl Library {
             ),
         ]
         .align_y(Alignment::Center);
-        let card = container(column![header, sound_options(prefs)].spacing(12))
+        // Появление: карточка проступает из прозрачности, поднимаясь на
+        // несколько пикселей и чуть вырастая, за ней — содержимое.
+        let content = anim::motion(column![header, sound_options(prefs)].spacing(12))
+            .reveal(theme::SURFACE_2, frame.content);
+        let card = container(content)
             .width(Length::Fill)
             .max_width(SOUND_PANEL_WIDTH)
             .padding(20)
-            .style(|_| container::Style {
-                background: Some(theme::SURFACE_2.into()),
-                border: Border::default()
-                    .rounded(16.0)
-                    .width(1)
-                    .color(theme::BORDER),
-                shadow: widgets::popover_shadow(),
-                ..container::Style::default()
-            });
-        // Появление: поднимается на несколько пикселей и проступает из фона.
-        let hidden = 1.0 - shown;
+            .style(move |_| widgets::popover_card(frame.shell, 16.0));
+        let hidden = 1.0 - frame.motion;
         let card = anim::motion(iced::widget::opaque(card))
             .offset(0.0, 12.0 * hidden)
-            .veil(theme::alpha(theme::BG, hidden), 16.0);
+            .scale(0.97 + 0.03 * frame.motion);
         let placed = container(card)
             .width(Length::Fill)
             .height(Length::Fill)

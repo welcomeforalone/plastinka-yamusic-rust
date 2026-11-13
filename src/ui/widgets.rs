@@ -282,6 +282,23 @@ pub fn popover_shadow() -> Shadow {
     }
 }
 
+/// Карточка всплывающей панели со скруглением `radius`: фон, рамка и тень с
+/// общей непрозрачностью `alpha` (для появления и ухода панели).
+pub fn popover_card(alpha: f32, radius: f32) -> container::Style {
+    let alpha = alpha.clamp(0.0, 1.0);
+    let mut shadow = popover_shadow();
+    shadow.color.a *= alpha;
+    container::Style {
+        background: Some(theme::alpha(theme::SURFACE_2, alpha).into()),
+        border: Border::default()
+            .rounded(radius)
+            .width(1)
+            .color(theme::alpha(theme::BORDER, alpha)),
+        shadow,
+        ..container::Style::default()
+    }
+}
+
 /// Сплошной прямоугольник: фон, разделитель, полоса скелетона.
 pub fn block<'a>(
     width: impl Into<Length>,

@@ -57,6 +57,75 @@ pub fn progress(animation: &Animation<bool>, now: Instant) -> f32 {
     animation.interpolate(0.0, 1.0, now)
 }
 
+// ---------------------------------------------------------------- всплывающие панели
+
+/// Появление и уход всплывающей панели (меню волны, «Настройки звука»).
+pub const POPOVER: Duration = Duration::from_millis(240);
+
+/// Переход всплывающей панели в покое. Время идёт линейно, кривые
+/// накладывает [`Popover`]: так открытие идёт с ease-out, а закрытие — то же
+/// движение в обратную сторону, то есть с ease-in.
+pub fn popover(value: bool) -> Animation<bool> {
+    Animation::new(value)
+        .duration(POPOVER)
+        .easing(Easing::Linear)
+}
+
+/// Кадр всплывающей панели.
+///
+/// Прозрачности целого поддерева в iced нет, а вуаль цвета фона поверх
+/// карточки даёт чёрный прямоугольник в первых и последних кадрах. Поэтому
+/// панель проявляется в два слоя: сначала карточка (фон, рамка, тень — их
+/// прозрачность задаётся прямо в стиле), а когда она уже почти непрозрачна —
+/// содержимое, из-под вуали цвета самой карточки. Закрытие идёт в обратном
+/// порядке.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Popover {
+    /// Непрозрачность фона, рамки и тени карточки.
+    pub shell: f32,
+    /// Насколько проступило содержимое: 0 — не видно, 1 — как есть.
+    pub content: f32,
+    /// Доля сдвига и масштаба: 0 — исходное положение, 1 — на месте.
+    pub motion: f32,
+}
+
+/// Доля времени, за которую проявляется карточка.
+const SHELL_SPAN: f32 = 0.45;
+/// С какой доли времени начинает проступать содержимое: карточка к этому
+/// моменту непрозрачна почти полностью, и вуаль над содержимым её не выдаёт.
+const CONTENT_FROM: f32 = 0.4;
+
+impl Popover {
+    pub fn at(animation: &Animation<bool>, now: Instant) -> Self {
+        Self::from_progress(progress(animation, now))
+    }
+
+    /// Кадр для линейной доли времени `t` (0 — закрыта, 1 — открыта).
+    pub fn from_progress(t: f32) -> Self {
+        let t = t.clamp(0.0, 1.0);
+        let shell = ease_out_quad((t / SHELL_SPAN).min(1.0));
+        let content = ease_out_cubic(((t - CONTENT_FROM) / (1.0 - CONTENT_FROM)).max(0.0));
+        Self {
+            shell,
+            content,
+            motion: ease_out_cubic(t),
+        }
+    }
+
+    /// Панель видна хоть немного.
+    pub fn visible(&self) -> bool {
+        self.shell > 0.0
+    }
+}
+
+fn ease_out_quad(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(2)
+}
+
+fn ease_out_cubic(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
 // ---------------------------------------------------------------- наведение
 
 /// Фон `idle`, при наведении плавно переходит в `hovered`.
@@ -255,6 +324,7 @@ pub fn motion<'a, Message>(content: impl Into<Element<'a, Message>>) -> Motion<'
         offset: Vector::ZERO,
         scale: 1.0,
         veil: None,
+        hidden: false,
     }
 }
 
@@ -263,6 +333,8 @@ pub struct Motion<'a, Message> {
     offset: Vector,
     scale: f32,
     veil: Option<(Color, f32)>,
+    /// Содержимое не рисуется (место в раскладке остаётся).
+    hidden: bool,
 }
 
 impl<Message> Motion<'_, Message> {
@@ -280,6 +352,20 @@ impl<Message> Motion<'_, Message> {
     /// Прозрачный — не рисуется.
     pub fn veil(mut self, color: Color, radius: f32) -> Self {
         self.veil = (color.a > 0.0).then_some((color, radius));
+        self
+    }
+
+    /// Содержимое проступает из сплошного цвета `base` — цвета подложки под
+    /// ним: 0 — не рисуется вовсе (ни содержимое, ни вуаль), 1 — как есть.
+    pub fn reveal(mut self, base: Color, amount: f32) -> Self {
+        self.hidden = amount <= 0.0;
+        self.veil = (amount > 0.0 && amount < 1.0).then_some((
+            Color {
+                a: 1.0 - amount,
+                ..base
+            },
+            0.0,
+        ));
         self
     }
 
@@ -359,9 +445,11 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Motion<'_, Message> {
     ) {
         let bounds = layout.bounds();
         let draw = |renderer: &mut iced::Renderer, viewport: &Rectangle| {
-            self.content
-                .as_widget()
-                .draw(tree, renderer, theme, style, layout, cursor, viewport);
+            if !self.hidden {
+                self.content
+                    .as_widget()
+                    .draw(tree, renderer, theme, style, layout, cursor, viewport);
+            }
             if let Some((color, radius)) = self.veil {
                 renderer.fill_quad(
                     Quad {
@@ -719,5 +807,48 @@ mod tests {
         let animation = settled(true, PANEL);
         assert!(!animation.is_animating(now));
         assert!((progress(&animation, now) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn popover_frames_fade_shell_before_content() {
+        // Закрыта: ничего не видно, содержимое не рисуется.
+        let closed = Popover::from_progress(0.0);
+        assert!(!closed.visible());
+        assert!(closed.content.abs() < 1e-6 && closed.motion.abs() < 1e-6);
+        // Открыта: всё на месте.
+        let open = Popover::from_progress(1.0);
+        assert!((open.shell - 1.0).abs() < 1e-6);
+        assert!((open.content - 1.0).abs() < 1e-6);
+        assert!((open.motion - 1.0).abs() < 1e-6);
+        // Содержимое начинает проступать, только когда карточка почти
+        // непрозрачна: вуаль над ним не видна на любом фоне.
+        let start = Popover::from_progress(CONTENT_FROM + 1e-3);
+        assert!(start.content > 0.0);
+        assert!(start.shell > 0.98, "{start:?}");
+        assert!(Popover::from_progress(CONTENT_FROM).content.abs() < 1e-6);
+        // Кадры монотонны: без скачков и миганий.
+        let mut last = closed;
+        for step in 1..=100 {
+            let frame = Popover::from_progress(step as f32 / 100.0);
+            assert!(frame.shell >= last.shell);
+            assert!(frame.content >= last.content);
+            assert!(frame.motion >= last.motion);
+            last = frame;
+        }
+    }
+
+    #[test]
+    fn popover_closes_along_the_same_path() {
+        let start = Instant::now();
+        let mut animation = popover(false);
+        assert!(!animation.is_animating(start));
+        animation.go_mut(true, start);
+        let half = start + POPOVER / 2;
+        assert!((progress(&animation, half) - 0.5).abs() < 0.02);
+        let opened = start + POPOVER;
+        assert!((progress(&animation, opened) - 1.0).abs() < 1e-6);
+        animation.go_mut(false, opened);
+        assert!((progress(&animation, opened + POPOVER / 2) - 0.5).abs() < 0.02);
+        assert!(progress(&animation, opened + POPOVER).abs() < 1e-6);
     }
 }
