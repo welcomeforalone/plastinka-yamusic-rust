@@ -1,8 +1,8 @@
 name: build-linux
 
-# Сборка под Linux x86_64. Собираем в Debian 11 (glibc 2.31): бинарник с
+# Сборка под Linux x86_64. Собираем в Ubuntu 22.04 (glibc 2.35): бинарник с
 # такой glibc запускается почти на любом современном дистрибутиве — Arch,
-# CachyOS, Fedora, Ubuntu 20.04+, Debian 11+, openSUSE и т. д.
+# CachyOS, Fedora, Ubuntu 22.04+, Debian 12+, openSUSE и т. д.
 # Ручной запуск с `release_tag` кладёт архив в уже созданный релиз.
 
 on:
@@ -28,11 +28,12 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: debian:bullseye
+    container: ubuntu:22.04
     timeout-minutes: 60
     steps:
       - name: System packages
         run: |
+          export DEBIAN_FRONTEND=noninteractive
           apt-get update
           apt-get install -y --no-install-recommends \
             ca-certificates curl git build-essential pkg-config cmake \

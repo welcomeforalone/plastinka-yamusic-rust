@@ -48,8 +48,8 @@
 
 ### Linux
 
-Сборка одна на все дистрибутивы: она собрана с glibc 2.31 и работает на
-Arch, CachyOS, Manjaro, Fedora, openSUSE, Ubuntu 20.04+, Debian 11+ и других.
+Сборка одна на все дистрибутивы: она собрана с glibc 2.35 и работает на
+Arch, CachyOS, Manjaro, Fedora 36+, openSUSE, Ubuntu 22.04+, Debian 12+ и других.
 Из системных библиотек нужна только ALSA (`libasound.so.2`, на большинстве
 систем уже стоит; через PipeWire и PulseAudio звук тоже идёт), остальное
 окно подгружает само: Wayland или X11, Vulkan или OpenGL.
@@ -82,7 +82,7 @@ Secret Service) или KeePassXC. В KDE Plasma (CachyOS по умолчанию
 ### Как выпустить Linux-сборку
 
 Workflow `.github/workflows/build-linux.yml` собирает архив в контейнере
-Debian 11, проверяет запуск на Arch Linux и, если указан тег, кладёт архив в
+Ubuntu 22.04, проверяет запуск на Arch Linux и, если указан тег, кладёт архив в
 релиз:
 
 ```sh
