@@ -13,6 +13,7 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Task}
 
 use super::super::covers::Covers;
 use super::super::history::{self, LocalPlay};
+use super::super::history_store;
 use super::super::icons::{Icon, icon, spinner};
 use super::super::queue::{ListKey, Queue};
 use super::super::theme::{self, Style};
@@ -217,8 +218,37 @@ impl Library {
             track,
             context,
             date: api::today_utc(),
+            at: history_store::unix_now(),
         });
         self.refresh_history_shown();
+        self.save_local_plays();
+    }
+
+    /// Прослушивания прошлых запусков прочитаны: встают перед нынешними.
+    /// Если за это время что-то зазвучало, файл сразу дописывается.
+    pub(super) fn local_plays_loaded(&mut self, plays: Vec<LocalPlay>) {
+        if self.plays_restored {
+            return;
+        }
+        let played_meanwhile = self.local_plays.plays().next().is_some();
+        self.local_plays.restore(plays);
+        self.plays_restored = true;
+        self.refresh_history_shown();
+        if played_meanwhile {
+            self.save_local_plays();
+        }
+    }
+
+    /// Сохраняет прослушивания в фоне (только после чтения файла).
+    fn save_local_plays(&mut self) {
+        let Some(path) = self.plays_file.clone().filter(|_| self.plays_restored) else {
+            return;
+        };
+        let serial = history_store::next_serial();
+        self.tasks.push(Task::perform(
+            history_store::save_in_background(path, self.local_plays.snapshot(), serial),
+            |()| Message::Noop,
+        ));
     }
 
     /// Пересобирает вкладку «История»: сервер плюс сеанс.

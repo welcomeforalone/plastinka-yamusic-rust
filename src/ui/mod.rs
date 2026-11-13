@@ -11,6 +11,7 @@ mod filter;
 mod gate;
 mod heartbeat;
 mod history;
+mod history_store;
 mod icons;
 mod library;
 mod lyrics_view;

@@ -35,6 +35,7 @@ use super::anim;
 use super::covers::{Art, Covers, Grade};
 use super::filter;
 use super::history;
+use super::history_store;
 use super::icons::{Icon, icon, spinner};
 use super::marquee::{marquee, marquee_element};
 use super::palette;
@@ -289,6 +290,8 @@ pub enum Message {
     HistoryLoaded(u64, Result<Arc<Vec<api::HistoryDay>>, Failure>),
     HistoryReload,
     PlayHistoryItem(usize, usize, usize),
+    /// Прослушивания прошлых запусков прочитаны с диска.
+    LocalPlaysLoaded(Vec<history::LocalPlay>),
     /// Играть с трека очереди (панель «Очередь»).
     PlayQueueAt(usize),
     /// Играть трек из «Недавно играли» (номер в истории).
@@ -445,6 +448,10 @@ pub struct Library {
     history_serial: u64,
     /// Что зазвучало за сеанс (вкладка «История»: сервер показывает не сразу).
     local_plays: history::LocalPlays,
+    /// Файл прослушиваний (`None` — тестовые хуки или нет каталога кэша) и
+    /// прочитан ли он: до этого не пишем, иначе затрём прошлые запуски.
+    plays_file: Option<std::path::PathBuf>,
+    plays_restored: bool,
     /// Вкладка «История» на экране: сервер плюс сеанс, без дублей.
     history_shown: Arc<Vec<api::HistoryDay>>,
     /// Откуда построена очередь (контекст для вкладки «История»).
@@ -680,6 +687,8 @@ impl Library {
             server_history: history_screen::HistoryLoad::Idle,
             history_serial: 0,
             local_plays: history::LocalPlays::default(),
+            plays_file: history_store::system_path(),
+            plays_restored: false,
             history_shown: Arc::new(Vec::new()),
             play_context: history_screen::liked_context(),
             plays: api::PlayTracker::default(),
@@ -689,10 +698,18 @@ impl Library {
         // Серверная история нужна панели «Очередь» («Недавно играли»): один
         // раз в фоне, ошибка тихая.
         let history = library.history_load(http);
+        // Прослушивания прошлых запусков — с диска, в фоне.
+        let restored = Task::perform(
+            history_store::load_in_background(library.plays_file.clone()),
+            Message::LocalPlaysLoaded,
+        );
         // Занятия для меню «Моей волны» — заранее: иначе первое открытие
         // меню показывает его без раздела «Занятие», и оно вырастает.
         let stations = library.wave_load_stations();
-        (library, Task::batch([task, plugins, history, stations]))
+        (
+            library,
+            Task::batch([task, plugins, history, restored, stations]),
+        )
     }
 
     pub fn token(&self) -> Arc<StoredToken> {
@@ -1091,6 +1108,10 @@ impl Library {
             Message::PlayQueueAt(index) => self.play_queue_at(index),
             Message::HistoryLoaded(serial, result) => self.history_loaded(serial, result),
             Message::HistoryReload => return (self.history_load(http), None),
+            Message::LocalPlaysLoaded(plays) => {
+                self.local_plays_loaded(plays);
+                None
+            }
             Message::PlayHistoryItem(day, item, index) => self.play_history_item(day, item, index),
             Message::PlayHistory(index) => self.play_history(index),
             Message::MiniRequest => return (Task::none(), Some(Effect::OpenMini)),
@@ -4162,6 +4183,52 @@ mod tests {
             .flat_map(|(_, ids)| ids)
             .collect();
         assert_eq!(ids, ["2", "1", "9"]);
+    }
+
+    #[test]
+    fn plays_from_disk_go_under_this_session() {
+        let mut library = test_library();
+        // В тестах файла нет: ни чтения, ни записи.
+        assert!(library.plays_file.is_none());
+        library.history_serial = 1;
+        let _ = library.history_loaded(1, Ok(Arc::new(Vec::new())));
+        library.queue = Some(Queue::new(
+            ListKey::Liked,
+            Arc::new(vec![plain_track("1")]),
+            0,
+        ));
+        library.launch(0, plain_track("1"), 0.0);
+        library.history_note_play();
+        // С диска: вчерашний «5» и сегодняшний «1» (он уже есть в сеансе).
+        let today = api::today_utc();
+        let disk = |id: &str, date| history::LocalPlay {
+            track: plain_track(id),
+            context: api::HistoryContext::Wave,
+            date,
+            at: 0,
+        };
+        library.local_plays_loaded(vec![disk("5", (2000, 1, 1)), disk("1", today)]);
+        // День, подпись группы и треки — одной строкой на группу.
+        let rows: Vec<String> = library
+            .history_shown
+            .iter()
+            .flat_map(|day| {
+                day.items.iter().map(move |item| {
+                    let ids: Vec<&str> = item.tracks.iter().map(|t| t.id.as_str()).collect();
+                    format!("{:?} {} {}", day.date, item.context.label(), ids.join(","))
+                })
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                format!("{:?} Мне нравится 1", Some(today)),
+                "Some((2000, 1, 1)) Моя волна 5".to_owned(),
+            ]
+        );
+        // Повторное чтение ничего не меняет.
+        library.local_plays_loaded(vec![disk("7", today)]);
+        assert_eq!(library.local_plays.plays().count(), 2);
     }
 
     #[test]

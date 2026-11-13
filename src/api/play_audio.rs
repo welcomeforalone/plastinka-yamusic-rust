@@ -91,7 +91,22 @@ pub async fn send_play_audio(
         .send()
         .await
         .map_err(NetError::from)?;
-    check_status(response.status())
+    let status = response.status();
+    // Отладочная сборка: ответ сервиса одной строкой, чтобы вживую проверить,
+    // принимает ли он отчёт (в ответе нет токена, только `result`).
+    #[cfg(debug_assertions)]
+    {
+        let body = response.text().await.unwrap_or_default();
+        let short: String = body.chars().take(200).collect();
+        let _ = writeln!(
+            std::io::stderr(),
+            "play-audio track-id={} played={} → HTTP {}: {short}",
+            report.track_id,
+            report.total_played_seconds,
+            status.as_u16()
+        );
+    }
+    check_status(status)
 }
 
 /// Отправка в фоне: ошибка — одна строка в stderr, без токена и адресов.

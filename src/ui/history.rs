@@ -1,8 +1,10 @@
-//! История прослушивания за сеанс, только в памяти. [`History`] — последние
-//! треки, которые зазвучали и сменились другим; её показывает панель
+//! История прослушивания. [`History`] — последние треки сеанса, которые
+//! зазвучали и сменились другим (только в памяти); её показывает панель
 //! «Очередь» («Недавно играли»). [`LocalPlays`] — всё, что зазвучало, с
 //! контекстом и днём: вкладка «История» сливает это с ответом сервера
-//! ([`merge_days`]), потому что сервер показывает прослушивания не сразу.
+//! ([`merge_days`]), потому что сервер показывает прослушивания не сразу или
+//! не показывает вовсе. Между запусками они хранятся на диске
+//! (`history_store`).
 
 use std::collections::{HashSet, VecDeque};
 
@@ -10,15 +12,17 @@ use crate::api::{HistoryContext, HistoryDay, HistoryItem, Track, Ymd};
 
 /// Сколько треков помним.
 pub const LIMIT: usize = 20;
-/// Сколько прослушиваний сеанса держим для вкладки «История».
-pub const LOCAL_LIMIT: usize = 200;
+/// Сколько прослушиваний держим для вкладки «История».
+pub const LOCAL_LIMIT: usize = 1000;
 
-/// Прослушивание за сеанс: трек, откуда играл, день (UTC, как подписи дней).
-#[derive(Debug, Clone)]
+/// Прослушивание: трек, откуда играл, день (UTC, как подписи дней) и когда
+/// зазвучал (секунды Unix).
+#[derive(Debug, Clone, PartialEq)]
 pub struct LocalPlay {
     pub track: Track,
     pub context: HistoryContext,
     pub date: Ymd,
+    pub at: u64,
 }
 
 /// Прослушивания сеанса, от старых к новым.
@@ -42,6 +46,31 @@ impl LocalPlays {
     /// От старых к новым.
     pub fn plays(&self) -> impl DoubleEndedIterator<Item = &LocalPlay> + Clone {
         self.plays.iter()
+    }
+
+    /// Прослушивания прошлых запусков (`older`, от старых к новым) встают
+    /// перед нынешними. То, что уже есть в сеансе (тот же трек в тот же
+    /// день), не повторяется: сеансовое свежее.
+    pub fn restore(&mut self, older: Vec<LocalPlay>) {
+        let fresh = std::mem::take(&mut self.plays);
+        let mut plays: VecDeque<LocalPlay> = older
+            .into_iter()
+            .filter(|old| {
+                !fresh
+                    .iter()
+                    .any(|play| play.track.id == old.track.id && play.date == old.date)
+            })
+            .collect();
+        plays.extend(fresh);
+        while plays.len() > LOCAL_LIMIT {
+            plays.pop_front();
+        }
+        self.plays = plays;
+    }
+
+    /// Копия для сохранения, от старых к новым.
+    pub fn snapshot(&self) -> Vec<LocalPlay> {
+        self.plays.iter().cloned().collect()
     }
 }
 
@@ -261,6 +290,7 @@ mod tests {
             track: track(id),
             context,
             date,
+            at: 0,
         }
     }
 
@@ -427,6 +457,33 @@ mod tests {
         assert!(merge(&[], &[]).is_empty());
         // Без сеанса — ответ сервера как есть.
         assert_eq!(merge(&server, &[]), shape(&server));
+    }
+
+    #[test]
+    fn restored_plays_go_before_the_session_without_duplicates() {
+        let mut local = LocalPlays::default();
+        local.record(play("a", HistoryContext::Wave, TODAY));
+        local.record(play("b", HistoryContext::Wave, TODAY));
+        // С диска: «a» сегодня (уже есть в сеансе), «a» вчера и «c».
+        local.restore(vec![
+            play("a", HistoryContext::Wave, YESTERDAY),
+            play("c", HistoryContext::Wave, TODAY),
+            play("a", HistoryContext::Wave, TODAY),
+        ]);
+        let order: Vec<(String, Ymd)> = local
+            .plays()
+            .map(|play| (play.track.id.clone(), play.date))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("a".to_owned(), YESTERDAY),
+                ("c".to_owned(), TODAY),
+                ("a".to_owned(), TODAY),
+                ("b".to_owned(), TODAY),
+            ]
+        );
+        assert_eq!(local.snapshot().len(), 4);
     }
 
     #[test]
