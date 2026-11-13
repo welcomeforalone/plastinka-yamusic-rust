@@ -64,7 +64,7 @@ jobs:
           install -m 755 target/release/plastinka "out/$name/plastinka"
           install -m 644 packaging/linux/plastinka.desktop "out/$name/"
           install -m 755 packaging/linux/install.sh "out/$name/"
-          git rev-parse --short HEAD > "out/$name/COMMIT"
+          echo "$GITHUB_SHA" > "out/$name/COMMIT"
           tar -C out -czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
 

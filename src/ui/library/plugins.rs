@@ -1177,7 +1177,7 @@ impl Library {
         rows.push(widgets::divider());
         rows.push(setting_row(
             "VibeColorizer",
-            "Цвет «Моей волны» и спектра под плеером под обложку текущего трека".to_owned(),
+            "Цвет «Моей волны» и спектра под плеером под обложку играющего трека".to_owned(),
             switch(settings.vibe, change(settings, |s, on| s.vibe = on)),
         ));
         container(column(rows))
