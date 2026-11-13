@@ -1,0 +1,109 @@
+name: build-linux
+
+# Сборка под Linux x86_64. Собираем в Debian 11 (glibc 2.31): бинарник с
+# такой glibc запускается почти на любом современном дистрибутиве — Arch,
+# CachyOS, Fedora, Ubuntu 20.04+, Debian 11+, openSUSE и т. д.
+# Ручной запуск с `release_tag` кладёт архив в уже созданный релиз.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "assets/**"
+      - "packaging/linux/**"
+      - ".github/workflows/build-linux.yml"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Тег релиза, куда положить архив (пусто — только артефакт)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: debian:bullseye
+    timeout-minutes: 60
+    steps:
+      - name: System packages
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config cmake \
+            libasound2-dev
+
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Dynamic libraries
+        run: ldd target/release/plastinka
+
+      - name: Smoke test
+        run: target/release/plastinka --version
+
+      - name: Package
+        run: |
+          name=plastinka-linux-x86_64
+          mkdir -p "out/$name"
+          install -m 755 target/release/plastinka "out/$name/plastinka"
+          install -m 644 packaging/linux/plastinka.desktop "out/$name/"
+          install -m 755 packaging/linux/install.sh "out/$name/"
+          git rev-parse --short HEAD > "out/$name/COMMIT"
+          tar -C out -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plastinka-linux-x86_64
+          path: |
+            plastinka-linux-x86_64.tar.gz
+            plastinka-linux-x86_64.tar.gz.sha256
+          retention-days: 30
+
+  # Проверка на Arch Linux (база CachyOS): архив распаковывается и
+  # запускается с одним только системным пакетом alsa-lib.
+  arch-check:
+    needs: build
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: plastinka-linux-x86_64
+      - name: Run on Arch
+        run: |
+          pacman -Sy --noconfirm alsa-lib
+          sha256sum -c plastinka-linux-x86_64.tar.gz.sha256
+          tar -xzf plastinka-linux-x86_64.tar.gz
+          plastinka-linux-x86_64/plastinka --version
+
+  release:
+    needs: [build, arch-check]
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: plastinka-linux-x86_64
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release upload "$TAG" --clobber --repo "$GITHUB_REPOSITORY" \
+            plastinka-linux-x86_64.tar.gz plastinka-linux-x86_64.tar.gz.sha256

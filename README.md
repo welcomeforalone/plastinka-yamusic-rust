@@ -1,6 +1,6 @@
 # Plastinka
 
-Неофициальный десктопный клиент Яндекс Музыки на Rust для Windows и Linux.
+Неофициальный десктопный клиент Яндекс Музыки на Rust для Windows, Linux и macOS.
 Быстрая нативная замена официальному клиенту на Electron.
 
 > Неофициальный клиент, не связан с ООО «Яндекс».
@@ -25,7 +25,71 @@
 | 7 | Поиск, плейлисты, альбомы, исполнители | ✅ |
 | 7.5 | Плагины: FckCensor, Slopless, CopyTrackName | ✅ |
 | 8 | «Моя волна», повтор трека в волне, VibeColorizer, «Нравится» везде | ✅ |
-| 9 | Медиаклавиши, системный плеер, тексты | |
+| 9 | Медиаклавиши, системный плеер, тексты, мини-плеер, Discord RPC | ✅ |
+
+Все 9 этапов завершены. Дальше в планах:
+
+- «Слушать вместе с другом» — совместное прослушивание;
+- оверлей для OBS — что играет сейчас, для стримов;
+- эквалайзер.
+
+## Скачать
+
+Готовые сборки — на странице
+[релизов](https://github.com/welcomeforalone/yandex-music-rust/releases).
+Каждый файл релиза собирается в GitHub Actions с последнего коммита `main`
+на момент выпуска; номер коммита лежит в архиве в файле `COMMIT`.
+
+| Система | Файл |
+|---|---|
+| Windows x64 | `plastinka-windows-x64.zip` |
+| macOS (Apple Silicon и Intel) | `plastinka-macos.zip` |
+| Linux x86_64 (любой дистрибутив) | `plastinka-linux-x86_64.tar.gz` |
+
+### Linux
+
+Сборка одна на все дистрибутивы: она собрана с glibc 2.31 и работает на
+Arch, CachyOS, Manjaro, Fedora, openSUSE, Ubuntu 20.04+, Debian 11+ и других.
+Из системных библиотек нужна только ALSA (`libasound.so.2`, на большинстве
+систем уже стоит; через PipeWire и PulseAudio звук тоже идёт), остальное
+окно подгружает само: Wayland или X11, Vulkan или OpenGL.
+
+```sh
+tar -xzf plastinka-linux-x86_64.tar.gz
+cd plastinka-linux-x86_64
+./plastinka            # запустить сразу
+./install.sh           # или установить в ~/.local: команда plastinka и ярлык в меню
+```
+
+Удаление — `./install.sh --uninstall`. Проверить архив:
+`sha256sum -c plastinka-linux-x86_64.tar.gz.sha256`.
+
+Пакеты, если чего-то нет:
+
+```sh
+# Arch, CachyOS, Manjaro
+sudo pacman -S --needed alsa-lib libxkbcommon vulkan-icd-loader
+# Debian, Ubuntu
+sudo apt install libasound2 libxkbcommon0 libvulkan1
+# Fedora
+sudo dnf install alsa-lib libxkbcommon vulkan-loader
+```
+
+Токен хранится в Secret Service: нужен gnome-keyring, KWallet (с включённым
+Secret Service) или KeePassXC. В KDE Plasma (CachyOS по умолчанию) KWallet
+обычно уже работает.
+
+### Как выпустить Linux-сборку
+
+Workflow `.github/workflows/build-linux.yml` собирает архив в контейнере
+Debian 11, проверяет запуск на Arch Linux и, если указан тег, кладёт архив в
+релиз:
+
+```sh
+gh workflow run build-linux.yml --ref main -f release_tag=v0.0.1
+```
+
+Без `release_tag` архив остаётся артефактом запуска (30 дней).
 
 ## Требования
 
@@ -582,6 +646,8 @@ client_secret, как у всех неофициальных клиентов. �
 | `assets/fonts` | Шрифт Inter (SIL OFL 1.1), встроен в бинарник |
 | `assets/icons` | Иконки, которых нет в макете (в стиле Lucide) |
 | `design` | Бриф и материалы дизайна |
+| `packaging/linux` | Ярлык `.desktop` и `install.sh` для Linux-архива |
+| `.github/workflows` | Сборки релизов: Linux (`build-linux.yml`), macOS (`build-macos.yml`) |
 
 ## Тестовые сценарии
 
