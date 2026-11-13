@@ -919,8 +919,10 @@ impl Library {
         (task, None)
     }
 
-    /// Занятия для меню: один запрос на открытие, пока список не получен.
-    fn wave_load_stations(&mut self) -> Task<Message> {
+    /// Занятия для меню: заранее при запуске окна (чтобы первое открытие
+    /// меню было сразу в полный размер) и снова при открытии, если прошлый
+    /// запрос не удался.
+    pub(super) fn wave_load_stations(&mut self) -> Task<Message> {
         if !matches!(self.wave.stations, Stations::Idle | Stations::Failed) {
             return Task::none();
         }
@@ -1572,6 +1574,13 @@ impl Library {
                 ));
             }
             groups = groups.push(group("Занятие", pills));
+        } else if matches!(self.wave.stations, Stations::Loading) {
+            // Список ещё едет: место под него занято сразу, чтобы меню не
+            // вырастало у пользователя на глазах.
+            let pills = PLACEHOLDER_PILLS
+                .iter()
+                .map(|&width| placeholder_pill(width));
+            groups = groups.push(group("Занятие", pills.collect()));
         }
         groups = groups
             .push(group(
@@ -1731,6 +1740,28 @@ fn choice_pill<'a>(title: String, selected: bool, message: App) -> Element<'a, A
     mouse_pointer(pill)
 }
 
+/// Ширины таблеток-заглушек раздела «Занятие», пока список грузится: «Любое»
+/// и примерно столько занятий, сколько обычно приходит.
+const PLACEHOLDER_PILLS: [f32; 9] = [72.0, 104.0, 92.0, 118.0, 86.0, 110.0, 96.0, 124.0, 80.0];
+
+/// Таблетка-заглушка той же высоты, что [`choice_pill`]: неактивная, без
+/// подписи.
+fn placeholder_pill<'a>(width: f32) -> Element<'a, App> {
+    button(theme::line(
+        "\u{a0}",
+        Style::CaptionStrong,
+        theme::TEXT_SECONDARY,
+    ))
+    .width(width)
+    .padding([6, 14])
+    .style(|_, _| button::Style {
+        background: Some(theme::SURFACE_3.into()),
+        border: Border::default().rounded(widgets::ROUND),
+        ..button::Style::default()
+    })
+    .into()
+}
+
 /// Курсор-«рука» над кнопкой.
 fn mouse_pointer<'a>(content: impl Into<Element<'a, App>>) -> Element<'a, App> {
     iced::widget::mouse_area(content)
@@ -1752,6 +1783,25 @@ fn wave_problem<'a>(title: &'a str, text: String, retry: App) -> Element<'a, App
 mod tests {
     use super::*;
     use crate::api::WaveTrack;
+
+    /// Занятия просят при запуске окна, а не при первом открытии меню:
+    /// иначе первое меню появляется без раздела «Занятие» и вырастает.
+    #[test]
+    fn stations_are_requested_before_first_menu_open() {
+        // Без сетевого клиента запрос не уходит, но попытка была при запуске.
+        let library = super::super::tests::test_library();
+        assert!(matches!(library.wave.stations, Stations::Failed));
+
+        // С клиентом список уже едет, и открытие меню второй запрос не шлёт.
+        let mut library = super::super::tests::test_library();
+        library.http = Some(reqwest::Client::new());
+        library.wave.stations = Stations::Idle;
+        let _ = library.wave_load_stations();
+        assert!(matches!(library.wave.stations, Stations::Loading));
+        let _ = library.wave_update(Msg::Menu);
+        assert!(library.wave.menu.value());
+        assert!(matches!(library.wave.stations, Stations::Loading));
+    }
 
     fn track(id: &str) -> Track {
         Track {

@@ -676,7 +676,10 @@ impl Library {
         // Серверная история нужна панели «Очередь» («Недавно играли»): один
         // раз в фоне, ошибка тихая.
         let history = library.history_load(http);
-        (library, Task::batch([task, plugins, history]))
+        // Занятия для меню «Моей волны» — заранее: иначе первое открытие
+        // меню показывает его без раздела «Занятие», и оно вырастает.
+        let stations = library.wave_load_stations();
+        (library, Task::batch([task, plugins, history, stations]))
     }
 
     pub fn token(&self) -> Arc<StoredToken> {
