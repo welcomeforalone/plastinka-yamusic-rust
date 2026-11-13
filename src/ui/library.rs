@@ -443,6 +443,12 @@ pub struct Library {
     /// Серверная история (вкладка «История») и номер её последнего запроса.
     server_history: history_screen::HistoryLoad,
     history_serial: u64,
+    /// Что зазвучало за сеанс (вкладка «История»: сервер показывает не сразу).
+    local_plays: history::LocalPlays,
+    /// Вкладка «История» на экране: сервер плюс сеанс, без дублей.
+    history_shown: Arc<Vec<api::HistoryDay>>,
+    /// Откуда построена очередь (контекст для вкладки «История»).
+    play_context: api::HistoryContext,
     /// Сообщения Яндексу о прослушивании (`play-audio`).
     plays: api::PlayTracker,
 }
@@ -673,6 +679,9 @@ impl Library {
             now_playing: None,
             server_history: history_screen::HistoryLoad::Idle,
             history_serial: 0,
+            local_plays: history::LocalPlays::default(),
+            history_shown: Arc::new(Vec::new()),
+            play_context: history_screen::liked_context(),
             plays: api::PlayTracker::default(),
         };
         let task = library.load_likes(http);
@@ -1699,6 +1708,7 @@ impl Library {
                     if !self.player.sounded {
                         self.wave_sounded();
                         self.report_start();
+                        self.history_note_play();
                     }
                     self.player.sounded = true;
                 }
@@ -4078,6 +4088,80 @@ mod tests {
         let index = library.queue.as_ref().unwrap().current;
         library.launch(index, current, 0.0);
         assert_eq!(history_ids(&library), ["2", "3", "4", "3"]);
+    }
+
+    /// Треки вкладки «История» по группам: (подпись, [id]).
+    fn shown_history(library: &Library) -> Vec<(String, Vec<String>)> {
+        library
+            .history_shown
+            .iter()
+            .flat_map(|day| &day.items)
+            .map(|item| {
+                let ids = item.tracks.iter().map(|track| track.id.clone()).collect();
+                (item.context.label(), ids)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sounded_track_lands_in_history_tab_at_once() {
+        let mut library = test_library();
+        // Сервер ответил: сегодня одна волна с треком «9».
+        library.server_history = history_screen::HistoryLoad::Idle;
+        library.history_serial = 1;
+        let server = vec![api::HistoryDay {
+            date: Some(api::today_utc()),
+            items: vec![api::HistoryItem {
+                context: api::HistoryContext::Wave,
+                tracks: vec![plain_track("9")],
+            }],
+        }];
+        let _ = library.history_loaded(1, Ok(Arc::new(server)));
+        let list: Vec<Track> = ["1", "2"].iter().map(|id| plain_track(id)).collect();
+        library.queue = Some(Queue::new(ListKey::Liked, Arc::new(list), 0));
+        library.remember_context(&ListKey::Liked);
+        library.launch(0, plain_track("1"), 0.0);
+        // Пока трек не зазвучал, во вкладке его нет.
+        assert_eq!(shown_history(&library).len(), 1);
+        let sound = |library: &mut Library| {
+            let id = library.player.session;
+            let seeks = library.player.seeks;
+            let _ = library.audio_event(audio::Event::Progress {
+                id,
+                position: Duration::from_secs(1),
+                buffering: false,
+                stream: None,
+                seeks,
+            });
+        };
+        sound(&mut library);
+        library.launch(1, plain_track("2"), 0.0);
+        sound(&mut library);
+        // Свежие первыми, над серверной волной; повторный «зазвучал» не дублирует.
+        sound(&mut library);
+        let liked = "Мне нравится".to_owned();
+        assert_eq!(
+            shown_history(&library),
+            [
+                (liked, vec!["2".to_owned(), "1".to_owned()]),
+                ("Моя волна".to_owned(), vec!["9".to_owned()]),
+            ]
+        );
+        // Новый ответ сервера (уже с «1») слияние не ломает: без дублей.
+        library.history_serial = 2;
+        let server = vec![api::HistoryDay {
+            date: Some(api::today_utc()),
+            items: vec![api::HistoryItem {
+                context: api::HistoryContext::Wave,
+                tracks: vec![plain_track("1"), plain_track("9")],
+            }],
+        }];
+        let _ = library.history_loaded(2, Ok(Arc::new(server)));
+        let ids: Vec<String> = shown_history(&library)
+            .into_iter()
+            .flat_map(|(_, ids)| ids)
+            .collect();
+        assert_eq!(ids, ["2", "1", "9"]);
     }
 
     #[test]

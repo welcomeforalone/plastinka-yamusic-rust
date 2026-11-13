@@ -41,6 +41,8 @@ pub enum HistoryContext {
         title: String,
     },
     Wave,
+    /// «Мне нравится»: так играли из своей коллекции.
+    Liked,
     /// Незнакомый вид: только подпись.
     Other(String),
 }
@@ -53,6 +55,7 @@ impl HistoryContext {
             Self::Artist { name, .. } => format!("Исполнитель {name}"),
             Self::Playlist { title, .. } => format!("Плейлист «{title}»"),
             Self::Wave => "Моя волна".to_owned(),
+            Self::Liked => "Мне нравится".to_owned(),
             Self::Other(title) => title.clone(),
         }
     }
@@ -601,6 +604,7 @@ mod tests {
         };
         assert_eq!(album.label(), "Альбом «Т»");
         assert_eq!(HistoryContext::Wave.label(), "Моя волна");
+        assert_eq!(HistoryContext::Liked.label(), "Мне нравится");
         let playlist = HistoryContext::Playlist {
             owner: "1".into(),
             kind: "2".into(),
