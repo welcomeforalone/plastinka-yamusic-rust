@@ -3,7 +3,12 @@ package ru.plastinka.ui
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,15 +20,20 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -55,6 +65,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
@@ -166,6 +177,8 @@ fun LoginScreen(login: LoginUi, onLogin: () -> Unit) {
                 login.error?.let {
                     Spacer(Modifier.height(12.dp))
                     Text(it, color = MaterialTheme.colorScheme.primary, textAlign = TextAlign.Center)
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedButton(onClick = onLogin) { Text("Повторить вход") }
                 }
             }
         }
@@ -187,24 +200,28 @@ fun LibraryScreen(
 
     Scaffold(
         topBar = {
-            Column {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        "Plastinka",
-                        style = MaterialTheme.typography.titleLarge,
-                        modifier = Modifier.weight(1f),
-                    )
-                    library.account?.let { Text(it.displayName, style = MaterialTheme.typography.bodyMedium) }
-                }
-                TabRow(selectedTabIndex = tab) {
-                    Tab(tab == 0, onClick = { tab = 0 }, text = { Text("Волна") })
-                    Tab(tab == 1, onClick = { tab = 1 }, text = { Text("Мне нравится") })
-                    Tab(tab == 2, onClick = { tab = 2 }, text = { Text("Поиск") })
+            // Непрозрачный фон от самого верха (включая полосу статус-бара):
+            // список листается под тулбаром, но не просвечивает.
+            Surface(color = MaterialTheme.colorScheme.background) {
+                Column(Modifier.statusBarsPadding()) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "Plastinka",
+                            style = MaterialTheme.typography.titleLarge,
+                            modifier = Modifier.weight(1f),
+                        )
+                        library.account?.let { Text(it.displayName, style = MaterialTheme.typography.bodyMedium) }
+                    }
+                    TabRow(selectedTabIndex = tab) {
+                        Tab(tab == 0, onClick = { tab = 0 }, text = { Text("Волна") })
+                        Tab(tab == 1, onClick = { tab = 1 }, text = { Text("Мне нравится") })
+                        Tab(tab == 2, onClick = { tab = 2 }, text = { Text("Поиск") })
+                    }
                 }
             }
         },
@@ -225,8 +242,33 @@ private fun WaveTab(
 ) {
     val queue by QueueHolder.state.collectAsStateWithLifecycle()
     val starting by model.waveStarting.collectAsStateWithLifecycle()
+    val generated by model.generated.collectAsStateWithLifecycle()
 
-    Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+    // VibeColorizer: цвет текущего трека волны, плавный переход 300 мс —
+    // как на десктопе. Не в волне или без данных — акцент темы.
+    val vibeTarget = remember(queue.current, queue.isWave) {
+        if (queue.isWave) Vibe.pick(queue.currentTrack()?.vibe, Color.Unspecified)
+        else Color.Unspecified
+    }
+    val themePrimary = MaterialTheme.colorScheme.primary
+    val tint by animateColorAsState(
+        targetValue = vibeTarget.takeIf { it != Color.Unspecified } ?: themePrimary,
+        animationSpec = tween(durationMillis = 300),
+        label = "vibe",
+    )
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .background(
+                Brush.verticalGradient(
+                    0f to tint.copy(alpha = 0.35f),
+                    1f to Color.Transparent,
+                ),
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
         if (queue.isWave) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 queue.currentTrack()?.let { track ->
@@ -236,6 +278,7 @@ private fun WaveTab(
                         modifier = Modifier
                             .size(200.dp)
                             .clip(RoundedCornerShape(16.dp))
+                            .border(2.dp, tint.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
                             .background(MaterialTheme.colorScheme.surfaceVariant),
                     )
                     Spacer(Modifier.height(16.dp))
@@ -264,13 +307,14 @@ private fun WaveTab(
         } else {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.padding(horizontal = 32.dp),
+                modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp),
             ) {
+                Spacer(Modifier.weight(0.6f))
                 Box(
                     Modifier
                         .size(112.dp)
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary)
+                        .background(tint)
                         .clickable { model.startWave(player) },
                     contentAlignment = Alignment.Center,
                 ) {
@@ -289,6 +333,25 @@ private fun WaveTab(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
                 )
+                if (generated.isNotEmpty()) {
+                    Spacer(Modifier.weight(0.4f))
+                    Text(
+                        "Собираем для вас",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp),
+                    ) {
+                        items(generated, key = { it.kind }) { playlist ->
+                            PlaylistCard(playlist) { model.playPlaylist(player, playlist) }
+                        }
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.height(24.dp))
             }
         }
     }
@@ -442,12 +505,11 @@ private fun TrackList(
 
 @Composable
 fun MiniPlayer(track: Track, player: PlayerController?, onOpen: () -> Unit) {
-    var playing by remember { mutableStateOf(player?.isPlaying ?: false) }
+    val playing = player?.isPlaying?.collectAsStateWithLifecycle()?.value ?: false
     var progress by remember { mutableStateOf(0f) }
     LaunchedEffect(player) {
         while (true) {
             player?.let {
-                playing = it.isPlaying
                 val duration = it.durationMs
                 progress = if (duration > 0) it.positionMs.toFloat() / duration else 0f
             }
@@ -507,15 +569,23 @@ fun FullPlayer(
     onClose: () -> Unit,
 ) {
     val track = queue.currentTrack() ?: return
-    var playing by remember { mutableStateOf(false) }
+    // VibeColorizer: в волне кнопка и слайдер — цветом трека.
+    val playerTint by animateColorAsState(
+        targetValue = if (queue.isWave) Vibe.pick(track.vibe, MaterialTheme.colorScheme.primary)
+        else MaterialTheme.colorScheme.primary,
+        animationSpec = tween(300),
+        label = "vibe-player",
+    )
+    val playing = player?.isPlaying?.collectAsStateWithLifecycle()?.value ?: false
     var position by remember { mutableStateOf(0f) }
     var duration by remember { mutableStateOf(0f) }
     val liked by QueueHolder.likedIds.collectAsStateWithLifecycle()
+    val cached by ru.plastinka.data.TrackCache.cached.collectAsStateWithLifecycle()
+    val cacheProgress by ru.plastinka.data.TrackCache.progress.collectAsStateWithLifecycle()
 
     LaunchedEffect(player) {
         while (true) {
             player?.let {
-                playing = it.isPlaying
                 duration = it.durationMs.toFloat()
                 position = if (duration > 0) it.positionMs.toFloat() / duration else 0f
             }
@@ -527,6 +597,7 @@ fun FullPlayer(
         Column(
             Modifier
                 .fillMaxSize()
+                .statusBarsPadding()
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -541,6 +612,24 @@ fun FullPlayer(
                     modifier = Modifier.weight(1f),
                     textAlign = TextAlign.Center,
                 )
+                val downloading = cacheProgress[track.id]
+                if (downloading != null) {
+                    CircularProgressIndicator(
+                        progress = { if (downloading > 0) downloading / 100f else 0.1f },
+                        modifier = Modifier.size(24.dp).padding(2.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    IconButton(onClick = { model.toggleCache(track) }) {
+                        Icon(
+                            if (cached.contains(track.id)) Icons.Filled.DownloadDone
+                            else Icons.Filled.Download,
+                            if (cached.contains(track.id)) "Убрать из кэша" else "Скачать",
+                            tint = if (cached.contains(track.id)) playerTint
+                            else MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                }
                 IconButton(onClick = { model.toggleLike(track) }) {
                     Icon(
                         if (liked.contains(track.id)) Icons.Filled.Favorite
@@ -591,7 +680,7 @@ fun FullPlayer(
                     Modifier
                         .size(76.dp)
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary)
+                        .background(playerTint)
                         .clickable { player?.toggle() },
                     contentAlignment = Alignment.Center,
                 ) {
@@ -625,5 +714,45 @@ fun FullPlayer(
                 }
             }
         }
+    }
+}
+
+
+
+/** Карточка персональной подборки («Плейлист дня» и т.п.). */
+@Composable
+fun PlaylistCard(
+    playlist: ru.plastinka.data.GeneratedPlaylist,
+    onPlay: () -> Unit,
+) {
+    Column(
+        Modifier
+            .width(150.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .clickable { onPlay() }
+            .padding(10.dp),
+    ) {
+        AsyncImage(
+            model = playlist.coverUrl(),
+            contentDescription = null,
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(10.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            playlist.title,
+            style = MaterialTheme.typography.bodyMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            "${playlist.trackCount} треков",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }

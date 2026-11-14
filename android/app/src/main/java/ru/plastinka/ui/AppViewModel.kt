@@ -92,6 +92,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun poll(code: DeviceCode) {
         val deadline = System.currentTimeMillis() + code.expiresInSeconds * 1000
+        // Сетевые сбои — временны: приложение часто в фоне, пока пользователь
+        // вводит код в браузере, и телефон может рвать сеть. Повторяем, как в
+        // десктопном клиенте (RFC 8628). Отказ сервера — конец сразу.
+        var failures = 0
         while (System.currentTimeMillis() < deadline) {
             delay(code.intervalSec * 1000)
             try {
@@ -102,13 +106,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     loadLibrary()
                     return
                 }
-            } catch (e: Exception) {
+                failures = 0
+            } catch (e: IllegalStateException) {
                 _login.value = LoginUi(
                     phase = LoginPhase.Waiting,
                     code = code,
                     error = e.message,
                 )
                 return
+            } catch (e: Exception) {
+                failures++
+                if (failures >= 6) {
+                    _login.value = LoginUi(
+                        phase = LoginPhase.Waiting,
+                        code = code,
+                        error = "нет соединения с сервером Яндекса. Проверьте сеть и повторите",
+                    )
+                    return
+                }
             }
         }
         _login.value = LoginUi(error = "код истёк, начните заново")
@@ -135,6 +150,47 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 _library.value = _library.value.copy(error = "Волна не началась: ${e.message}")
             } finally {
                 _waveStarting.value = false
+            }
+        }
+    }
+
+    private val _generated = MutableStateFlow<List<ru.plastinka.data.GeneratedPlaylist>>(emptyList())
+    val generated: StateFlow<List<ru.plastinka.data.GeneratedPlaylist>> = _generated
+
+    /** Подборки лендинга: «Плейлист дня» и прочие. */
+    private fun loadGenerated() {
+        val token = plastinka.tokenStore.load() ?: return
+        viewModelScope.launch {
+            _generated.value = try {
+                plastinka.api.personalPlaylists(token)
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+    }
+
+    /** Скачать трек в кэш или убрать из кэша. */
+    fun toggleCache(track: ru.plastinka.data.Track) {
+        val token = plastinka.tokenStore.load() ?: return
+        viewModelScope.launch {
+            if (ru.plastinka.data.TrackCache.isCached(track.id)) {
+                ru.plastinka.data.TrackCache.remove(track.id)
+            } else {
+                ru.plastinka.data.TrackCache.download(
+                    plastinka.api, plastinka.fckCensor, token, track,
+                )
+            }
+        }
+    }
+
+    /** Запустить подборку как очередь. */
+    fun playPlaylist(player: PlayerController?, playlist: ru.plastinka.data.GeneratedPlaylist) {
+        val token = plastinka.tokenStore.load() ?: return
+        viewModelScope.launch {
+            try {
+                val tracks = plastinka.api.playlistTracks(token, playlist.uid, playlist.kind)
+                if (tracks.isNotEmpty()) player?.playQueue(tracks, 0, playlist.title)
+            } catch (_: Exception) {
             }
         }
     }

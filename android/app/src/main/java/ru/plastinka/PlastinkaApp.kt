@@ -20,5 +20,6 @@ class PlastinkaApp : Application() {
         tokenStore = TokenStore.get(this)
         api = YandexApi(http)
         fckCensor = FckCensor.get(http)
+        ru.plastinka.data.TrackCache.init(this, http)
     }
 }

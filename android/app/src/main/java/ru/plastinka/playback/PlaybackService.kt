@@ -7,7 +7,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
-import androidx.media3.datasource.ResolvingDataSource
+
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -51,19 +51,14 @@ class PlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
 
-        val httpSource = OkHttpDataSource.Factory(app.http)
-            .setUserAgent("Plastinka/0.1 Android")
-
-        val resolvingSource = ResolvingDataSource.Factory(httpSource) { dataSpec ->
-            val trackId = TrackUris.trackIdOf(dataSpec.uri.toString())
-                ?: throw java.io.IOException("не трек: ${dataSpec.uri}")
-            val url = resolve(trackId)
-                ?: throw java.io.IOException("звук трека $trackId недоступен")
-            dataSpec.buildUpon().setUri(url).build()
+        // Источник данных: plastinka://track/<id> решается в адрес — сначала
+        // кэш (файл, работает офлайн), потом FckCensor, потом поток Яндекса.
+        val source = androidx.media3.datasource.DataSource.Factory {
+            PlastinkaDataSource(app.http) { uri -> resolveUri(uri) }
         }
 
         val player = ExoPlayer.Builder(this)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(resolvingSource))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(source))
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
@@ -114,7 +109,16 @@ class PlaybackService : MediaSessionService() {
             }
         })
 
-        mediaSession = MediaSession.Builder(this, player).build()
+        // Клик по уведомлению открывает приложение (singleTask — тот же экран).
+        val sessionActivity = android.app.PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, ru.plastinka.MainActivity::class.java),
+            android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        mediaSession = MediaSession.Builder(this, player)
+            .setSessionActivity(sessionActivity)
+            .build()
     }
 
     /** Событие волны: ошибки молча глотаем, как на десктопе. */
@@ -166,6 +170,13 @@ class PlaybackService : MediaSessionService() {
         if (batch.tracks.isEmpty()) return
         QueueHolder.append(batch.tracks)
         player.addMediaItems(batch.tracks.map(::mediaItemOf))
+    }
+
+    /** Кэш → FckCensor-замена → поток Яндекса. */
+    private fun resolveUri(uri: String): String? {
+        val trackId = TrackUris.trackIdOf(uri) ?: return null
+        ru.plastinka.data.TrackCache.cachedUri(trackId)?.let { return it }
+        return resolve(trackId)
     }
 
     /** FckCensor-замена → поток Яндекса. */
@@ -225,5 +236,47 @@ class PlaybackService : MediaSessionService() {
                         .build(),
                 )
                 .build()
+    }
+}
+
+/**
+ * Источник данных плеера: `plastinka://track/<id>` решается в реальный адрес
+ * (кэш-файл или https), дальше читает File- или OkHttp-источник.
+ */
+class PlastinkaDataSource(
+    private val http: okhttp3.OkHttpClient,
+    private val resolve: (String) -> String?,
+) : androidx.media3.datasource.DataSource {
+
+    private var inner: androidx.media3.datasource.DataSource? = null
+
+    override fun open(dataSpec: androidx.media3.datasource.DataSpec): Long {
+        val target = when (dataSpec.uri.scheme) {
+            "plastinka" -> resolve(dataSpec.uri.toString())
+                ?: throw java.io.IOException("звук трека недоступен")
+            else -> dataSpec.uri.toString()
+        }
+        val source = if (target.startsWith("file:")) {
+            androidx.media3.datasource.FileDataSource()
+        } else {
+            OkHttpDataSource.Factory(http)
+                .setUserAgent("Plastinka/0.1 Android")
+                .createDataSource()
+        }
+        inner = source
+        return source.open(dataSpec.buildUpon().setUri(android.net.Uri.parse(target)).build())
+    }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
+        inner?.read(buffer, offset, length)
+            ?: androidx.media3.common.C.RESULT_END_OF_INPUT
+
+    override fun addTransferListener(transferListener: androidx.media3.datasource.TransferListener) {}
+
+    override fun getUri(): android.net.Uri? = inner?.uri
+
+    override fun close() {
+        inner?.close()
+        inner = null
     }
 }

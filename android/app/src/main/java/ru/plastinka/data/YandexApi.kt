@@ -79,17 +79,22 @@ class YandexApi(private val http: OkHttpClient) {
     // ------------------------------------------------------------- статус
 
     suspend fun accountStatus(token: String): AccountInfo = withContext(Dispatchers.IO) {
-        val obj = get(token, "$API_BASE/account/status")
-        val account = obj["account"]!!.jsonObject
-        val subscription = account["subscription"]?.jsonObject
-        val plusActive = subscription
-            ?.get("hasPlus")?.jsonPrimitive?.content == "true" ||
-            subscription?.get("plus")?.jsonObject?.get("hasPlus")?.jsonPrimitive?.content == "true"
+        // Ответ завёрнут в `result`: result.account.uid, result.plus/subscription.
+        val result = get(token, "$API_BASE/account/status")["result"]?.jsonObject
+            ?: throw IllegalStateException("нет result у статуса")
+        val account = result["account"]?.jsonObject
+            ?: throw IllegalStateException("нет account у статуса")
+        val uid = account["uid"]?.jsonPrimitive?.content?.toLongOrNull()
+            ?: throw UnauthorizedException()
+        val hasPlusFlag = { node: kotlinx.serialization.json.JsonElement? ->
+            (node as? kotlinx.serialization.json.JsonObject)
+                ?.get("hasPlus")?.jsonPrimitive?.content == "true"
+        }
         AccountInfo(
-            uid = account["uid"]!!.jsonPrimitive.content.toLong(),
+            uid = uid,
             displayName = account["displayName"]?.jsonPrimitive?.content
                 ?: account["login"]?.jsonPrimitive?.content ?: "",
-            hasPlus = plusActive,
+            hasPlus = hasPlusFlag(result["plus"]) || hasPlusFlag(result["subscription"]),
         )
     }
 
@@ -335,6 +340,43 @@ class YandexApi(private val http: OkHttpClient) {
     fun waveTrackId(track: Track): String =
         if (track.albumId != null) "${track.id}:${track.albumId}" else track.id
 
+    // ------------------------------------------------------- подборки лендинга
+
+    /** «Плейлист дня», «Дежавю», «Премьера» — блок personal-playlists лендинга. */
+    suspend fun personalPlaylists(token: String): List<ru.plastinka.data.GeneratedPlaylist> =
+        withContext(Dispatchers.IO) {
+            val obj = get(token, "$API_BASE/landing3?blocks=personalplaylists")
+            obj["result"]?.jsonObject?.get("blocks")?.jsonArray
+                ?.firstOrNull { it.jsonObject["type"]?.jsonPrimitive?.content == "personal-playlists" }
+                ?.jsonObject?.get("entities")?.jsonArray
+                ?.mapNotNull { entity ->
+                    // Плейлист спрятан в data.data.
+                    val pl = entity.jsonObject["data"]?.jsonObject?.get("data")?.jsonObject
+                        ?: return@mapNotNull null
+                    ru.plastinka.data.GeneratedPlaylist(
+                        uid = pl["uid"]?.jsonPrimitive?.content?.toLongOrNull()
+                            ?: return@mapNotNull null,
+                        kind = pl["kind"]?.jsonPrimitive?.content?.toLongOrNull()
+                            ?: return@mapNotNull null,
+                        title = pl["title"]?.jsonPrimitive?.content ?: return@mapNotNull null,
+                        coverUri = pl["cover"]?.jsonObject?.get("uri")?.jsonPrimitive?.content
+                            ?: pl["ogImage"]?.jsonPrimitive?.content,
+                        trackCount = pl["trackCount"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                    )
+                }
+                .orEmpty()
+        }
+
+    /** Треки подборки: `GET /users/{uid}/playlists/{kind}`. */
+    suspend fun playlistTracks(token: String, ownerUid: Long, kind: Long): List<Track> =
+        withContext(Dispatchers.IO) {
+            val obj = get(token, "$API_BASE/users/$ownerUid/playlists/$kind")
+            obj["result"]?.jsonObject?.get("tracks")?.jsonArray
+                ?.mapNotNull { it.jsonObject["track"]?.let(::parseTrack) }
+                ?.filter { it.available }
+                .orEmpty()
+        }
+
     private fun parseBatch(text: String, fallbackSession: String?): WaveBatch? {
         val result = json.parseToJsonElement(text).jsonObject["result"]?.jsonObject
             ?: throw IllegalStateException("нет result у волны")
@@ -346,8 +388,22 @@ class YandexApi(private val http: OkHttpClient) {
         val from = result["wave"]?.jsonObject?.get("idForFrom")?.jsonPrimitive?.content
         val tracks = result["sequence"]?.jsonArray
             ?.filter { it.jsonObject["type"]?.jsonPrimitive?.content != "nontrack" }
-            ?.mapNotNull { it.jsonObject["track"]?.let(::parseTrack) }
-            ?.filter { it.available }
+            ?.mapNotNull { element ->
+                val item = element.jsonObject
+                val track = item["track"]?.let(::parseTrack) ?: return@mapNotNull null
+                if (!track.available) return@mapNotNull null
+                // VibeColorizer: derivedColors и hue из ответа волны.
+                val colors = item["track"]?.jsonObject?.get("derivedColors")?.jsonObject
+                val vibe = ru.plastinka.data.VibeColors(
+                    accent = colors?.get("accent")?.jsonPrimitive?.content?.takeIf { it.startsWith("#") },
+                    average = colors?.get("average")?.jsonPrimitive?.content?.takeIf { it.startsWith("#") },
+                    hue = item["trackParameters"]?.jsonObject?.get("hue")
+                        ?.jsonPrimitive?.content?.toDoubleOrNull(),
+                )
+                track.copy(
+                    vibe = vibe.takeIf { it.accent != null || it.average != null || it.hue != null },
+                )
+            }
             .orEmpty()
         return WaveBatch(session, batchId, from, tracks)
     }

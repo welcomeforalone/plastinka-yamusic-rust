@@ -12,11 +12,33 @@ data class Track(
     val durationMs: Long?,
     val available: Boolean,
     val coverUri: String?,
+    /** Цвет трека для VibeColorizer (только у порций волны). */
+    val vibe: VibeColors? = null,
 ) {
     val artistNames: String get() = artists.joinToString(", ") { it.name }
     fun coverUrl(size: String = "400x400"): String? =
         coverUri?.takeIf { it.contains("%%") }
             ?.let { "https://${it.replace("%%", size)}" }
+}
+
+/** Источники цвета волны: `derivedColors.accent` → `average` → `hue`. */
+data class VibeColors(
+    val accent: String?,
+    val average: String?,
+    val hue: Double?,
+)
+
+/** Персональная подборка с лендинга («Плейлист дня», «Дежавю», «Премьера»). */
+data class GeneratedPlaylist(
+    /** Владелец подборки (служебный аккаунт Яндекса). */
+    val uid: Long,
+    val kind: Long,
+    val title: String,
+    val coverUri: String?,
+    val trackCount: Int,
+) {
+    fun coverUrl(size: String = "300x300"): String? =
+        coverUri?.takeIf { it.contains("%%") }?.let { "https://${it.replace("%%", size)}" }
 }
 
 data class ArtistRef(val id: String?, val name: String)
