@@ -5,6 +5,7 @@
 //! [`PlaybackPermit`], то есть после явного подтверждения Плюса.
 
 mod anim;
+mod corners;
 mod covers;
 mod drag_pulse;
 mod filter;
@@ -70,6 +71,8 @@ fn window_settings() -> window::Settings {
         min_size: Some(Size::new(960.0, 600.0)),
         // Свой заголовок окна: системная рамка не нужна.
         decorations: false,
+        // Углы в Linux скругляем сами: за ними должно быть видно рабочий стол.
+        transparent: corners::ENABLED,
         // Закрытие обрабатываем сами: несохранённый токен надо отозвать.
         exit_on_close_request: false,
         icon: app_icon(),
@@ -363,6 +366,9 @@ pub enum Message {
     WindowResized(Size),
     /// Свёрнуто ли окно (`None` — платформа не ответила, считаем «нет»).
     Minimized(Option<bool>),
+    /// Развёрнуто ли окно и режим окна — для скругления углов в Linux.
+    Maximized(bool),
+    WindowMode(window::Mode),
     DragWindow,
     ToggleMaximize,
     Minimize,
@@ -429,6 +435,9 @@ pub struct App {
     size: Size,
     /// Окно свёрнуто: перерисовки стоят (см. `pause`).
     minimized: bool,
+    /// Окно развёрнуто или на весь экран: углы прямые (см. `corners`).
+    maximized: bool,
+    fullscreen: bool,
     http: Result<reqwest::Client, String>,
     covers: covers::Covers,
     screen: Screen,
@@ -495,6 +504,8 @@ impl App {
             window: Some(main_window),
             size: window_settings().size,
             minimized: false,
+            maximized: false,
+            fullscreen: false,
             http: net::http_client().map_err(|err| err.to_string()),
             covers: covers::Covers::new(cache_dir),
             screen: Screen::Starting,
@@ -805,9 +816,22 @@ impl App {
                 // Сворачивание и разворачивание всегда приходят как Resized:
                 // узнаём, свёрнуто ли окно (у окна без рамки размер свёрнутого
                 // не нулевой, iced сам рисовать не перестанет).
-                return self.with_window(|id| window::is_minimized(id).map(Message::Minimized));
+                let minimized =
+                    self.with_window(|id| window::is_minimized(id).map(Message::Minimized));
+                // Развёрнутость нужна только для углов: где их скругляет
+                // система, лишних запросов не делаем.
+                if !corners::ENABLED {
+                    return minimized;
+                }
+                return Task::batch([
+                    minimized,
+                    self.with_window(|id| window::is_maximized(id).map(Message::Maximized)),
+                    self.with_window(|id| window::mode(id).map(Message::WindowMode)),
+                ]);
             }
             Message::Minimized(state) => self.minimized = state.unwrap_or(false),
+            Message::Maximized(maximized) => self.maximized = maximized,
+            Message::WindowMode(mode) => self.fullscreen = mode == window::Mode::Fullscreen,
             Message::DragWindow => {
                 drag_pulse::start();
                 return self.with_window(window::drag);
@@ -1745,13 +1769,22 @@ impl App {
             .mini_cover()
             .and_then(|uri| self.covers.big(Some(uri), self.now))
             .and_then(|(big, _)| big.average);
-        library.mini_view(
+        let view = library.mini_view(
             &self.covers,
             self.mini_prefs.compact,
             self.mini_pinned,
             average,
             self.now,
-        )
+        );
+        // Мини-плеер не разворачивается, масштаба у него нет.
+        let radius = corners::radius(corners::ENABLED, false, false, 1.0);
+        match corners::eraser(radius) {
+            Some(eraser) => stack![view, eraser]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into(),
+            None => view,
+        }
     }
 
     /// Заголовок окна, края для изменения размера, диалог и сообщение.
@@ -1819,6 +1852,13 @@ impl App {
             Message::Frame,
         ));
         let layers = layers.push(resize_edges());
+        // Скругление углов — поверх всего, мышь не ловит.
+        let scale = self.prefs.scale as f32 / 100.0;
+        let radius = corners::radius(corners::ENABLED, self.maximized, self.fullscreen, scale);
+        let layers = match corners::eraser(radius) {
+            Some(eraser) => layers.push(eraser),
+            None => layers,
+        };
         // Где нажали мышь — для меню трека у курсора.
         let root: Element<'a, Message> = if matches!(self.screen, Screen::Main(_)) {
             pointer::pointer(layers, |at| {
