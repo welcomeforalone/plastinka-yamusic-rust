@@ -1,5 +1,7 @@
-//! Системный плеер: медиаклавиши и оверлей (SMTC в Windows, MPRIS в Linux)
-//! через `souvlaki`. Окно кладёт сюда снимок «что играет» ([`State`]), а
+//! Системный плеер: медиаклавиши и оверлей. Windows (SMTC) и macOS — через
+//! `souvlaki` (`system`), Linux — свой MPRIS на `zbus` (`mpris`): у MPRIS из
+//! souvlaki позиция стоит на месте и нет сигнала `Seeked`, поэтому таймлайн в
+//! апплетах KDE/GNOME и `playerctl` врал. Окно кладёт сюда снимок «что играет» ([`State`]), а
 //! чистая логика ([`Syncer`]) решает, что сообщить системе: метаданные только
 //! при смене трека, состояние — при смене или перемотке. События системы
 //! ([`Command`]) приходят обычными сообщениями окна через [`Events`], без
@@ -10,11 +12,24 @@
 //! Создать [`Controls`] можно только с [`PlaybackPermit`] (правило 2: без
 //! подтверждённого Плюса системного плеера нет).
 
+#[cfg(all(unix, not(target_os = "macos")))]
+mod mpris;
+#[cfg(not(all(unix, not(target_os = "macos"))))]
 mod system;
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+mod timeline;
 
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub use system::{Controls, Events};
+use tokio::sync::mpsc;
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub use mpris::Controls;
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+pub use system::Controls;
 
 /// Что просит система: клавиши, оверлей, MPRIS-клиенты.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -35,8 +50,10 @@ pub enum Command {
 }
 
 /// Сдвиг «перемотать» без указания размера (кнопки FastForward/Rewind).
+#[cfg(not(all(unix, not(target_os = "macos"))))]
 const SEEK_STEP: Duration = Duration::from_secs(10);
 
+#[cfg(not(all(unix, not(target_os = "macos"))))]
 impl Command {
     /// Событие souvlaki → команда окна. Незнакомые и ненужные события
     /// (`Raise`, `Quit`, `OpenUri`) пропускаются: окно не
@@ -60,6 +77,47 @@ impl Command {
                 Self::SetVolume(volume.clamp(0.0, 1.0) as f32)
             }
             _ => return None,
+        })
+    }
+}
+
+/// Поток команд для `iced::Subscription::run_with`. Сравнивается по номеру:
+/// приёмник забирается один раз (как у `player::Events`).
+#[derive(Clone)]
+pub struct Events {
+    id: u64,
+    receiver: Arc<Mutex<Option<mpsc::UnboundedReceiver<Command>>>>,
+}
+
+impl Hash for Events {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+impl Events {
+    /// Канал команд: отправитель — системе, `Events` — окну.
+    fn channel() -> (mpsc::UnboundedSender<Command>, Self) {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let events = Self {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            receiver: Arc::new(Mutex::new(Some(receiver))),
+        };
+        (sender, events)
+    }
+
+    /// Поток команд. Второй вызов даёт пустой поток.
+    pub fn stream(&self) -> impl iced::futures::Stream<Item = Command> + use<> {
+        let receiver = self
+            .receiver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        iced::futures::stream::unfold(receiver, |receiver| async move {
+            let mut receiver = receiver?;
+            let command = receiver.recv().await?;
+            Some((command, Some(receiver)))
         })
     }
 }
@@ -91,6 +149,8 @@ pub struct State {
 /// очищает прежнее значение.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Meta {
+    /// Номер трека: из него MPRIS строит `mpris:trackid`.
+    pub track_id: String,
     pub title: String,
     pub artist: String,
     pub album: String,
@@ -99,8 +159,9 @@ pub struct Meta {
     pub duration: Option<Duration>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Status {
+    #[default]
     Stopped,
     Paused,
     Playing,
@@ -198,17 +259,24 @@ impl Syncer {
 
 fn meta(track: &Track) -> Meta {
     Meta {
+        track_id: track.id.clone(),
         title: track.title.clone(),
         artist: track.artists.clone(),
         album: track.album.clone(),
         cover_url: track.cover.as_deref().and_then(crate::discord::cover_url),
-        duration: track.duration_ms.map(Duration::from_millis),
+        // Нулевая длительность — «неизвестно»: с ней MPRIS отверг бы любую
+        // перемотку (позиция больше длины трека).
+        duration: track
+            .duration_ms
+            .filter(|ms| *ms > 0)
+            .map(Duration::from_millis),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
     use souvlaki::{MediaControlEvent as E, MediaPosition, SeekDirection};
 
     fn track(id: &str) -> Track {
@@ -232,6 +300,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
     fn events_become_commands() {
         assert_eq!(Command::from_event(&E::Play), Some(Command::Play));
         assert_eq!(Command::from_event(&E::Pause), Some(Command::Pause));
@@ -258,6 +327,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
     fn volume_is_clamped_and_nan_dropped() {
         assert_eq!(
             Command::from_event(&E::SetVolume(1.7)),
@@ -282,6 +352,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
     fn unwanted_events_are_ignored() {
         assert_eq!(Command::from_event(&E::Quit), None);
         assert_eq!(Command::from_event(&E::Raise), None);
@@ -313,6 +384,14 @@ mod tests {
                 position: Duration::ZERO
             }))
         );
+    }
+
+    #[test]
+    fn zero_duration_is_unknown() {
+        let mut silent = track("1");
+        silent.duration_ms = Some(0);
+        assert_eq!(meta(&silent).duration, None);
+        assert_eq!(meta(&track("7")).track_id, "7");
     }
 
     #[test]

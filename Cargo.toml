@@ -80,8 +80,11 @@ winresource = { version = "0.1.34", default-features = false }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
-# Системный плеер: медиаклавиши и MPRIS. `use_zbus` — чистый Rust, без системной libdbus.
-souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
+# Системный плеер: своя служба MPRIS (src/media_controls/mpris.rs), MIT. Тот же
+# zbus, что уже тянут хранилище секретов и прежний souvlaki: чистый Rust, без
+# системной libdbus. Souvlaki в Linux не берём: его MPRIS не двигает позицию
+# и не шлёт `Seeked`.
+zbus = "5.15"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Токен в Связке ключей (Keychain).
