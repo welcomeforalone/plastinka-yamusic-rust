@@ -148,6 +148,9 @@ pub fn player_insets(sidebar: f32) -> (f32, f32) {
 }
 /// Громкость при запуске.
 const START_VOLUME: f32 = 0.7;
+/// Раздел, с которого открывается окно после входа: «Моя волна», как в
+/// официальном клиенте. Волна сама не запускается — только её экран.
+const START_SECTION: Section = Section::Wave;
 /// Шаг громкости колесом мыши над плеером.
 const VOLUME_STEP: f32 = 0.05;
 /// «Назад» дальше этой секунды трека возвращает к его началу.
@@ -628,7 +631,7 @@ impl Library {
             status,
             engine,
             rng: Rng::new(),
-            section: Section::Liked,
+            section: START_SECTION,
             stack: Vec::new(),
             serial: 0,
             root_scroll: 0.0,
@@ -4072,6 +4075,19 @@ mod tests {
             .tracks()
             .map(|track| track.id.clone())
             .collect()
+    }
+
+    #[test]
+    fn window_opens_on_idle_wave_screen() {
+        let library = test_library();
+        assert_eq!(library.section, Section::Wave);
+        assert!(library.stack.is_empty());
+        // Волна не запускается сама, звука нет.
+        assert!(!library.in_wave());
+        assert!(library.queue.is_none());
+        assert!(!library.player.playing);
+        // «Мне нравится» всё равно грузится в фоне: от него зависят сердца.
+        assert!(matches!(library.likes, Likes::Loading { .. }));
     }
 
     #[test]
