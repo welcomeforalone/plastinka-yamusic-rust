@@ -1,3 +1,11 @@
 /target
 *.pdb
 .env
+
+# Личные инструкции для агентов и исходники дизайна: только локально
+/CLAUDE.md
+/.claude/
+/design/*.md
+/design/*.figcraft
+/docs/handoff/
+/.mcp.json
