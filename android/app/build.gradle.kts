@@ -17,9 +17,19 @@ android {
         versionName = "0.1.0"
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = file("plastinka.keystore")
+            storePassword = "REMOVED"
+            keyAlias = "plastinka"
+            keyPassword = "REMOVED"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
         }
     }
     compileOptions {
