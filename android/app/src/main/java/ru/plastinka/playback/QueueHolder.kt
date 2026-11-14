@@ -12,6 +12,8 @@ object QueueHolder {
         /** Индекс играющего трека или -1. */
         val current: Int = -1,
         val title: String = "",
+        /** Очередь — «Моя волна»: сервис шлёт события и догружает порции. */
+        val isWave: Boolean = false,
     )
 
     private val _state = MutableStateFlow(State())
@@ -20,8 +22,13 @@ object QueueHolder {
     private val _likes = MutableStateFlow<Set<String>>(emptySet())
     val likedIds: StateFlow<Set<String>> = _likes
 
-    fun set(tracks: List<Track>, startIndex: Int, title: String) {
-        _state.value = State(tracks, startIndex, title)
+    fun set(tracks: List<Track>, startIndex: Int, title: String, isWave: Boolean = false) {
+        _state.value = State(tracks, startIndex, title, isWave)
+    }
+
+    /** Добавить догруженную порцию волны в конец очереди. */
+    fun append(tracks: List<Track>) {
+        _state.value = _state.value.copy(tracks = _state.value.tracks + tracks)
     }
 
     fun setCurrent(index: Int) {

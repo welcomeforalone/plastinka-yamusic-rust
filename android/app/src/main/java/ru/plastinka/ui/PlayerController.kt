@@ -12,8 +12,13 @@ import ru.plastinka.playback.QueueHolder
 /** Обёртка над MediaController: запустить очередь, управлять воспроизведением. */
 class PlayerController(val controller: MediaController) {
 
-    fun playQueue(tracks: List<Track>, startIndex: Int, title: String) {
-        QueueHolder.set(tracks, startIndex, title)
+    fun playQueue(
+        tracks: List<Track>,
+        startIndex: Int,
+        title: String,
+        isWave: Boolean = false,
+    ) {
+        QueueHolder.set(tracks, startIndex, title, isWave)
         val items = tracks.map(PlaybackService::mediaItemOf)
         controller.setMediaItems(items, startIndex, 0)
         controller.prepare()

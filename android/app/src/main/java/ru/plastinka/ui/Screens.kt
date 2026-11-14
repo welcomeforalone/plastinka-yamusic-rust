@@ -202,15 +202,94 @@ fun LibraryScreen(
                     library.account?.let { Text(it.displayName, style = MaterialTheme.typography.bodyMedium) }
                 }
                 TabRow(selectedTabIndex = tab) {
-                    Tab(tab == 0, onClick = { tab = 0 }, text = { Text("Мне нравится") })
-                    Tab(tab == 1, onClick = { tab = 1 }, text = { Text("Поиск") })
+                    Tab(tab == 0, onClick = { tab = 0 }, text = { Text("Волна") })
+                    Tab(tab == 1, onClick = { tab = 1 }, text = { Text("Мне нравится") })
+                    Tab(tab == 2, onClick = { tab = 2 }, text = { Text("Поиск") })
                 }
             }
         },
     ) { padding ->
         when (tab) {
-            0 -> LikesTab(library, liked, model, player, padding)
+            0 -> WaveTab(model, player, padding)
+            1 -> LikesTab(library, liked, model, player, padding)
             else -> SearchTab(query, search, liked, model, player, padding)
+        }
+    }
+}
+
+@Composable
+private fun WaveTab(
+    model: AppViewModel,
+    player: PlayerController?,
+    padding: androidx.compose.foundation.layout.PaddingValues,
+) {
+    val queue by QueueHolder.state.collectAsStateWithLifecycle()
+    val starting by model.waveStarting.collectAsStateWithLifecycle()
+
+    Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+        if (queue.isWave) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                queue.currentTrack()?.let { track ->
+                    AsyncImage(
+                        model = track.coverUrl("400x400"),
+                        contentDescription = null,
+                        modifier = Modifier
+                            .size(200.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        track.title,
+                        style = MaterialTheme.typography.titleLarge,
+                        textAlign = TextAlign.Center,
+                    )
+                    Text(
+                        track.artistNames,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+                Text(
+                    "Следующий трек подберётся сам: «Нравится» настраивает волну на ходу",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 32.dp),
+                )
+            }
+        } else if (starting) {
+            CircularProgressIndicator()
+        } else {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.padding(horizontal = 32.dp),
+            ) {
+                Box(
+                    Modifier
+                        .size(112.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary)
+                        .clickable { model.startWave(player) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Filled.PlayArrow,
+                        "Запустить волну",
+                        tint = Color.White,
+                        modifier = Modifier.size(56.dp),
+                    )
+                }
+                Spacer(Modifier.height(20.dp))
+                Text("Моя волна", style = MaterialTheme.typography.headlineSmall)
+                Text(
+                    "Бесконечный поток музыки под ваш вкус",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+            }
         }
     }
 }

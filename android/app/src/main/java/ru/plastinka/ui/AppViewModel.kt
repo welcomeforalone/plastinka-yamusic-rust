@@ -114,6 +114,31 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _login.value = LoginUi(error = "код истёк, начните заново")
     }
 
+    private var waveJob: Job? = null
+    private val _waveStarting = MutableStateFlow(false)
+    val waveStarting: StateFlow<Boolean> = _waveStarting
+
+    /** Запустить «Мою волну»: сессия rotor + первая порция в очередь. */
+    fun startWave(player: PlayerController?) {
+        val token = plastinka.tokenStore.load() ?: return
+        if (_waveStarting.value) return
+        _waveStarting.value = true
+        waveJob = viewModelScope.launch {
+            try {
+                val batch = plastinka.api.startWave(token)
+                ru.plastinka.playback.PlaybackService.waveStarted(
+                    batch.session, batch.batchId, batch.from,
+                )
+                if (batch.tracks.isEmpty()) throw IllegalStateException("волна прислала 0 треков")
+                player?.playQueue(batch.tracks, 0, "Моя волна", isWave = true)
+            } catch (e: Exception) {
+                _library.value = _library.value.copy(error = "Волна не началась: ${e.message}")
+            } finally {
+                _waveStarting.value = false
+            }
+        }
+    }
+
     fun loadLibrary() {
         val token = plastinka.tokenStore.load() ?: return
         _library.value = _library.value.copy(loading = true, error = null)

@@ -10,6 +10,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Request
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
@@ -256,7 +258,125 @@ class YandexApi(private val http: OkHttpClient) {
     fun streamUrlBlocking(token: String, trackId: String): StreamResult =
         kotlinx.coroutines.runBlocking { streamUrl(token, trackId) }
 
+    // -------------------------------------------------------------- волна
+
+    /** Порция треков «Моей волны». */
+    data class WaveBatch(
+        val session: String,
+        val batchId: String,
+        val from: String?,
+        val tracks: List<Track>,
+    )
+
+    /** Запустить «Мою волну» и получить первую порцию. */
+    suspend fun startWave(token: String): WaveBatch = withContext(Dispatchers.IO) {
+        val body = kotlinx.serialization.json.buildJsonObject {
+            put("seeds", kotlinx.serialization.json.buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive(WAVE_SEED)) })
+            put("queue", kotlinx.serialization.json.buildJsonArray {})
+            put("includeTracksInResponse", kotlinx.serialization.json.JsonPrimitive(true))
+            put("includeWaveModel", kotlinx.serialization.json.JsonPrimitive(true))
+            put("interactive", kotlinx.serialization.json.JsonPrimitive(true))
+        }
+        val text = post(token, "$API_BASE/rotor/session/new", body)
+        parseBatch(text, null) ?: throw IllegalStateException("волна не началась")
+    }
+
+    /** Следующая порция. `null` — сессия протухла: нужна новая. */
+    suspend fun waveTracks(token: String, session: String, queueIds: List<String>): WaveBatch? =
+        withContext(Dispatchers.IO) {
+            val recent = queueIds.takeLast(WAVE_QUEUE_LEN)
+            val body = kotlinx.serialization.json.buildJsonObject {
+                put(
+                    "queue",
+                    kotlinx.serialization.json.buildJsonArray {
+                        recent.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) }
+                    },
+                )
+                put("feedbacks", kotlinx.serialization.json.buildJsonArray {})
+            }
+            val text = post(token, "$API_BASE/rotor/session/$session/tracks", body)
+            parseBatch(text, session)
+        }
+
+    /** Событие волны (radioStarted / trackStarted / trackFinished / skip). Ошибки не критичны. */
+    suspend fun waveFeedback(
+        token: String,
+        session: String,
+        batchId: String,
+        from: String?,
+        type: String,
+        trackId: String? = null,
+        playedSeconds: Double? = null,
+    ) = withContext(Dispatchers.IO) {
+        try {
+            val stamp = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
+                .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
+                .format(java.util.Date())
+            val body = kotlinx.serialization.json.buildJsonObject {
+                put(
+                    "event",
+                    kotlinx.serialization.json.buildJsonObject {
+                        put("type", kotlinx.serialization.json.JsonPrimitive(type))
+                        put("timestamp", kotlinx.serialization.json.JsonPrimitive(stamp))
+                        from?.let { put("from", kotlinx.serialization.json.JsonPrimitive(it)) }
+                        trackId?.let { put("trackId", kotlinx.serialization.json.JsonPrimitive(it)) }
+                        playedSeconds?.let { put("totalPlayedSeconds", kotlinx.serialization.json.JsonPrimitive(it)) }
+                    },
+                )
+                put("batchId", kotlinx.serialization.json.JsonPrimitive(batchId))
+            }
+            post(token, "$API_BASE/rotor/session/$session/feedback", body)
+        } catch (_: Exception) {
+            // Как на десктопе: воспроизведение от обратной связи не зависит.
+        }
+    }
+
+    /** Идентификатор трека для событий и очереди волны: `id:albumId`. */
+    fun waveTrackId(track: Track): String =
+        if (track.albumId != null) "${track.id}:${track.albumId}" else track.id
+
+    private fun parseBatch(text: String, fallbackSession: String?): WaveBatch? {
+        val result = json.parseToJsonElement(text).jsonObject["result"]?.jsonObject
+            ?: throw IllegalStateException("нет result у волны")
+        if (result["unknownSession"]?.jsonPrimitive?.content == "true") return null
+        val session = result["radioSessionId"]?.jsonPrimitive?.content ?: fallbackSession
+            ?: throw IllegalStateException("нет radioSessionId")
+        val batchId = result["batchId"]?.jsonPrimitive?.content
+            ?: throw IllegalStateException("нет batchId")
+        val from = result["wave"]?.jsonObject?.get("idForFrom")?.jsonPrimitive?.content
+        val tracks = result["sequence"]?.jsonArray
+            ?.filter { it.jsonObject["type"]?.jsonPrimitive?.content != "nontrack" }
+            ?.mapNotNull { it.jsonObject["track"]?.let(::parseTrack) }
+            ?.filter { it.available }
+            .orEmpty()
+        return WaveBatch(session, batchId, from, tracks)
+    }
+
     // ------------------------------------------------------------- служебное
+
+    private fun post(
+        token: String,
+        url: String,
+        body: kotlinx.serialization.json.JsonObject,
+    ): String {
+        val request = Request.Builder()
+            .url(url)
+            .header("Authorization", "OAuth $token")
+            .header("X-Yandex-Music-Client", MUSIC_CLIENT)
+            .post(
+                body.toString()
+                    .toRequestBody("application/json; charset=utf-8".toMediaType()),
+            )
+            .build()
+        val response = http.newCall(request).execute()
+        return response.use { resp ->
+            when {
+                resp.code == 401 || resp.code == 403 -> throw UnauthorizedException()
+                !resp.isSuccessful -> throw IllegalStateException("сервер ответил ${resp.code}")
+                else -> resp.body?.string().orEmpty()
+            }
+        }
+    }
 
     private class UnauthorizedException : Exception()
 
@@ -311,6 +431,8 @@ class YandexApi(private val http: OkHttpClient) {
         const val SIGN_KEY = "p93jhgh689SBReK6ghtw62"
         const val SIGN_SALT = "XGRlBW9FXlekgbPrRHuSiA"
         const val TRANSPORT = "raw"
+        const val WAVE_SEED = "user:onyourwave"
+        const val WAVE_QUEUE_LEN = 5
         private val ALLOWED_HOSTS = listOf(
             "oauth.yandex.ru", "oauth.yandex.com", "ya.ru", "yandex.ru", "yandex.com",
         )
