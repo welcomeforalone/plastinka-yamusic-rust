@@ -38,7 +38,7 @@
 Готовые сборки — на странице
 [релизов](https://github.com/welcomeforalone/yandex-music-rust/releases).
 Каждый файл релиза собирается в GitHub Actions с последнего коммита `main`
-на момент выпуска; номер коммита лежит в архиве в файле `COMMIT`.
+на момент выпуска.
 
 | Система | Файл |
 |---|---|
@@ -86,7 +86,7 @@ Secret Service) или KeePassXC. В KDE Plasma (CachyOS по умолчанию
 
 - `build-linux.yml` — контейнер Ubuntu 22.04, проверка запуска на Arch Linux;
 - `build-windows.yml` — Windows x64 (MSVC), иконка и свойства файла из
-  `build.rs`, в архиве `plastinka.exe` и `COMMIT`, рядом `.sha256`;
+  `build.rs`, в архиве только `plastinka.exe`, рядом `.sha256`;
 - `build-macos.yml` — универсальный бинарник (Apple Silicon и Intel).
 
 ```sh

@@ -54,10 +54,9 @@ jobs:
           $name = 'plastinka-windows-x64'
           New-Item -ItemType Directory -Force out | Out-Null
           Copy-Item target\release\plastinka.exe out\
-          # Переводы строк LF: иначе `sha256sum -c` не находит файл из-за \r.
-          [IO.File]::WriteAllText("$PWD\out\COMMIT", "$env:GITHUB_SHA`n")
           Compress-Archive -Path out\* -DestinationPath "$name.zip" -Force
           $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          # Перевод строки LF: иначе `sha256sum -c` не находит файл из-за \r.
           [IO.File]::WriteAllText("$PWD\$name.zip.sha256", "$hash  $name.zip`n")
 
       - uses: actions/upload-artifact@v4
