@@ -15,7 +15,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Color, Element, Length, Padding, Point, Size, Task};
 
-use super::{App, Effect, Lib, Library, Message, setting_row, switch};
+use super::{App, Effect, Lib, Library, Message};
 use crate::api::{self, AlbumCard, ArtistRef, Found, SearchKind, Track};
 use crate::player::{Command, Sound};
 use crate::plugins::fckcensor::{
@@ -26,6 +26,8 @@ use crate::plugins::{PluginSettings, copy_name, stale, unix_now};
 use crate::texts::{plural, sentence};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::queue::ListKey;
+use crate::ui::settings::Entry;
+use crate::ui::settings::controls::{setting_row, switch};
 use crate::ui::theme::{self, Style};
 use crate::ui::widgets::{self, Kind, Size as ButtonSize};
 use crate::ui::{Dialog, Failure, FailureKind, anim};
@@ -1089,22 +1091,24 @@ impl Library {
 
     // ---------------------------------------------------------- настройки
 
-    /// «Настройки → Плагины».
-    pub(super) fn plugins_block(&self) -> Element<'_, App> {
+    /// «Настройки → Плагины»: по записи на плагин, вложенные строки — в ней же.
+    pub(in crate::ui) fn plugin_entries(&self) -> Vec<Entry<'_>> {
         let settings = &self.plugins;
-        let mut rows: Vec<Element<'_, App>> = vec![setting_row(
+        let mut entries = Vec::new();
+
+        let hint = "Названия, обложки и исполнители без цензуры из списка FckCensorData. \
+         Звук — только с Яндекса или из вашего файла";
+        let mut rows = column![setting_row(
             "FckCensor",
-            "Названия, обложки и исполнители без цензуры из списка FckCensorData. \
-             Звук — только с Яндекса или из вашего файла"
-                .to_owned(),
+            hint.to_owned(),
             switch(
                 settings.fckcensor,
                 change(settings, |s, on| s.fckcensor = on),
             ),
         )];
         if settings.fckcensor {
-            rows.push(self.censor_status());
-            rows.push(sub_row(
+            rows = rows.push(self.censor_status());
+            rows = rows.push(sub_row(
                 "Искать версию без цензуры",
                 "Если на Яндексе есть explicit-версия трека, играет она".to_owned(),
                 switch(
@@ -1113,7 +1117,7 @@ impl Library {
                 ),
             ));
             let count = self.censor.replacements.tracks.len();
-            rows.push(sub_row(
+            rows = rows.push(sub_row(
                 "Ручные замены",
                 format!(
                     "{count} {}. Правый щелчок по треку → «Заменить на…» или «Свой файл…»",
@@ -1122,20 +1126,27 @@ impl Library {
                 Space::new().into(),
             ));
         }
-        rows.push(widgets::divider());
-        rows.push(setting_row(
-            "Slopless",
-            "Метки ИИ-исполнителей и ИИ-треков по базе slopless.art".to_owned(),
-            switch(settings.slopless, change(settings, |s, on| s.slopless = on)),
+        entries.push(Entry::new(
+            "FckCensor",
+            hint,
+            "цензура explicit мат версия замена список github",
+            rows.into(),
         ));
+
+        let hint = "Метки ИИ-исполнителей и ИИ-треков по базе slopless.art";
+        let mut rows = column![setting_row(
+            "Slopless",
+            hint.to_owned(),
+            switch(settings.slopless, change(settings, |s, on| s.slopless = on)),
+        )];
         if settings.slopless {
-            rows.push(sub_row(
+            rows = rows.push(sub_row(
                 "Пропускать ИИ-треки",
                 "В очереди. Трек, включённый вручную, играет".to_owned(),
                 switch(settings.autoskip, change(settings, |s, on| s.autoskip = on)),
             ));
             let base = settings.clone();
-            rows.push(sub_row(
+            rows = rows.push(sub_row(
                 "Ставить «Не нравится»",
                 "Пропущенным ИИ-трекам. Это запись в ваш аккаунт: включается после \
                  подтверждения"
@@ -1152,7 +1163,7 @@ impl Library {
                 }),
             ));
             let known = self.slop.cache.artists.len();
-            rows.push(sub_row(
+            rows = rows.push(sub_row(
                 "База",
                 format!(
                     "Проверено {known} {}",
@@ -1166,28 +1177,44 @@ impl Library {
                 ),
             ));
         }
-        rows.push(widgets::divider());
-        rows.push(setting_row(
+        entries.push(Entry::new(
+            "Slopless",
+            hint,
+            "ии искусственный интеллект нейросеть пропуск не нравится",
+            rows.into(),
+        ));
+
+        let hint = "Пункт «Скопировать название» в меню трека (правый щелчок) и плеера";
+        let mut rows = column![setting_row(
             "CopyTrackName",
-            "Пункт «Скопировать название» в меню трека (правый щелчок) и плеера".to_owned(),
+            hint.to_owned(),
             switch(
                 settings.copy_name,
                 change(settings, |s, on| s.copy_name = on),
             ),
-        ));
+        )];
         if settings.copy_name {
-            rows.push(self.copy_format_row());
+            rows = rows.push(self.copy_format_row());
         }
-        rows.push(widgets::divider());
-        rows.push(setting_row(
-            "VibeColorizer",
-            "Цвет «Моей волны» и спектра под плеером под обложку играющего трека".to_owned(),
-            switch(settings.vibe, change(settings, |s, on| s.vibe = on)),
+        entries.push(Entry::new(
+            "CopyTrackName",
+            hint,
+            "копировать название формат буфер обмена",
+            rows.into(),
         ));
-        container(column(rows))
-            .width(Length::Fill)
-            .style(|_| super::card_style())
-            .into()
+
+        let hint = "Цвет «Моей волны» и спектра под плеером под обложку играющего трека";
+        entries.push(Entry::new(
+            "VibeColorizer",
+            hint,
+            "волна цвет обложка спектр",
+            setting_row(
+                "VibeColorizer",
+                hint.to_owned(),
+                switch(settings.vibe, change(settings, |s, on| s.vibe = on)),
+            ),
+        ));
+        entries
     }
 
     fn censor_status(&self) -> Element<'_, App> {

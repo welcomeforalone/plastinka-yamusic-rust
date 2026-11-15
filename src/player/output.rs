@@ -14,6 +14,7 @@ use std::time::Duration;
 use rodio::Source;
 
 use super::buffer::StreamBuffer;
+use super::eq::{EqControl, Equalizer};
 use crate::api::StreamInfo;
 
 /// Сколько отсчётов источник забирает из очереди за раз.
@@ -136,6 +137,8 @@ pub struct Shared {
     pub buffer: Arc<StreamBuffer>,
     volume: Arc<Volume>,
     tap: Arc<Tap>,
+    /// Параметры эквалайзера: общие для всех сеансов плеера.
+    eq: Arc<EqControl>,
     queue: Mutex<Queue>,
     /// Частота дискретизации, когда декодер её узнал.
     rate: AtomicU32,
@@ -173,12 +176,14 @@ impl Shared {
         buffer: Arc<StreamBuffer>,
         volume: Arc<Volume>,
         tap: Arc<Tap>,
+        eq: Arc<EqControl>,
         start: Duration,
     ) -> Arc<Self> {
         Arc::new(Self {
             buffer,
             volume,
             tap,
+            eq,
             queue: Mutex::new(Queue {
                 base: start,
                 ..Queue::default()
@@ -347,6 +352,7 @@ pub struct Output {
     channels: NonZero<u16>,
     rate: NonZero<u32>,
     local: Vec<f32>,
+    equalizer: Equalizer,
     pos: usize,
     /// Номер канала следующего отсчёта: громкость меняется между кадрами.
     channel: u16,
@@ -367,11 +373,13 @@ impl Output {
         let prebuffer = usize::try_from(rate.get() / 1000 * PREBUFFER_MS)
             .unwrap_or(usize::MAX)
             .saturating_mul(usize::from(channels.get()));
+        let equalizer = Equalizer::new(usize::from(channels.get()), rate.get(), &shared.eq);
         Self {
             shared,
             channels,
             rate,
             local: Vec::with_capacity(TAKE),
+            equalizer,
             pos: 0,
             channel: 0,
             gain: 0.0,
@@ -445,6 +453,8 @@ impl Output {
         self.local.extend(queue.samples.drain(..take));
         queue.frames = queue.frames.saturating_add((take / channels) as u64);
         drop(queue);
+        // Эквалайзер — до отвода: спектр показывает то, что слышно.
+        self.equalizer.process(&self.shared.eq, &mut self.local);
         // Визуализатору — то же, что уходит в микшер, без громкости.
         self.shared.tap.feed(&self.local, channels, self.rate.get());
         self.silent = false;
@@ -514,6 +524,7 @@ mod tests {
             StreamBuffer::new(),
             volume,
             Arc::new(Tap::default()),
+            Arc::new(EqControl::default()),
             Duration::ZERO,
         )
     }
@@ -624,6 +635,23 @@ mod tests {
         shared.finish();
         out.by_ref().count();
         assert!(shared.finished());
+    }
+
+    /// Порция проходит через эквалайзер: предусилитель −6 дБ уменьшает звук.
+    #[test]
+    fn samples_go_through_equalizer() {
+        let shared = shared();
+        shared.set_rate(1000);
+        shared.eq.set(crate::player::eq::EqSettings {
+            enabled: true,
+            preamp: -60,
+            ..Default::default()
+        });
+        shared.push(&vec![1.0; 6000]);
+        let mut out = output(&shared);
+        let samples: Vec<f32> = out.by_ref().take(5000).collect();
+        let last = samples.last().copied().unwrap_or(0.0);
+        assert!((last - 0.501).abs() < 0.01, "{last}");
     }
 
     #[test]

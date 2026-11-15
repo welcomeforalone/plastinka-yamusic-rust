@@ -23,6 +23,7 @@ mod pause;
 mod pointer;
 mod queue;
 mod scroll;
+mod settings;
 mod theme;
 mod visualizer;
 mod widgets;
@@ -42,6 +43,7 @@ use crate::auth::{self, AuthError, DeviceCode, OAuthApp};
 use crate::discord;
 use crate::media_controls;
 use crate::net::{self, NetError};
+use crate::player::eq::EqState;
 use crate::plugins::PluginSettings;
 use crate::storage::config::{self, Config};
 use crate::storage::token::{StoredToken, TokenStore};
@@ -340,6 +342,8 @@ pub enum Zoom {
 pub enum Dialog {
     Licenses,
     ConfirmLogout,
+    /// Подтверждение «Сбросить всё» в настройках.
+    ConfirmResetSettings,
     /// Согласие: Slopless ставит «Не нравится» ИИ-трекам (запись в аккаунт).
     SloplessConsent,
 }
@@ -404,11 +408,16 @@ pub enum Message {
         Option<String>,
         api::WaveSettings,
         mini::MiniPrefs,
+        EqState,
     ),
     ToggleSidebar,
     SetAccent(theme::Accent),
     /// Палитра своего акцента.
     Palette(palette::Msg),
+    /// Экран настроек: раздел, поиск, сброс.
+    Settings(settings::Msg),
+    /// Кнопка эквалайзера в плеере: «Настройки → Эквалайзер».
+    OpenEqualizer,
     Zoom(Zoom),
     ToggleVisualizer,
     /// Качество звука и нормализация громкости (панель «Настройки звука»).
@@ -459,6 +468,8 @@ pub struct App {
     prefs: Prefs,
     /// Палитра своего акцента в настройках.
     palette: palette::State,
+    /// Раздел и запрос на экране настроек (в `config.toml` не пишется).
+    settings: settings::State,
     /// Discord Rich Presence: фоновая задача, пока открыто главное окно.
     discord: Option<discord::Rpc>,
     /// Application ID, с которым запущена задача Discord.
@@ -481,6 +492,8 @@ pub struct App {
     closing: bool,
     /// Плагины: что включено. Тоже в `config.toml`, таблица `[plugins]`.
     plugins: PluginSettings,
+    /// Эквалайзер: параметры, выбранный пресет, свои пресеты (`[equalizer]`).
+    eq: EqState,
     /// Выбор в меню «Моей волны» (`[wave_settings]`, в аккаунт не пишется).
     wave_settings: api::WaveSettings,
     /// Тема iced с текущим акцентом.
@@ -529,9 +542,11 @@ impl App {
             mini_prefs: mini::MiniPrefs::default(),
             closing: false,
             plugins: PluginSettings::default(),
+            eq: EqState::default(),
             wave_settings: api::WaveSettings::default(),
             theme: theme::theme(),
             palette: palette::State::default(),
+            settings: settings::State::default(),
             saving: false,
             save_again: false,
             started: now,
@@ -550,6 +565,7 @@ impl App {
                     config.discord_app_id.clone(),
                     api::WaveSettings::from_config(&config.wave_settings),
                     mini::MiniPrefs::from_config(&config.mini_player),
+                    config.equalizer(),
                 )
             }),
         ]);
@@ -909,8 +925,16 @@ impl App {
                 Err(failure) => self.show_toast(format!("Выйти не удалось: {}", failure.text)),
             },
 
-            Message::ConfigLoaded(prefs, plugins, discord_override, wave_settings, mini_prefs) => {
+            Message::ConfigLoaded(
+                prefs,
+                plugins,
+                discord_override,
+                wave_settings,
+                mini_prefs,
+                eq,
+            ) => {
                 self.discord_override = discord_override;
+                self.apply_eq(eq);
                 // Открытый мини-плеер уже стоит где стоит: берём только раскладку
                 // и положение на следующее открытие.
                 if self.mini.is_none() {
@@ -964,6 +988,17 @@ impl App {
                 return self.change_prefs(prefs);
             }
             Message::Palette(message) => return self.palette_message(message),
+            Message::Settings(message) => return self.settings_message(message),
+            Message::OpenEqualizer => {
+                // Сначала раздел окна, потом страница и прокрутка в начало.
+                let open = self
+                    .settings
+                    .update(settings::Msg::Open(settings::Category::Equalizer));
+                let nav = Task::done(Message::Library(library::Message::Nav(
+                    library::Section::Settings,
+                )));
+                return nav.chain(open);
+            }
             Message::Zoom(zoom) => {
                 let scale = match zoom {
                     Zoom::In => self.prefs.scale.saturating_add(config::SCALE_STEP),
@@ -1108,6 +1143,66 @@ impl App {
         self.prefs = prefs;
     }
 
+    /// Экран настроек. «Сбросить всё» возвращает значения по умолчанию и
+    /// применяет их так же, как обычное изменение каждой настройки.
+    fn settings_message(&mut self, message: settings::Msg) -> Task<Message> {
+        match message {
+            settings::Msg::ResetAll => {}
+            settings::Msg::Eq(message) => return self.eq_message(message),
+            message => return self.settings.update(message),
+        }
+        self.close_dialog();
+        let prefs = settings::reset_prefs(&self.prefs, self.discord_override.as_deref());
+        let rescaled = prefs.scale != self.prefs.scale;
+        self.palette.sync(prefs.accent);
+        let plugins = self.apply_plugins(PluginSettings::default());
+        self.apply_eq(settings::reset_eq(&self.eq));
+        let save = self.change_prefs(prefs);
+        // Открытая панель текста перезапрашивает его (LRCLib мог включиться):
+        // после `change_prefs`, когда новое значение уже у главного экрана.
+        let lyrics = match &mut self.screen {
+            Screen::Main(library) => library.lyrics_sync().map(Message::Library),
+            _ => Task::none(),
+        };
+        let size = if rescaled {
+            self.refresh_size()
+        } else {
+            Task::none()
+        };
+        Task::batch([plugins, lyrics, save, size])
+    }
+
+    /// Страница эквалайзера. Параметры сразу уходят плееру, а в
+    /// `config.toml` пишутся только по отпусканию и дискретным действиям.
+    fn eq_message(&mut self, message: settings::EqMsg) -> Task<Message> {
+        let opens_name = matches!(message, settings::EqMsg::NameOpen);
+        let effect = settings::update_eq(&mut self.eq, &mut self.settings.eq_name, message);
+        if effect.apply
+            && let Screen::Main(library) = &mut self.screen
+        {
+            library.set_equalizer(self.eq.settings);
+        }
+        let focus = if opens_name && self.settings.eq_name.open {
+            settings::State::focus_eq_name()
+        } else {
+            Task::none()
+        };
+        let save = if effect.save {
+            self.save_prefs()
+        } else {
+            Task::none()
+        };
+        Task::batch([focus, save])
+    }
+
+    /// Новые параметры эквалайзера: окну и плееру.
+    fn apply_eq(&mut self, eq: EqState) {
+        self.eq = eq;
+        if let Screen::Main(library) = &mut self.screen {
+            library.set_equalizer(self.eq.settings);
+        }
+    }
+
     /// Палитра своего акцента. Перетаскивание только показывает цвет
     /// (во всём окне), запись в `config.toml` — когда кнопку отпустили.
     fn palette_message(&mut self, message: palette::Msg) -> Task<Message> {
@@ -1182,6 +1277,7 @@ impl App {
             save_prefs(
                 self.prefs,
                 self.plugins.clone(),
+                self.eq.clone(),
                 self.wave_settings.clone(),
                 self.mini_prefs,
             ),
@@ -1278,9 +1374,14 @@ impl App {
             && !library.close_overlay()
             && !library.close_fullscreen()
             && !library.close_lyrics()
-            && let Some(task) = library.clear_search()
         {
-            return task.map(Message::Library);
+            // В настройках Esc сначала очищает поиск настроек.
+            if library.settings_open() && self.settings.clear_query() {
+                return Task::none();
+            }
+            if let Some(task) = library.clear_search() {
+                return task.map(Message::Library);
+            }
         }
         Task::none()
     }
@@ -1624,6 +1725,8 @@ impl App {
         let mut library = library;
         library.set_sound(self.prefs.quality, self.prefs.normalize);
         library.set_lyrics_lrclib(self.prefs.lyrics_lrclib);
+        // Параметры эквалайзера уходят плееру вместе с громкостью и качеством.
+        library.set_equalizer(self.eq.settings);
         library.set_wave_settings(self.wave_settings.clone());
         self.screen = Screen::Main(Box::new(library));
         task.map(Message::Library)
@@ -1749,6 +1852,8 @@ impl App {
                     &self.covers,
                     &self.prefs,
                     &self.palette,
+                    &self.settings,
+                    &self.eq,
                     moment,
                     self.compact(),
                     self.size.width,
@@ -1970,10 +2075,11 @@ fn plugin_settings(config: &Config) -> PluginSettings {
     PluginSettings::from_config(&config.plugins)
 }
 
-/// Запоминает вид меню, внешний вид и плагины. Остальные настройки не трогает.
+/// Запоминает вид меню, внешний вид, плагины и эквалайзер. Остальные настройки не трогает.
 async fn save_prefs(
     prefs: Prefs,
     plugins: PluginSettings,
+    eq: EqState,
     wave_settings: api::WaveSettings,
     mini_prefs: mini::MiniPrefs,
 ) -> Result<(), Failure> {
@@ -1982,6 +2088,7 @@ async fn save_prefs(
         let mut config = Config::load(&path)?;
         prefs.write(&mut config);
         plugins.write(&mut config.plugins);
+        config.set_equalizer(&eq);
         wave_settings.write(&mut config.wave_settings);
         mini_prefs.write(&mut config.mini_player);
         config.save(&path)

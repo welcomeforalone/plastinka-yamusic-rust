@@ -619,6 +619,7 @@ pub fn dialog<'a>(dialog: Dialog, shown: f32, interactive: bool) -> Element<'a, 
     let body: Element<'a, Message> = match dialog {
         Dialog::Licenses => licenses(),
         Dialog::ConfirmLogout => confirm_logout(),
+        Dialog::ConfirmResetSettings => confirm_reset_settings(),
         Dialog::SloplessConsent => slopless_consent(),
     };
     let close = right(widgets::icon_button(
@@ -725,6 +726,31 @@ fn slopless_consent<'a>() -> Element<'a, Message> {
                 None,
                 "Разрешить",
                 Some(Message::AllowDislike)
+            ),
+            widgets::action(Kind::Secondary, None, "Отмена", Some(Message::CloseDialog)),
+        ]
+        .spacing(12),
+    ]
+    .spacing(16)
+    .padding(Padding::default().top(4))
+    .into()
+}
+
+fn confirm_reset_settings<'a>() -> Element<'a, Message> {
+    column![
+        theme::line("Сбросить настройки?", Style::Title, theme::TEXT_PRIMARY),
+        theme::label(
+            "Оформление, звук, эквалайзер, тексты, Discord и плагины вернутся к значениям \
+             по умолчанию. Аккаунт, свои пресеты эквалайзера и замены треков останутся.",
+            Style::Body,
+            theme::TEXT_SECONDARY
+        ),
+        row![
+            widgets::action(
+                Kind::Danger,
+                None,
+                "Сбросить",
+                Some(Message::Settings(super::settings::Msg::ResetAll))
             ),
             widgets::action(Kind::Secondary, None, "Отмена", Some(Message::CloseDialog)),
         ]

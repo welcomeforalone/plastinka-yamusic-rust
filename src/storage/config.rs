@@ -9,6 +9,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::StorageError;
+use crate::player::eq::{BANDS, CustomPreset, EqState, GAIN_LIMIT, PresetId, preset_by_key};
 
 /// Настройки приложения.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +88,72 @@ pub struct Config {
         deserialize_with = "lenient_table"
     )]
     pub plugins: PluginsConfig,
+    /// Эквалайзер (таблица `[equalizer]`). Читать и писать через
+    /// [`Config::equalizer`] и [`Config::set_equalizer`].
+    #[serde(
+        skip_serializing_if = "EqConfig::is_empty",
+        deserialize_with = "lenient_table"
+    )]
+    pub equalizer: EqConfig,
+}
+
+/// Таблица `[equalizer]`: усиления в десятых долях дБ, целые. Значение
+/// неверного типа — как будто его нет, массив не из 10 чисел отбрасывается.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EqConfig {
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    auto_preamp: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    preamp: Option<i64>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_gains"
+    )]
+    gains: Option<Vec<i64>>,
+    /// Ключ встроенного пресета или имя своего.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    preset: Option<String>,
+    /// Свои пресеты (`[[equalizer.presets]]`).
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "lenient_presets"
+    )]
+    presets: Vec<EqPresetConfig>,
+}
+
+impl EqConfig {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Свой пресет в `config.toml`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct EqPresetConfig {
+    name: String,
+    #[serde(default, deserialize_with = "lenient")]
+    preamp: Option<i64>,
+    gains: Vec<i64>,
+}
+
+/// Десять усилений, обрезанных до пределов. Другая длина — `None`.
+fn gains_array(values: &[i64]) -> Option<[i16; BANDS]> {
+    if values.len() != BANDS {
+        return None;
+    }
+    let mut gains = [0; BANDS];
+    for (slot, value) in gains.iter_mut().zip(values) {
+        *slot = clamp_gain(*value);
+    }
+    Some(gains)
+}
+
+fn clamp_gain(value: i64) -> i16 {
+    let limit = i64::from(GAIN_LIMIT);
+    i16::try_from(value.clamp(-limit, limit)).unwrap_or(0)
 }
 
 /// Таблица `[mini_player]`: положение окна мини-плеера (целые логические
@@ -184,6 +251,32 @@ where
     Ok(value.try_into().ok())
 }
 
+/// Усиления: не массив из 10 целых — как будто их нет.
+fn lenient_gains<'de, D>(deserializer: D) -> Result<Option<Vec<i64>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = toml::Value::deserialize(deserializer)?;
+    let gains: Option<Vec<i64>> = value.try_into().ok();
+    Ok(gains.filter(|gains| gains.len() == BANDS))
+}
+
+/// Свои пресеты: не массив — пустой список, битый пресет отбрасывается, а
+/// соседние остаются.
+fn lenient_presets<'de, D>(deserializer: D) -> Result<Vec<EqPresetConfig>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let toml::Value::Array(items) = toml::Value::deserialize(deserializer)? else {
+        return Ok(Vec::new());
+    };
+    Ok(items
+        .into_iter()
+        .filter_map(|item| item.try_into::<EqPresetConfig>().ok())
+        .filter(|preset| preset.gains.len() == BANDS)
+        .collect())
+}
+
 /// Таблица неверного типа (`plugins = 5`) — как будто её нет.
 fn lenient_table<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
@@ -244,6 +337,71 @@ impl Config {
     /// шагами — к ближайшему шагу. Нет значения — 100 %.
     pub fn scale_percent(&self) -> u32 {
         self.scale.map_or(SCALE_DEFAULT, normalize_scale)
+    }
+
+    /// Состояние эквалайзера. Всё проверено: числа в пределах, свои пресеты
+    /// с допустимыми именами без повторов, выбранный пресет существует и
+    /// совпадает с полосами (иначе «Свои значения»).
+    pub fn equalizer(&self) -> EqState {
+        let raw = &self.equalizer;
+        let mut state = EqState::default();
+        let settings = &mut state.settings;
+        settings.enabled = raw.enabled.unwrap_or(settings.enabled);
+        settings.auto_preamp = raw.auto_preamp.unwrap_or(settings.auto_preamp);
+        settings.preamp = raw.preamp.map_or(settings.preamp, clamp_gain);
+        if let Some(gains) = raw.gains.as_deref().and_then(gains_array) {
+            settings.gains = gains;
+        }
+        for preset in &raw.presets {
+            if let Some(gains) = gains_array(&preset.gains) {
+                let preamp = preset.preamp.map_or(0, clamp_gain);
+                // Недопустимое имя или повтор — пресет отбрасывается.
+                let _ = state.add_custom(&preset.name, preamp, gains);
+            }
+        }
+        let preset = raw.preset.as_deref().and_then(|name| {
+            preset_by_key(name)
+                .map(|preset| PresetId::Builtin(preset.key))
+                .or_else(|| {
+                    state
+                        .custom
+                        .iter()
+                        .find(|custom| custom.name == name)
+                        .map(|custom| PresetId::Custom(custom.name.clone()))
+                })
+        });
+        state.preset = preset.filter(|id| state.preset_matches(id));
+        state
+    }
+
+    /// Записывает состояние эквалайзера. Состояние по умолчанию таблицу не
+    /// создаёт.
+    pub fn set_equalizer(&mut self, state: &EqState) {
+        if *state == EqState::default() {
+            self.equalizer = EqConfig::default();
+            return;
+        }
+        let settings = state.settings.sanitized();
+        let to_i64 = |gains: &[i16; BANDS]| gains.iter().map(|g| i64::from(*g)).collect();
+        self.equalizer = EqConfig {
+            enabled: Some(settings.enabled),
+            auto_preamp: Some(settings.auto_preamp),
+            preamp: Some(i64::from(settings.preamp)),
+            gains: Some(to_i64(&settings.gains)),
+            preset: state.preset.as_ref().map(|id| match id {
+                PresetId::Builtin(key) => (*key).to_owned(),
+                PresetId::Custom(name) => name.clone(),
+            }),
+            presets: state
+                .custom
+                .iter()
+                .map(|custom: &CustomPreset| EqPresetConfig {
+                    name: custom.name.clone(),
+                    preamp: Some(i64::from(custom.preamp.clamp(-GAIN_LIMIT, GAIN_LIMIT))),
+                    gains: to_i64(&custom.gains),
+                })
+                .collect(),
+        };
     }
 
     /// Возвращает идентификатор устройства и создаёт его, если его нет или он
@@ -506,5 +664,129 @@ accent = \"teal\"
         if let Some(dir) = path.parent() {
             let _ = fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn equalizer_round_trip() {
+        let mut state = EqState::default();
+        state.settings.enabled = true;
+        state.settings.preamp = -30;
+        state.settings.gains = [50, 40, 20, 0, -20, -20, 0, 20, 40, 50];
+        state.preset = Some(PresetId::Builtin("v-shape"));
+        state
+            .add_custom("Наушники", 5, [30, 20, 0, 0, 0, 0, 0, 10, 20, 30])
+            .unwrap();
+        let mut config = Config::default();
+        config.set_equalizer(&state);
+        let text = toml::to_string(&config).unwrap();
+        assert!(text.contains("[equalizer]"), "{text}");
+        assert!(text.contains("[[equalizer.presets]]"), "{text}");
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.equalizer(), state);
+        // Значения по умолчанию таблицу не создают.
+        let mut config = Config::default();
+        config.set_equalizer(&EqState::default());
+        assert!(!toml::to_string(&config).unwrap().contains("equalizer"));
+        assert!(
+            !toml::to_string(&Config::default())
+                .unwrap()
+                .contains("equalizer")
+        );
+        assert_eq!(Config::default().equalizer(), EqState::default());
+    }
+
+    #[test]
+    fn equalizer_survives_bad_values() {
+        // Три числа, строка внутри, не массив: усиления отброшены, остальное живо.
+        for gains in ["[1, 2, 3]", "[1, 2, 3, 4, 5, 6, 7, 8, 9, \"x\"]", "7"] {
+            let config: Config = toml::from_str(&format!(
+                "accent = \"teal\"\n[equalizer]\nenabled = true\npreamp = -20\ngains = {gains}\n"
+            ))
+            .unwrap();
+            let state = config.equalizer();
+            assert!(state.settings.enabled);
+            assert_eq!(state.settings.preamp, -20);
+            assert_eq!(state.settings.gains, [0; BANDS]);
+            assert_eq!(config.accent.as_deref(), Some("teal"));
+        }
+        // Таблица неверного типа.
+        let config: Config = toml::from_str("equalizer = 5\naccent = \"teal\"\n").unwrap();
+        assert_eq!(config.equalizer, EqConfig::default());
+        assert_eq!(config.accent.as_deref(), Some("teal"));
+        // Поле неверного типа.
+        let config: Config =
+            toml::from_str("[equalizer]\nenabled = \"да\"\npreamp = 10\n").unwrap();
+        assert!(!config.equalizer().settings.enabled);
+        assert_eq!(config.equalizer().settings.preamp, 10);
+        // Вне пределов — обрезаются.
+        let config: Config = toml::from_str(
+            "[equalizer]\npreamp = 9999\ngains = [500, -500, 0, 0, 0, 0, 0, 0, 0, 120]\n",
+        )
+        .unwrap();
+        let settings = config.equalizer().settings;
+        assert_eq!(settings.preamp, GAIN_LIMIT);
+        assert_eq!(settings.gains[0], GAIN_LIMIT);
+        assert_eq!(settings.gains[1], -GAIN_LIMIT);
+        assert_eq!(settings.gains[9], GAIN_LIMIT);
+    }
+
+    #[test]
+    fn equalizer_presets_are_validated() {
+        let zeros = "gains = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]";
+        let config: Config = toml::from_str(&format!(
+            "[equalizer]
+preset = \"Один\"
+gains = [10, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+[[equalizer.presets]]
+name = \"Один\"
+preamp = 0
+gains = [10, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+[[equalizer.presets]]
+name = \"Битый\"
+gains = [1, 2, 3]
+[[equalizer.presets]]
+name = \"Строка\"
+gains = [1, 2, 3, 4, 5, 6, 7, 8, 9, \"x\"]
+[[equalizer.presets]]
+{zeros}
+[[equalizer.presets]]
+name = \"  ОДИН \"
+{zeros}
+[[equalizer.presets]]
+name = \"Рок\"
+{zeros}
+[[equalizer.presets]]
+name = \"Два\"
+preamp = 500
+gains = [0, 0, 0, 0, 0, 0, 0, 0, 0, 300]
+"
+        ))
+        .unwrap();
+        let state = config.equalizer();
+        let names: Vec<&str> = state.custom.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["Один", "Два"]);
+        let two = state.custom.get(1).unwrap();
+        assert_eq!(two.preamp, GAIN_LIMIT);
+        assert_eq!(two.gains[9], GAIN_LIMIT);
+        assert_eq!(state.preset, Some(PresetId::Custom("Один".to_owned())));
+        // presets неверного типа — пустой список; пресет, не совпадающий с
+        // полосами, — «Свои значения».
+        let config: Config =
+            toml::from_str("[equalizer]\npresets = 5\npreset = \"rock\"\n").unwrap();
+        let state = config.equalizer();
+        assert!(state.custom.is_empty());
+        assert_eq!(state.preset, None);
+        // Больше 32 пресетов не читаем.
+        let mut text = String::from("[equalizer]\n");
+        for i in 0..40 {
+            text.push_str(&format!(
+                "[[equalizer.presets]]\nname = \"п{i}\"\n{zeros}\n"
+            ));
+        }
+        let config: Config = toml::from_str(&text).unwrap();
+        assert_eq!(
+            config.equalizer().custom.len(),
+            crate::player::eq::MAX_CUSTOM
+        );
     }
 }

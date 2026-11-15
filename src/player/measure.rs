@@ -127,6 +127,7 @@ fn measure(path: &std::path::Path, resume: u64) {
         StreamBuffer::new(),
         volume,
         Arc::new(Tap::default()),
+        Arc::new(super::eq::EqControl::default()),
         Duration::from_secs(resume),
     );
     let url = format!("http://127.0.0.1:{}/track", sim.port);

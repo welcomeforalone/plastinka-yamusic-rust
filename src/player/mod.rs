@@ -24,6 +24,7 @@ macro_rules! trace {
 mod buffer;
 mod decode;
 mod download;
+pub mod eq;
 #[cfg(debug_assertions)]
 mod fake;
 mod local;
@@ -44,6 +45,7 @@ use crate::api::{self, AudioQuality, Codec, PlaybackPermit, StreamInfo};
 use crate::net;
 use crate::storage::token::StoredToken;
 use buffer::{Failure, LinkFailure, StreamBuffer};
+use eq::{EqControl, EqSettings};
 use output::{Shared, Volume};
 pub use output::{TAP_LEN, Tap};
 
@@ -83,6 +85,8 @@ pub enum Command {
     /// Множитель нормализации громкости текущего трека (1 — без поправки):
     /// применяется сразу, без перезапуска.
     Norm(f32),
+    /// Параметры эквалайзера: действуют сразу и на следующие треки.
+    Equalizer(EqSettings),
     Stop,
 }
 
@@ -241,6 +245,7 @@ impl Player {
             device: None,
             device_failed: Arc::new(AtomicBool::new(false)),
             volume: Arc::new(Volume::default()),
+            eq: Arc::new(EqControl::default()),
             tap: tap.clone(),
             quality: AudioQuality::default(),
             session: None,
@@ -337,6 +342,7 @@ struct Control {
     device: Option<MixerDeviceSink>,
     device_failed: Arc<AtomicBool>,
     volume: Arc<Volume>,
+    eq: Arc<EqControl>,
     tap: Arc<Tap>,
     quality: AudioQuality,
     session: Option<Session>,
@@ -383,6 +389,7 @@ impl Control {
             Command::Volume(volume) => self.volume.set(volume),
             Command::Quality(quality) => self.set_quality(quality),
             Command::Norm(norm) => self.with_session(|shared| shared.set_norm(norm)),
+            Command::Equalizer(settings) => self.eq.set(settings),
             Command::Stop => {
                 if let Some(session) = self.session.take() {
                     session.stop();
@@ -474,6 +481,7 @@ impl Control {
             StreamBuffer::new(),
             self.volume.clone(),
             self.tap.clone(),
+            self.eq.clone(),
             start,
         );
         shared.set_norm(norm);
@@ -670,6 +678,7 @@ mod tests {
             StreamBuffer::new(),
             volume,
             Arc::new(Tap::default()),
+            Arc::new(EqControl::default()),
             Duration::ZERO,
         );
         let relink: download::Relink =
@@ -743,6 +752,7 @@ mod tests {
                 StreamBuffer::new(),
                 volume,
                 Arc::new(Tap::default()),
+                Arc::new(EqControl::default()),
                 Duration::ZERO,
             );
             local::run(&shared.buffer, &path);

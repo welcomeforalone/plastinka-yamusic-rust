@@ -22,12 +22,9 @@ use std::time::Duration;
 
 use iced::widget::{
     Space, button, center, column, container, hover, mouse_area, row, scrollable, slider,
-    text_input, toggler, tooltip, vertical_slider,
+    text_input, tooltip, vertical_slider,
 };
-use iced::{
-    Alignment, Background, Border, Color, Element, Length, Padding, Point, Subscription, Task,
-    mouse,
-};
+use iced::{Alignment, Border, Color, Element, Length, Padding, Point, Subscription, Task, mouse};
 
 use super::Message as App;
 use super::Message::Library as Lib;
@@ -41,19 +38,20 @@ use super::marquee::{marquee, marquee_element};
 use super::palette;
 use super::queue::{self, ListKey, Queue, Rng};
 use super::scroll;
+use super::settings;
 use super::theme::{self, Style};
 use super::visualizer::{self, Analyzer};
 use super::widgets::{self, CoverArt, Kind, Size};
-use super::{Dialog, Failure, FailureKind, Moment, Prefs, Zoom};
+use super::{Failure, FailureKind, Moment, Prefs};
 use crate::api::{
     self, AccountStatus, AudioQuality, Codec, PlaybackPermit, SearchKind, StreamInfo, Track,
 };
 use crate::media_controls;
+use crate::player::eq::{EqSettings, EqState};
 use crate::player::{self as audio, Command, PlayError, Sound};
 use crate::plugins::PluginSettings;
 use crate::plugins::fckcensor::{Censor, Decision};
 use crate::plugins::slopless::Slop;
-use crate::storage::config;
 use crate::storage::token::StoredToken;
 use crate::texts::{self, sentence};
 use iced::animation::Animation;
@@ -108,8 +106,8 @@ const FULLSCREEN_SCRIM: f32 = 0.25;
 const PLACEHOLDER_DIM: f32 = 0.53;
 const PLAYER_CHROME: f32 = 20.0 * 2.0 + 16.0 * 2.0 + 1.0;
 /// Поля раздела: сверху и по бокам.
-const PAGE_TOP: f32 = 32.0;
-const PAGE_SIDE: f32 = 40.0;
+pub(super) const PAGE_TOP: f32 = 32.0;
+pub(super) const PAGE_SIDE: f32 = 40.0;
 /// Сколько нужно правому краю плеера с полным значком качества
 /// («MP3 · 320») и с коротким («320»).
 const EXTRAS_WITH_QUALITY: f32 = 230.0;
@@ -425,6 +423,8 @@ pub struct Library {
     /// Настройки звука: качество (уходит плееру) и нормализация громкости.
     quality: AudioQuality,
     normalize: bool,
+    /// Эквалайзер включён (подсветка кнопки в плеере).
+    eq_enabled: bool,
     censor: Censor,
     slop: Slop,
     io: PluginIo,
@@ -675,6 +675,7 @@ impl Library {
             plugins: PluginSettings::default(),
             quality: AudioQuality::default(),
             normalize: false,
+            eq_enabled: false,
             censor: Censor::default(),
             slop: Slop::default(),
             io: PluginIo::default(),
@@ -713,6 +714,16 @@ impl Library {
             library,
             Task::batch([task, plugins, history, restored, stations]),
         )
+    }
+
+    /// Статус аккаунта и подписки (для «Настройки → Аккаунт»).
+    pub(super) fn status(&self) -> &AccountStatus {
+        &self.status
+    }
+
+    /// Открыта ли страница настроек (не страница альбома и т. п.).
+    pub fn settings_open(&self) -> bool {
+        self.section == Section::Settings && self.stack.is_empty()
     }
 
     pub fn token(&self) -> Arc<StoredToken> {
@@ -1485,6 +1496,13 @@ impl Library {
         None
     }
 
+    /// Параметры эквалайзера: запоминаются и уходят плееру (при создании
+    /// окна и при каждом изменении).
+    pub fn set_equalizer(&mut self, settings: EqSettings) {
+        self.eq_enabled = settings.enabled;
+        self.send(Command::Equalizer(settings));
+    }
+
     /// Настройки звука из `config.toml`: качество действует со следующего
     /// запроса потока, нормализация — со следующего трека.
     pub fn set_sound(&mut self, quality: AudioQuality, normalize: bool) {
@@ -1637,7 +1655,7 @@ impl Library {
         .align_y(Alignment::Center);
         // Появление: карточка проступает из прозрачности, поднимаясь на
         // несколько пикселей и чуть вырастая, за ней — содержимое.
-        let content = anim::motion(column![header, sound_options(prefs)].spacing(12))
+        let content = anim::motion(column![header, settings::sound_options(prefs)].spacing(12))
             .reveal(theme::SURFACE_2, frame.content);
         let card = container(content)
             .width(Length::Fill)
@@ -1837,6 +1855,8 @@ impl Library {
         covers: &'a Covers,
         prefs: &Prefs,
         palette: &'a palette::State,
+        settings_state: &'a settings::State,
+        eq: &'a EqState,
         moment: Moment,
         compact: bool,
         width: f32,
@@ -1847,7 +1867,19 @@ impl Library {
             (Some(entry), _) => self.page_view(entry, covers, turn, moment.now),
             (None, Section::Liked) => self.liked(covers, turn),
             (None, Section::Wave) => self.wave_view(covers, turn, moment.now, prefs.visualizer),
-            (None, Section::Settings) => self.settings(prefs, palette),
+            (None, Section::Settings) => settings::view(
+                settings::Ctx {
+                    library: self,
+                    prefs: *prefs,
+                    palette,
+                    eq,
+                    eq_name: &settings_state.eq_name,
+                    width,
+                },
+                settings_state,
+                // Размер окна уже в единицах раскладки (см. `App::refresh_size`).
+                width,
+            ),
             (None, Section::History) => self.history_view(covers, turn),
             (None, Section::Search) => self.search_view(covers, turn, moment.now),
             (None, Section::Playlists | Section::Albums | Section::Artists) => {
@@ -2296,73 +2328,6 @@ impl Library {
         })
     }
 
-    fn settings<'a>(&'a self, prefs: &Prefs, palette: &'a palette::State) -> Element<'a, App> {
-        let account = self.status.account();
-        let name = account.name();
-        let initial = name
-            .chars()
-            .next()
-            .map(|ch| ch.to_uppercase().to_string())
-            .unwrap_or_default();
-        let plus = match self.status.subscription() {
-            api::Subscription::Active(details) => {
-                let mut text = "Подписка Плюс активна".to_owned();
-                if details.family {
-                    text.push_str(", семейная");
-                }
-                if let Some(until) = details.until {
-                    text.push_str(&format!(", до {until}"));
-                }
-                text
-            }
-            _ => "Подписка Плюс не подтверждена".to_owned(),
-        };
-        let account_card = container(
-            row![
-                avatar(initial, 44.0),
-                column![
-                    theme::line(name, Style::BodyStrong, theme::TEXT_PRIMARY),
-                    theme::line(plus, Style::Secondary, theme::accent()),
-                ]
-                .spacing(2)
-                .width(Length::Fill),
-                widgets::action(
-                    Kind::Danger,
-                    Some(Icon::Logout),
-                    "Выйти",
-                    Some(App::OpenDialog(Dialog::ConfirmLogout)),
-                ),
-            ]
-            .spacing(14)
-            .align_y(Alignment::Center),
-        )
-        .padding(16)
-        .width(Length::Fill)
-        .style(|_| card_style());
-        scrollable(
-            column![
-                theme::line("Настройки", Style::Display, theme::TEXT_PRIMARY),
-                section_block("Внешний вид", appearance(prefs, palette)),
-                section_block("Звук", sound_block(prefs)),
-                section_block("Тексты песен", lyrics_block(prefs)),
-                section_block("Discord", discord_block(prefs)),
-                section_block("Плагины", self.plugins_block()),
-                section_block("Аккаунт", account_card.into()),
-                section_block("О программе", about_block()),
-            ]
-            .spacing(36)
-            .max_width(760)
-            .padding(Padding {
-                top: PAGE_TOP,
-                right: PAGE_SIDE,
-                bottom: PAGE_TOP,
-                left: PAGE_SIDE,
-            }),
-        )
-        .width(Length::Fill)
-        .into()
-    }
-
     /// `quality` — показать значок качества потока.
     #[allow(clippy::too_many_arguments)]
     fn player_bar<'a>(
@@ -2642,6 +2607,19 @@ impl Library {
                 tooltip::Position::Top,
             ));
         if !compact {
+            // В полноэкранном плеере эквалайзера нет: он в настройках.
+            if !fullscreen {
+                extras = extras.push(widgets::with_tooltip(
+                    widgets::icon_button(
+                        Icon::Equalizer,
+                        Size::S,
+                        self.eq_enabled,
+                        Some(App::OpenEqualizer),
+                    ),
+                    "Эквалайзер",
+                    tooltip::Position::Top,
+                ));
+            }
             extras = extras
                 .push(widgets::with_tooltip(
                     widgets::icon_button(
@@ -2898,562 +2876,7 @@ fn surface_2(radius: f32) -> container::Style {
     }
 }
 
-/// Карточка настроек: чуть светлее фона, с тонкой рамкой.
-fn card_style() -> container::Style {
-    container::Style {
-        background: Some(theme::SURFACE_1.into()),
-        border: Border {
-            color: theme::BORDER,
-            width: 1.0,
-            radius: 14.0.into(),
-        },
-        ..container::Style::default()
-    }
-}
-
-/// Раздел настроек: заголовок и содержимое.
-fn section_block<'a>(title: &'a str, content: Element<'a, App>) -> Element<'a, App> {
-    column![
-        theme::line(title, Style::Title, theme::TEXT_PRIMARY),
-        content
-    ]
-    .spacing(16)
-    .into()
-}
-
-/// Строка настройки: подпись с пояснением слева, управление справа.
-fn setting_row<'a>(title: &'a str, hint: String, control: Element<'a, App>) -> Element<'a, App> {
-    row![
-        column![
-            theme::line(title, Style::BodyStrong, theme::TEXT_PRIMARY),
-            theme::label(hint, Style::Secondary, theme::TEXT_TERTIARY),
-        ]
-        .spacing(2)
-        .width(Length::Fill),
-        control,
-    ]
-    .spacing(16)
-    .align_y(Alignment::Center)
-    .padding([16, 18])
-    .into()
-}
-
-/// Образец акцента в ряду: кружок с галочкой, если он выбран.
-fn swatch<'a>(
-    fill: Background,
-    mark: Element<'a, App>,
-    selected: bool,
-    tip: impl iced::widget::text::IntoFragment<'a>,
-    on_press: App,
-) -> Element<'a, App> {
-    let swatch = button(mark)
-        .width(30)
-        .height(30)
-        .padding(0)
-        .style(move |_, status| button::Style {
-            background: Some(fill),
-            border: Border {
-                color: match (selected, status) {
-                    (true, _) => theme::TEXT_PRIMARY,
-                    (false, button::Status::Hovered) => theme::TEXT_SECONDARY,
-                    _ => Color::TRANSPARENT,
-                },
-                width: 2.0,
-                radius: widgets::ROUND.into(),
-            },
-            ..button::Style::default()
-        })
-        .on_press(on_press);
-    widgets::with_tooltip(swatch, tip, tooltip::Position::Top)
-}
-
-/// «Внешний вид»: акцент, масштаб, визуализатор.
-fn appearance<'a>(prefs: &Prefs, palette: &'a palette::State) -> Element<'a, App> {
-    let current = prefs.accent;
-    let mut swatches = row(theme::Accent::PRESETS.into_iter().map(|accent| {
-        let selected = accent == current;
-        let mark: Element<'a, App> = if selected {
-            center(icon(Icon::Check, 16.0, theme::contrast_on(accent.color()))).into()
-        } else {
-            Space::new().into()
-        };
-        swatch(
-            accent.color().into(),
-            mark,
-            selected,
-            accent.title(),
-            App::SetAccent(accent),
-        )
-    }))
-    .spacing(10)
-    .align_y(Alignment::Center);
-
-    // Шестой образец: свой цвет. Радужный, пока выбран готовый акцент.
-    let custom = matches!(current, theme::Accent::Custom(_));
-    let (fill, mark): (Background, Element<'a, App>) = if custom {
-        (
-            current.color().into(),
-            center(icon(Icon::Check, 16.0, theme::contrast_on(current.color()))).into(),
-        )
-    } else {
-        (
-            palette::rainbow(),
-            center(icon(Icon::Plus, 16.0, Color::WHITE)).into(),
-        )
-    };
-    let tip = if custom {
-        current.title()
-    } else {
-        "Свой цвет".into()
-    };
-    swatches = swatches.push(swatch(
-        fill,
-        mark,
-        custom || palette.open,
-        tip,
-        App::Palette(palette::Msg::Toggle),
-    ));
-
-    let scale = prefs.scale;
-    let zoom = row![
-        widgets::icon_button(
-            Icon::Minus,
-            Size::S,
-            false,
-            (scale > config::SCALE_MIN).then_some(App::Zoom(Zoom::Out)),
-        ),
-        container(theme::line(
-            format!("{scale} %"),
-            Style::BodyStrong,
-            theme::TEXT_PRIMARY
-        ))
-        .center_x(56),
-        widgets::icon_button(
-            Icon::Plus,
-            Size::S,
-            false,
-            (scale < config::SCALE_MAX).then_some(App::Zoom(Zoom::In)),
-        ),
-        widgets::action(
-            Kind::Secondary,
-            None,
-            "Сбросить",
-            (scale != config::SCALE_DEFAULT).then_some(App::Zoom(Zoom::Reset)),
-        ),
-    ]
-    .spacing(6)
-    .align_y(Alignment::Center);
-
-    let visualizer = switch(prefs.visualizer, |_| App::ToggleVisualizer);
-
-    let mut card = column![setting_row(
-        "Акцент",
-        format!("{} — кнопки, выбранный трек, ползунки", current.title()),
-        swatches.into(),
-    )];
-    if palette.open {
-        card = card.push(container(palette::view(palette)).padding(Padding {
-            top: 0.0,
-            right: 18.0,
-            bottom: 18.0,
-            left: 18.0,
-        }));
-    }
-    container(card.push(widgets::divider()).push(column![
-        setting_row(
-            "Масштаб",
-            "Ctrl + = и Ctrl + − меняют масштаб, Ctrl + 0 — 100 %".to_owned(),
-            zoom.into(),
-        ),
-        widgets::divider(),
-        setting_row(
-            "Визуализатор",
-            "Спектр звука под плеером".to_owned(),
-            visualizer,
-        ),
-    ]))
-    .width(Length::Fill)
-    .style(|_| card_style())
-    .into()
-}
-
-/// Варианты качества звука: заголовок и описание.
-const QUALITY_CHOICES: [(AudioQuality, &str, &str); 3] = [
-    (
-        AudioQuality::Lossless,
-        "Превосходное",
-        "Музыка в lossless и других высококачественных форматах для быстрого интернета \
-         и хорошей акустики",
-    ),
-    (
-        AudioQuality::Normal,
-        "Оптимальное",
-        "Сбалансированный звук для большинства устройств",
-    ),
-    (
-        AudioQuality::Low,
-        "Экономичное",
-        "Стабильное звучание при медленном интернете",
-    ),
-];
-
-/// Содержимое панели звука: три уровня качества и нормализация. Одно и то
-/// же в панели у значка качества и в «Настройках».
-fn sound_options<'a>(prefs: &Prefs) -> Element<'a, App> {
-    let mut options = column![].spacing(2);
-    for (quality, title, hint) in QUALITY_CHOICES {
-        let selected = prefs.quality == quality;
-        let mark: Element<'a, App> = if selected {
-            icon(Icon::Check, 20.0, theme::accent()).into()
-        } else {
-            Space::new().width(20).into()
-        };
-        options = options.push(
-            button(
-                row![
-                    column![
-                        theme::line(title, Style::BodyStrong, theme::TEXT_PRIMARY),
-                        theme::label(hint, Style::Secondary, theme::TEXT_SECONDARY),
-                    ]
-                    .spacing(2)
-                    .width(Length::Fill),
-                    mark,
-                ]
-                .spacing(16)
-                .align_y(Alignment::Center),
-            )
-            .width(Length::Fill)
-            .padding([12, 14])
-            .style(|_, status| button::Style {
-                background: match status {
-                    button::Status::Hovered | button::Status::Pressed => {
-                        Some(theme::SURFACE_3.into())
-                    }
-                    _ => None,
-                },
-                border: Border::default().rounded(12.0),
-                ..button::Style::default()
-            })
-            .on_press(App::SetAudioQuality(quality)),
-        );
-    }
-    let normalize = row![
-        column![
-            theme::line(
-                "Нормализация громкости",
-                Style::BodyStrong,
-                theme::TEXT_PRIMARY
-            ),
-            theme::label(
-                "Выравнивает громкость треков",
-                Style::Caption,
-                theme::TEXT_TERTIARY
-            ),
-        ]
-        .spacing(2)
-        .width(Length::Fill),
-        switch(prefs.normalize, App::SetNormalize),
-    ]
-    .spacing(16)
-    .align_y(Alignment::Center)
-    .padding([12, 14]);
-    column![options, widgets::divider(), normalize]
-        .spacing(8)
-        .into()
-}
-
-/// «Discord»: статус «Слушает» с названием трека и обложкой.
-fn discord_block<'a>(prefs: &Prefs) -> Element<'a, App> {
-    use crate::discord::{AppName, Lang, Settings, StatusKind};
-    let settings = prefs.discord;
-    let ready = prefs.discord_ready;
-    // Переключатели неактивны, пока нет Application ID.
-    let toggle = move |on: bool, change: fn(Settings, bool) -> Settings| -> Element<'a, App> {
-        if ready {
-            switch(on, move |value| App::SetDiscord(change(settings, value)))
-        } else {
-            // Без Application ID переключатель приглушён и не отвечает.
-            toggler(on)
-                .size(22)
-                .style(|_, status| {
-                    let on = matches!(
-                        status,
-                        toggler::Status::Active { is_toggled: true }
-                            | toggler::Status::Hovered { is_toggled: true }
-                            | toggler::Status::Disabled { is_toggled: true }
-                    );
-                    toggler::Style {
-                        background: theme::SURFACE_3.into(),
-                        background_border_width: 0.0,
-                        background_border_color: Color::TRANSPARENT,
-                        foreground: theme::TEXT_DISABLED.into(),
-                        foreground_border_width: 0.0,
-                        foreground_border_color: Color::TRANSPARENT,
-                        text_color: None,
-                        border_radius: None,
-                        padding_ratio: if on { 0.12 } else { 0.3 },
-                    }
-                })
-                .into()
-        }
-    };
-    // Выбор из нескольких значений — таблетки.
-    let pills = |items: Vec<(String, bool, Settings, bool)>| -> Element<'a, App> {
-        row(items.into_iter().map(|(title, selected, next, usable)| {
-            let ready = ready && usable;
-            let pill = button(theme::line(
-                title,
-                Style::CaptionStrong,
-                match (selected, ready) {
-                    (_, false) => theme::TEXT_DISABLED,
-                    (true, true) => theme::on_accent(),
-                    (false, true) => theme::TEXT_SECONDARY,
-                },
-            ))
-            .padding([6, 14])
-            .style(move |_, status| button::Style {
-                background: Some(
-                    match (selected, status) {
-                        (true, _) if !ready => theme::SURFACE_4,
-                        (true, _) => theme::accent(),
-                        (false, button::Status::Hovered | button::Status::Pressed) if ready => {
-                            theme::SURFACE_4
-                        }
-                        (false, _) => theme::SURFACE_3,
-                    }
-                    .into(),
-                ),
-                border: Border::default().rounded(widgets::ROUND),
-                ..button::Style::default()
-            });
-            if ready {
-                pill.on_press(App::SetDiscord(next)).into()
-            } else {
-                pill.into()
-            }
-        }))
-        .spacing(8)
-        .into()
-    };
-    let status = pills(
-        StatusKind::ALL
-            .into_iter()
-            .map(|kind| {
-                (
-                    kind.title().to_owned(),
-                    settings.status == kind,
-                    Settings {
-                        status: kind,
-                        ..settings
-                    },
-                    true,
-                )
-            })
-            .collect(),
-    );
-    let app_name = pills(
-        AppName::ALL
-            .into_iter()
-            .map(|app| {
-                (
-                    app.title().to_owned(),
-                    settings.app == app,
-                    Settings { app, ..settings },
-                    app.available(),
-                )
-            })
-            .collect(),
-    );
-    let lang = pills(
-        Lang::ALL
-            .into_iter()
-            .map(|lang| {
-                (
-                    lang.title().to_owned(),
-                    settings.lang == lang,
-                    Settings { lang, ..settings },
-                    true,
-                )
-            })
-            .collect(),
-    );
-    let hint: Element<'a, App> = if ready {
-        Space::new().into()
-    } else {
-        container(theme::line(
-            "Не задан Application ID Discord",
-            Style::Caption,
-            theme::TEXT_TERTIARY,
-        ))
-        .padding(Padding {
-            top: 12.0,
-            right: 18.0,
-            bottom: 0.0,
-            left: 18.0,
-        })
-        .into()
-    };
-    let rows = column![
-        hint,
-        setting_row(
-            "Показывать статус в Discord",
-            "Что вы слушаете, на странице профиля".to_owned(),
-            toggle(settings.enabled, |s, on| Settings { enabled: on, ..s }),
-        ),
-        widgets::divider(),
-        setting_row(
-            "Имя в статусе",
-            "Заголовок «Слушает …» в карточке профиля".to_owned(),
-            app_name,
-        ),
-        widgets::divider(),
-        setting_row(
-            "Что показывать в строке статуса",
-            "«Слушает …» под вашим именем".to_owned(),
-            status,
-        ),
-        widgets::divider(),
-        setting_row(
-            "Показывать на паузе",
-            "Без таймера, с пометкой «пауза». Иначе на паузе статус убирается".to_owned(),
-            toggle(settings.on_pause, |s, on| Settings { on_pause: on, ..s }),
-        ),
-        widgets::divider(),
-        setting_row(
-            "Кнопка «Слушать»",
-            "Ссылка на трек в Яндекс Музыке".to_owned(),
-            toggle(settings.button, |s, on| Settings { button: on, ..s }),
-        ),
-        widgets::divider(),
-        setting_row(
-            "Язык статуса",
-            "Подпись кнопки и пометка паузы".to_owned(),
-            lang
-        ),
-    ];
-    container(rows)
-        .width(Length::Fill)
-        .style(|_| card_style())
-        .into()
-}
-
-/// «Звук» в настройках: карточка с теми же вариантами, что в панели.
-fn sound_block<'a>(prefs: &Prefs) -> Element<'a, App> {
-    container(sound_options(prefs))
-        .padding(6)
-        .width(Length::Fill)
-        .style(|_| card_style())
-        .into()
-}
-
-/// «Тексты песен»: запасной источник LRCLib.
-fn lyrics_block<'a>(prefs: &Prefs) -> Element<'a, App> {
-    let row = row![
-        column![
-            theme::line(
-                "Искать текст в LRCLib",
-                Style::BodyStrong,
-                theme::TEXT_PRIMARY
-            ),
-            theme::label(
-                "Если у Яндекса текста нет. В lrclib.net уходят название и исполнитель трека",
-                Style::Caption,
-                theme::TEXT_TERTIARY
-            ),
-        ]
-        .spacing(2)
-        .width(Length::Fill),
-        switch(prefs.lyrics_lrclib, App::SetLyricsLrclib),
-    ]
-    .spacing(16)
-    .align_y(Alignment::Center)
-    .padding([12, 14]);
-    container(row)
-        .padding(6)
-        .width(Length::Fill)
-        .style(|_| card_style())
-        .into()
-}
-
-/// Переключатель настройки в цветах акцента.
-fn switch<'a>(on: bool, on_toggle: impl Fn(bool) -> App + 'a) -> Element<'a, App> {
-    toggler(on)
-        .on_toggle(on_toggle)
-        .size(22)
-        .style(|_, status| {
-            let (on, hovered) = match status {
-                toggler::Status::Active { is_toggled } => (is_toggled, false),
-                toggler::Status::Hovered { is_toggled } => (is_toggled, true),
-                toggler::Status::Disabled { is_toggled } => (is_toggled, false),
-            };
-            toggler::Style {
-                background: match (on, hovered) {
-                    (true, false) => theme::accent(),
-                    (true, true) => theme::accent_hover(),
-                    (false, false) => theme::SURFACE_4,
-                    (false, true) => theme::OUTLINE,
-                }
-                .into(),
-                background_border_width: 0.0,
-                background_border_color: Color::TRANSPARENT,
-                foreground: (if on {
-                    theme::on_accent()
-                } else {
-                    theme::TEXT_SECONDARY
-                })
-                .into(),
-                foreground_border_width: 0.0,
-                foreground_border_color: Color::TRANSPARENT,
-                text_color: None,
-                border_radius: None,
-                padding_ratio: 0.12,
-            }
-        })
-        .into()
-}
-
-/// «О программе»: версия, обязательная строка правила 4, лицензии.
-fn about_block<'a>() -> Element<'a, App> {
-    container(
-        column![
-            row![
-                widgets::logo(44.0),
-                column![
-                    theme::line(super::APP_NAME, Style::Headline, theme::TEXT_PRIMARY),
-                    theme::line(
-                        concat!("Версия ", env!("CARGO_PKG_VERSION")),
-                        Style::Secondary,
-                        theme::TEXT_TERTIARY
-                    ),
-                ]
-                .spacing(2)
-                .width(Length::Fill),
-                widgets::action(
-                    Kind::Secondary,
-                    None,
-                    "Сторонние лицензии",
-                    Some(App::OpenDialog(Dialog::Licenses)),
-                ),
-            ]
-            .spacing(14)
-            .align_y(Alignment::Center),
-            theme::label(crate::DISCLAIMER, Style::BodyStrong, theme::TEXT_PRIMARY),
-            theme::label(
-                "Музыка воспроизводится потоком через API Яндекс Музыки по вашей подписке. \
-                 Аудио не сохраняется на диск.",
-                Style::Secondary,
-                theme::TEXT_SECONDARY
-            ),
-        ]
-        .spacing(14),
-    )
-    .padding(18)
-    .width(Length::Fill)
-    .style(|_| card_style())
-    .into()
-}
-
-fn avatar<'a>(initial: String, size: f32) -> Element<'a, App> {
+pub(super) fn avatar<'a>(initial: String, size: f32) -> Element<'a, App> {
     container(theme::line(initial, Style::BodyStrong, theme::TEXT_PRIMARY))
         .center(size)
         .style(|_| container::Style {
