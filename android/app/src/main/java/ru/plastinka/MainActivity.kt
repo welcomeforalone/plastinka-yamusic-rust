@@ -18,7 +18,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        ru.plastinka.ui.AccentState.load(this)
         if (model.loggedIn) model.loadLibrary()
         setContent {
             PlastinkaTheme {

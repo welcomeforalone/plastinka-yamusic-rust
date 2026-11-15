@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Малый значок уведомления плеера: та же пластинка, что у значка приложения
+  (assets/app/plastinka.svg), но в один цвет. Диск, бороздка, кольцо вокруг
+  «яблока» и отверстие вырезаны правилом even-odd; система сама красит значок.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path android:fillColor="#FFFFFF" android:fillType="evenOdd"
+        android:pathData="M1,12a11,11 0 1,0 22,0a11,11 0 1,0 -22,0ZM2.8,12a9.2,9.2 0 1,0 18.4,0a9.2,9.2 0 1,0 -18.4,0ZM3.8,12a8.2,8.2 0 1,0 16.4,0a8.2,8.2 0 1,0 -16.4,0ZM6.2,12a5.8,5.8 0 1,0 11.6,0a5.8,5.8 0 1,0 -11.6,0ZM7.2,12a4.8,4.8 0 1,0 9.6,0a4.8,4.8 0 1,0 -9.6,0ZM10.8,12a1.2,1.2 0 1,0 2.4,0a1.2,1.2 0 1,0 -2.4,0Z" />
+</vector>

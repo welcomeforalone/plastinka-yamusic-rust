@@ -1,6 +1,7 @@
 package ru.plastinka.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -57,54 +58,57 @@ fun ArtistScreen(
     val coverUrl = (details?.card?.coverUri ?: coverUri)?.takeIf { it.contains("%%") }
         ?.let { "https://${it.replace("%%", "400x400")}" }
     val error = state?.error
-    Column(Modifier.fillMaxSize()) {
-        BackBar(onBack)
-        LazyColumn(Modifier.fillMaxSize()) {
-            item {
-                TracksHeader(
-                    cover = { Cover(coverUrl, id, 116.dp, 58.dp) },
-                    title = shownName,
-                    totalMs = 0L,
-                    count = popular.size,
-                    onPlay = { player?.playQueue(popular, 0, shownName, source = source) },
-                    onShuffle = { player?.playQueue(popular.shuffled(), 0, shownName, source = source) },
-                    subtitle = albums.size.takeIf { it > 0 }?.let { albumsCount(it) },
-                )
-            }
-            when {
-                error != null -> item { ErrorState(error) { model.loadArtist(id, force = true) } }
-                details == null -> item { LoadingBox() }
-                else -> {
-                    if (popular.isEmpty() && albums.isEmpty()) {
-                        item {
-                            Centered {
-                                PlText("Пока ничего нет", PlType.bodyStrong, textAlign = TextAlign.Center)
-                            }
-                        }
-                    }
-                    if (popular.isNotEmpty()) {
-                        item { SectionHeader("Популярные треки") }
-                        trackItems(popular, playing, player, model, shownName, source)
-                    }
-                    if (albums.isNotEmpty()) {
-                        item { SectionHeader("Альбомы") }
-                        item {
-                            LazyRow(
-                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp),
-                                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            ) {
-                                items(albums, key = { it.id }) { card ->
-                                    MediaTile(
-                                        card.coverUrl("200x200"),
-                                        card.id,
-                                        card.displayTitle,
-                                        card.year?.toString(),
-                                        Modifier.width(140.dp),
-                                        onClick = { onOpenAlbum(card) },
-                                    )
+    Box(Modifier.fillMaxSize()) {
+        DetailGlow()
+        Column(Modifier.fillMaxSize()) {
+            BackBar(onBack, DETAIL_BAR_HEIGHT)
+            LazyColumn(Modifier.fillMaxSize()) {
+                item {
+                    TracksHeader(
+                        cover = { Cover(coverUrl, id, 116.dp, 58.dp, Modifier.coverShadow(58.dp)) },
+                        title = shownName,
+                        totalMs = 0L,
+                        count = popular.size,
+                        onPlay = { player?.playQueue(popular, 0, shownName, source = source) },
+                        onShuffle = { player?.playQueue(popular.shuffled(), 0, shownName, source = source) },
+                        subtitle = albums.size.takeIf { it > 0 }?.let { albumsCount(it) },
+                    )
+                }
+                when {
+                    error != null -> item { ErrorState(error) { model.loadArtist(id, force = true) } }
+                    details == null -> item { LoadingBox() }
+                    else -> {
+                        if (popular.isEmpty() && albums.isEmpty()) {
+                            item {
+                                Centered {
+                                    PlText("Пока ничего нет", PlType.bodyStrong, textAlign = TextAlign.Center)
                                 }
                             }
-                            Spacer(Modifier.height(16.dp))
+                        }
+                        if (popular.isNotEmpty()) {
+                            item { SectionHeader("Популярные треки") }
+                            trackItems(popular, playing, player, model, shownName, source)
+                        }
+                        if (albums.isNotEmpty()) {
+                            item { SectionHeader("Альбомы") }
+                            item {
+                                LazyRow(
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                ) {
+                                    items(albums, key = { it.id }) { card ->
+                                        MediaTile(
+                                            card.coverUrl("200x200"),
+                                            card.id,
+                                            card.displayTitle,
+                                            card.year?.toString(),
+                                            Modifier.width(140.dp),
+                                            onClick = { onOpenAlbum(card) },
+                                        )
+                                    }
+                                }
+                                Spacer(Modifier.height(16.dp))
+                            }
                         }
                     }
                 }

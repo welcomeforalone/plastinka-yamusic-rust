@@ -1,6 +1,7 @@
 package ru.plastinka.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -38,29 +39,32 @@ fun AlbumScreen(
     val coverUrl = (card?.coverUri ?: coverUri)?.takeIf { it.contains("%%") }
         ?.let { "https://${it.replace("%%", "400x400")}" }
     val error = state?.error
-    Column(Modifier.fillMaxSize()) {
-        BackBar(onBack)
-        LazyColumn(Modifier.fillMaxSize()) {
-            item {
-                TracksHeader(
-                    cover = { Cover(coverUrl, id, 116.dp, 22.dp) },
-                    title = shownTitle,
-                    totalMs = tracks.sumOf { it.durationMs ?: 0L },
-                    count = tracks.size,
-                    onPlay = { player?.playQueue(tracks, 0, shownTitle, source = source) },
-                    onShuffle = { player?.playQueue(tracks.shuffled(), 0, shownTitle, source = source) },
-                    subtitleContent = card?.let { c ->
-                        { AlbumSubtitle(c.artists, c.year, tracks.size, tracks.sumOf { it.durationMs ?: 0L }, onOpenArtist) }
-                    },
-                )
-            }
-            when {
-                error != null -> item { ErrorState(error) { model.loadAlbum(id, force = true) } }
-                details == null -> item { LoadingBox() }
-                tracks.isEmpty() -> item {
-                    Centered { PlText("В альбоме нет треков", PlType.bodyStrong, textAlign = TextAlign.Center) }
+    Box(Modifier.fillMaxSize()) {
+        DetailGlow()
+        Column(Modifier.fillMaxSize()) {
+            BackBar(onBack, DETAIL_BAR_HEIGHT)
+            LazyColumn(Modifier.fillMaxSize()) {
+                item {
+                    TracksHeader(
+                        cover = { Cover(coverUrl, id, 116.dp, 22.dp, Modifier.coverShadow(22.dp)) },
+                        title = shownTitle,
+                        totalMs = tracks.sumOf { it.durationMs ?: 0L },
+                        count = tracks.size,
+                        onPlay = { player?.playQueue(tracks, 0, shownTitle, source = source) },
+                        onShuffle = { player?.playQueue(tracks.shuffled(), 0, shownTitle, source = source) },
+                        subtitleContent = card?.let { c ->
+                            { AlbumSubtitle(c.artists, c.year, tracks.size, tracks.sumOf { it.durationMs ?: 0L }, onOpenArtist) }
+                        },
+                    )
                 }
-                else -> trackItems(tracks, playing, player, model, shownTitle, source)
+                when {
+                    error != null -> item { ErrorState(error) { model.loadAlbum(id, force = true) } }
+                    details == null -> item { LoadingBox() }
+                    tracks.isEmpty() -> item {
+                        Centered { PlText("В альбоме нет треков", PlType.bodyStrong, textAlign = TextAlign.Center) }
+                    }
+                    else -> trackItems(tracks, playing, player, model, shownTitle, source)
+                }
             }
         }
     }

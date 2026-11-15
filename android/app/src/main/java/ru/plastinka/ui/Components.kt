@@ -32,6 +32,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
@@ -127,17 +130,45 @@ fun Pill(
     }
 }
 
-/** Чип: 36 dp, выбранный — заливка text и тёмный текст. */
+/**
+ * Чип: 36 dp, выбранный — заливка text и тёмный текст. `fill` — полупрозрачная
+ * заливка вместо рамки (чипы на цветном фоне, макет 04); `icon` — значок 16 dp
+ * слева (поле слева 12); `trailingIcon` — значок 16 dp справа (подпись при нехватке
+ * места обрезается, значок остаётся); `color` — цвет текста и значка невыбранного чипа.
+ */
 @Composable
-fun Chip(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+fun Chip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    @DrawableRes icon: Int? = null,
+    @DrawableRes trailingIcon: Int? = null,
+    fill: Color? = null,
+    color: Color = Pl.text,
+) {
     val shape = CircleShape
     var m = modifier.height(36.dp).clip(shape)
-    m = if (selected) m.background(Pl.text, shape) else m.border(1.dp, Pl.outline, shape)
+    m = when {
+        selected -> m.background(Pl.text, shape)
+        fill != null -> m.background(fill, shape)
+        else -> m.border(1.dp, Pl.outline, shape)
+    }
+    val content = if (selected) Pl.darkText else color
     Row(
-        m.clickable(onClick = onClick).padding(horizontal = 14.dp),
+        m.clickable(onClick = onClick).padding(start = if (icon != null) 12.dp else 14.dp, end = 14.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        PlText(label, PlType.secondaryStrong, if (selected) Pl.darkText else Pl.text, maxLines = 1)
+        if (icon != null) PlIcon(icon, 16.dp, content)
+        PlText(
+            label,
+            PlType.secondaryStrong,
+            content,
+            modifier = if (trailingIcon != null) Modifier.weight(1f, fill = false) else Modifier,
+            maxLines = 1,
+        )
+        if (trailingIcon != null) PlIcon(trailingIcon, 16.dp, content)
     }
 }
 
@@ -263,11 +294,14 @@ fun Cover(
     }
 }
 
-/** Верхняя панель подэкрана: стрелка назад. */
+/**
+ * Верхняя панель подэкрана: стрелка назад (значок 24 dp на расстоянии 16 dp от
+ * края, зона нажатия 44 dp). Высота 52 dp; у экранов с шапкой-обложкой — 56 dp.
+ */
 @Composable
-fun BackBar(onBack: () -> Unit) {
+fun BackBar(onBack: () -> Unit, height: Dp = 52.dp) {
     Box(
-        Modifier.fillMaxWidth().height(52.dp).padding(start = 8.dp),
+        Modifier.fillMaxWidth().height(height).padding(start = 6.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
         Box(
@@ -276,6 +310,20 @@ fun BackBar(onBack: () -> Unit) {
         ) {
             PlIcon(R.drawable.ic_back, 24.dp, Pl.text)
         }
+    }
+}
+
+/** Шеврон «дальше» из макета: 16×16, контур (6,3)-(11,8)-(6,13), линия 1,6, скруглённые концы. */
+@Composable
+fun Chevron(modifier: Modifier = Modifier, color: Color = Pl.text3) {
+    Canvas(modifier.size(16.dp)) {
+        val k = size.width / 16f
+        val path = Path().apply {
+            moveTo(6f * k, 3f * k)
+            lineTo(11f * k, 8f * k)
+            lineTo(6f * k, 13f * k)
+        }
+        drawPath(path, color, style = Stroke(1.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
     }
 }
 
@@ -316,7 +364,9 @@ fun MediaTile(
     onClick: () -> Unit,
 ) {
     val shape = RoundedCornerShape(16.dp)
-    Column(modifier.clip(shape).clickable(onClick = onClick), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+    // Зона нажатия скруглена только сверху: скругление снизу срезало бы начало подписи.
+    val touchShape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
+    Column(modifier.clip(touchShape).clickable(onClick = onClick), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(shape).background(coverPlaceholder(seed), shape)) {
             if (coverUrl != null) {
                 AsyncImage(
@@ -327,7 +377,7 @@ fun MediaTile(
                 )
             }
         }
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(6.dp))
         PlText(title, PlType.secondaryStrong, maxLines = 1)
         if (!subtitle.isNullOrEmpty()) PlText(subtitle, PlType.caption, Pl.text3, maxLines = 1)
     }

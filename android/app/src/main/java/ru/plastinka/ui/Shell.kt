@@ -2,6 +2,13 @@ package ru.plastinka.ui
 
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterExitState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -105,6 +112,9 @@ private fun MainScreen(library: LibraryUi, model: AppViewModel) {
 
     val queue by QueueHolder.state.collectAsStateWithLifecycle()
     var showPlayer by remember { mutableStateOf(false) }
+    val hasTrack = queue.currentTrack() != null
+    // Очередь опустела: полноэкранный плеер закрывается, а не остаётся пустым слоем.
+    LaunchedEffect(hasTrack) { if (!hasTrack) showPlayer = false }
     var tab by rememberSaveable { mutableIntStateOf(0) }
     val liked by QueueHolder.likedIds.collectAsStateWithLifecycle()
 
@@ -112,16 +122,24 @@ private fun MainScreen(library: LibraryUi, model: AppViewModel) {
         Column(Modifier.fillMaxSize()) {
             Box(Modifier.weight(1f).fillMaxWidth().statusBarsPadding()) {
                 when (tab) {
-                    0 -> WaveTab(model, player, onOpenPlayer = { showPlayer = true })
+                    0 -> WaveTab(
+                        model,
+                        player,
+                        onOpenPlayer = { showPlayer = true },
+                        onOpenSettings = { tab = 3 },
+                    )
                     1 -> SearchTab(model, player)
                     2 -> CollectionTab(library, model, player, onOpenSettings = { tab = 3 })
                     else -> SettingsScreen(library, model)
                 }
             }
-            // Мини-плеер над нижним меню.
-            // На вкладке «Волна» играющая волна сама заменяет мини-плеер.
+            // Мини-плеер над нижним меню. Под полноэкранным плеером его не прячем:
+            // плеер закрывает всё окно, а список под ним не должен менять высоту.
+            // На вкладке «Волна» мини-плеер заменяет сам экран волны, когда он показывает трек.
+            val waveStarting by model.waveStarting.collectAsStateWithLifecycle()
+            val waveError by model.waveError.collectAsStateWithLifecycle()
             queue.currentTrack()?.let { track ->
-                AnimatedVisibility(visible = !showPlayer && !(tab == 0 && queue.isWave)) {
+                AnimatedVisibility(visible = !(tab == 0 && waveScreenShowsTrack(queue, waveStarting, waveError != null))) {
                     MiniPlayer(
                         track = track,
                         player = player,
@@ -133,12 +151,20 @@ private fun MainScreen(library: LibraryUi, model: AppViewModel) {
             }
             BottomNav(selected = tab, onSelect = { tab = it })
         }
-        if (showPlayer) {
+        // Плеер выезжает снизу и проявляется, 320 мс (как FULLSCREEN на десктопе).
+        AnimatedVisibility(
+            visible = showPlayer && hasTrack,
+            enter = slideInVertically(tween(320, easing = FastOutSlowInEasing)) { it } +
+                fadeIn(tween(320, easing = FastOutSlowInEasing)),
+            exit = slideOutVertically(tween(320, easing = FastOutSlowInEasing)) { it } +
+                fadeOut(tween(320, easing = FastOutSlowInEasing)),
+        ) {
             FullPlayer(
                 queue = queue,
                 player = player,
                 model = model,
                 onClose = { showPlayer = false },
+                backEnabled = transition.targetState == EnterExitState.Visible,
             )
         }
     }
@@ -156,8 +182,7 @@ private val NAV_ITEMS = listOf(
 /** Нижнее меню: линия сверху, «таблетка» 60×32 под значком активного пункта. */
 @Composable
 private fun BottomNav(selected: Int, onSelect: (Int) -> Unit) {
-    Column(Modifier.fillMaxWidth().background(Pl.bg).navigationBarsPadding()) {
-        Box(Modifier.fillMaxWidth().height(1.dp).background(Pl.border))
+    Box(Modifier.fillMaxWidth().background(Pl.bg).navigationBarsPadding()) {
         Row(
             Modifier.fillMaxWidth().height(68.dp).padding(start = 8.dp, end = 8.dp, top = 8.dp),
         ) {
@@ -192,5 +217,7 @@ private fun BottomNav(selected: Int, onSelect: (Int) -> Unit) {
                 }
             }
         }
+        // Разделитель лежит поверх первой строки, как в макете: пункты начинаются от верха меню.
+        Box(Modifier.fillMaxWidth().height(1.dp).background(Pl.border))
     }
 }

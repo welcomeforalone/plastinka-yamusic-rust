@@ -12,8 +12,13 @@ import kotlinx.coroutines.launch
 import ru.plastinka.PlastinkaApp
 import ru.plastinka.data.AccountInfo
 import ru.plastinka.data.DeviceCode
+import ru.plastinka.data.Prefs
+import ru.plastinka.data.WaveActivity
+import ru.plastinka.data.WaveSettings
+import ru.plastinka.data.SearchKind
 import ru.plastinka.data.Track
 import ru.plastinka.playback.QueueHolder
+import ru.plastinka.playback.currentTrack
 
 data class LoginUi(
     val phase: LoginPhase = LoginPhase.Idle,
@@ -44,9 +49,18 @@ data class CollectionUi(
     val playlists: List<ru.plastinka.data.PlaylistCard>? = null,
     val albums: List<ru.plastinka.data.AlbumCard>? = null,
     val artists: List<ru.plastinka.data.ArtistCard>? = null,
+    /** Исполнители топа месяца для полки; `null` — не загружены или сбой (полки нет). */
+    val top: List<ru.plastinka.data.TopArtist>? = null,
     val playlistsError: String? = null,
     val albumsError: String? = null,
     val artistsError: String? = null,
+)
+
+/** Страница «Топ месяца». `data == null` — ещё не получена; ошибка хранится, только если показать нечего. */
+data class MonthTopUi(
+    val loading: Boolean = false,
+    val data: ru.plastinka.data.MonthTop? = null,
+    val error: String? = null,
 )
 
 /** Серверная история. `days == null` — ещё не получена; ошибка хранится, только если показать нечего. */
@@ -62,6 +76,32 @@ data class Keyed<T>(
     val loading: Boolean = false,
     val data: T? = null,
     val error: String? = null,
+)
+
+/** Сообщение об ошибке поиска. */
+private const val SEARCH_FAILED = "Не удалось выполнить поиск. Проверьте соединение."
+
+/** Состояние одной вкладки поиска. */
+data class SearchSlot(
+    /** Идёт запрос первой страницы (или ждёт паузу ввода). */
+    val loading: Boolean = false,
+    val loadingMore: Boolean = false,
+    /** Ошибка первой страницы. */
+    val error: String? = null,
+    /** Ошибка следующей страницы: список остаётся, внизу «Повторить». */
+    val moreFailed: Boolean = false,
+    val loaded: Boolean = false,
+    val result: ru.plastinka.data.SearchResult = ru.plastinka.data.SearchResult(),
+    val nextPage: Int = 0,
+)
+
+/** Следующая страница дописывается к списку без повторов (ключи элементов LazyColumn уникальны). */
+private fun ru.plastinka.data.SearchResult.append(next: ru.plastinka.data.SearchResult) = copy(
+    tracks = tracks + next.tracks,
+    albums = (albums + next.albums).distinctBy { it.id },
+    artists = (artists + next.artists).distinctBy { it.id },
+    playlists = (playlists + next.playlists).distinctBy { it.uid to it.kind },
+    hasNext = next.hasNext,
 )
 
 /**
@@ -112,11 +152,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val _query = MutableStateFlow("")
     val query: StateFlow<String> = _query
 
-    private val _search = MutableStateFlow<List<Track>>(emptyList())
-    val search: StateFlow<List<Track>> = _search
-
     private var pollJob: Job? = null
-    private var searchJob: Job? = null
 
     // Состояние, а не геттер: экран перерисовывается и при входе, и при выходе.
     private val _loggedIn = MutableStateFlow(plastinka.tokenStore.load() != null)
@@ -124,40 +160,85 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     val loggedIn: Boolean get() = _loggedIn.value
 
-    private val _searchError = MutableStateFlow<String?>(null)
-    val searchError: StateFlow<String?> = _searchError
+    /** Выбранная вкладка поиска: сохраняется при смене запроса. */
+    private val _searchTab = MutableStateFlow(SearchKind.All)
+    val searchTab: StateFlow<SearchKind> = _searchTab
 
-    /** Запрос отправлен, ответа ещё нет: экран показывает индикатор, а не «ничего не нашлось». */
-    private val _searching = MutableStateFlow(false)
-    val searching: StateFlow<Boolean> = _searching
+    /** Состояние каждой вкладки для текущего запроса; нет записи — вкладку ещё не открывали. */
+    private val _searchSlots = MutableStateFlow<Map<SearchKind, SearchSlot>>(emptyMap())
+    val searchSlots: StateFlow<Map<SearchKind, SearchSlot>> = _searchSlots
+
+    private val searchJobs = mutableMapOf<SearchKind, Job>()
+
+    /** Номер запроса: ответ с прежним номером (запрос уже сменился) отбрасывается. */
+    private var searchGen = 0
 
     fun setQuery(text: String) {
         _query.value = text
-        searchJob?.cancel()
-        _searchError.value = null
-        if (text.isBlank()) {
-            _search.value = emptyList()
-            _searching.value = false
-            return
+        searchGen++
+        searchJobs.values.forEach { it.cancel() }
+        searchJobs.clear()
+        _searchSlots.value = emptyMap()
+        if (text.isBlank()) return
+        runSearch(_searchTab.value, page = 0, debounce = true)
+    }
+
+    fun selectSearchTab(kind: SearchKind) {
+        _searchTab.value = kind
+        if (_query.value.isBlank()) return
+        // Вкладку ещё не открывали или прошлый запрос не удался — запрашиваем (заново).
+        val slot = _searchSlots.value[kind]
+        if (slot == null || slot.error != null) runSearch(kind, page = 0, debounce = false)
+    }
+
+    /** «Повторить» после ошибки первой страницы. */
+    fun retrySearch(kind: SearchKind) {
+        if (_query.value.isBlank() || _searchSlots.value[kind]?.loading == true) return
+        runSearch(kind, page = 0, debounce = false)
+    }
+
+    /** Следующая страница вкладки по типу: вызывается при прокрутке к концу списка. */
+    fun loadMoreSearch(kind: SearchKind) {
+        val slot = _searchSlots.value[kind] ?: return
+        if (kind == SearchKind.All || !slot.loaded || slot.loading || slot.loadingMore) return
+        if (!slot.result.hasNext) return
+        runSearch(kind, page = slot.nextPage, debounce = false)
+    }
+
+    private fun updateSlot(kind: SearchKind, change: (SearchSlot) -> SearchSlot) {
+        _searchSlots.value = _searchSlots.value + (kind to change(_searchSlots.value[kind] ?: SearchSlot()))
+    }
+
+    private fun runSearch(kind: SearchKind, page: Int, debounce: Boolean) {
+        val text = _query.value.trim()
+        if (text.isEmpty()) return
+        val gen = searchGen
+        searchJobs[kind]?.cancel()
+        updateSlot(kind) {
+            if (page == 0) SearchSlot(loading = true) else it.copy(loadingMore = true, moreFailed = false)
         }
-        _searching.value = true
-        searchJob = viewModelScope.launch {
-            delay(350)
+        searchJobs[kind] = viewModelScope.launch {
+            if (debounce) delay(350)
             val token = plastinka.tokenStore.load()
             if (token == null) {
-                _searching.value = false
+                updateSlot(kind) { SearchSlot(error = SEARCH_FAILED) }
                 return@launch
             }
             try {
-                _search.value = plastinka.api.searchTracks(token, text.trim())
+                val fresh = plastinka.api.search(token, kind, text, page)
+                if (gen != searchGen) return@launch
+                updateSlot(kind) { old ->
+                    val merged = if (page == 0) fresh else old.result.append(fresh)
+                    SearchSlot(loaded = true, result = merged, nextPage = page + 1)
+                }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _search.value = emptyList()
-                _searchError.value = "Не удалось выполнить поиск. Проверьте соединение."
+                if (gen != searchGen) return@launch
+                updateSlot(kind) { old ->
+                    if (page == 0) SearchSlot(error = SEARCH_FAILED) else old.copy(loadingMore = false, moreFailed = true)
+                }
             }
-            // Отменённый запрос сюда не доходит: флаг держит новый запрос.
-            _searching.value = false
         }
     }
 
@@ -225,39 +306,152 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val _waveError = MutableStateFlow<String?>(null)
     val waveError: StateFlow<String?> = _waveError
 
-    /** Запустить «Мою волну»: сессия rotor + первая порция в очередь. */
-    fun startWave(player: PlayerController?) {
+    init {
+        // Ошибка запуска волны устаревает, когда пользователь включил другой список:
+        // иначе вкладка «Волна» так и показывала бы её вместо играющего трека.
+        viewModelScope.launch {
+            var seen: List<Track>? = null
+            ru.plastinka.playback.QueueHolder.state.collect { queue ->
+                val fresh = seen != null && seen !== queue.tracks
+                seen = queue.tracks
+                if (fresh && !queue.isWave) _waveError.value = null
+            }
+        }
+    }
+
+    /** Номер запуска волны: результат прежнего запуска (его отменили сменой настроек) не применяется. */
+    private var waveGen = 0
+
+    /**
+     * Запустить «Мою волну»: сессия rotor с выбранными настройками + первая порция в
+     * очередь. `restart` — смена настроек: прежний запуск (если ещё идёт) отменяется.
+     */
+    fun startWave(player: PlayerController?, restart: Boolean = false) {
         val token = plastinka.tokenStore.load() ?: return
-        if (_waveStarting.value) return
+        if (_waveStarting.value && !restart) return
+        waveJob?.cancel()
+        val gen = ++waveGen
         _waveStarting.value = true
         _waveError.value = null
+        val seeds = Prefs.waveSettings.seeds()
         waveJob = viewModelScope.launch {
             try {
-                val batch = plastinka.api.startWave(token)
+                val batch = plastinka.api.startWave(token, seeds)
                 ru.plastinka.playback.PlaybackService.waveStarted(
                     batch.session, batch.batchId, batch.from,
                 )
                 if (batch.tracks.isEmpty()) throw IllegalStateException("волна прислала 0 треков")
                 player?.playQueue(batch.tracks, 0, "Моя волна", isWave = true)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _waveError.value = "Волна не началась: ${e.message ?: "ошибка сети"}"
             } finally {
-                _waveStarting.value = false
+                if (gen == waveGen) _waveStarting.value = false
             }
         }
+    }
+
+    /**
+     * Выбор в настройках волны (как на десктопе): сохраняется на устройстве, в аккаунт ничего
+     * не пишется; любая смена сразу запускает новую волну. Тот же выбор — ничего не меняет.
+     */
+    fun changeWaveSettings(player: PlayerController?, next: WaveSettings) {
+        if (next == Prefs.waveSettings) return
+        Prefs.changeWaveSettings(next)
+        startWave(player, restart = true)
+    }
+
+    /** Занятия для настроек волны: не загрузились — раздел «Занятие» скрыт, остальное работает. */
+    sealed interface WaveStations {
+        data object Idle : WaveStations
+        data object Loading : WaveStations
+        data class Ready(val list: List<WaveActivity>) : WaveStations
+        data object Failed : WaveStations
+    }
+
+    private val _waveStations = MutableStateFlow<WaveStations>(WaveStations.Idle)
+    val waveStations: StateFlow<WaveStations> = _waveStations
+
+    /** Список занятий: при показе экрана волны и снова, если прошлый запрос не удался. */
+    fun loadWaveStations() {
+        val token = plastinka.tokenStore.load() ?: return
+        if (_waveStations.value is WaveStations.Loading || _waveStations.value is WaveStations.Ready) return
+        _waveStations.value = WaveStations.Loading
+        viewModelScope.launch {
+            _waveStations.value = try {
+                WaveStations.Ready(plastinka.api.waveActivities(token))
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                WaveStations.Failed
+            }
+        }
+    }
+
+    /**
+     * «Не нравится» играющему треку волны: логика общая с кнопкой в системном плеере
+     * ([TrackActions.dislikeCurrent]). Только при подтверждённой подписке.
+     */
+    fun dislikeWaveTrack(player: PlayerController?) {
+        if (!QueueHolder.state.value.isWave) return
+        ru.plastinka.playback.TrackActions.dislikeCurrent(plastinka, viewModelScope, player?.controller)
     }
 
     private val _generated = MutableStateFlow<List<ru.plastinka.data.GeneratedPlaylist>>(emptyList())
     val generated: StateFlow<List<ru.plastinka.data.GeneratedPlaylist>> = _generated
 
-    /** Подборки лендинга: «Плейлист дня» и прочие. */
-    private fun loadGenerated() {
+    private var generatedJob: Job? = null
+
+    /**
+     * Подборки лендинга: «Плейлист дня» и прочие. Не спрашивает заново, пока
+     * список есть или запрос идёт; после сбоя повторяется при следующем вызове
+     * (показ экрана волны).
+     */
+    fun loadGenerated() {
+        if (_generated.value.isNotEmpty() || generatedJob?.isActive == true) return
+        val token = plastinka.tokenStore.load() ?: return
+        generatedJob = viewModelScope.launch {
+            try {
+                _generated.value = plastinka.api.personalPlaylists(token)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w("AppViewModel", "подборки не загружены: ${e.message}")
+            }
+        }
+    }
+
+    /** Кнопка Play у лучшего результата: трек — сам трек, остальное — его треки (у исполнителя популярные). */
+    fun playSearchBest(player: PlayerController?, best: ru.plastinka.data.SearchBest) {
         val token = plastinka.tokenStore.load() ?: return
         viewModelScope.launch {
-            _generated.value = try {
-                plastinka.api.personalPlaylists(token)
+            try {
+                val api = plastinka.api
+                when (best) {
+                    is ru.plastinka.data.SearchBest.TrackHit -> player?.playQueue(listOf(best.track), 0, "Поиск")
+                    is ru.plastinka.data.SearchBest.AlbumHit -> {
+                        val tracks = api.albumWithTracks(token, best.card.id).tracks
+                        val ctx = ru.plastinka.data.HistoryContext.Album(best.card.id, best.card.displayTitle)
+                        player?.playQueue(tracks, 0, best.card.displayTitle, source = ctx)
+                    }
+                    is ru.plastinka.data.SearchBest.PlaylistHit -> {
+                        val tracks = api.playlistTracks(token, best.card.uid, best.card.kind)
+                        val ctx = ru.plastinka.data.HistoryContext.Playlist(
+                            best.card.uid.toString(), best.card.kind.toString(), best.card.title,
+                        )
+                        player?.playQueue(tracks, 0, best.card.title, source = ctx)
+                    }
+                    is ru.plastinka.data.SearchBest.ArtistHit -> {
+                        val tracks = api.artistBrief(token, best.card.id).popular
+                        val ctx = ru.plastinka.data.HistoryContext.Artist(best.card.id, best.card.name)
+                        player?.playQueue(tracks, 0, best.card.name, source = ctx)
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (_: Exception) {
-                emptyList()
+                // Сбой сети: очередь остаётся прежней, экран не падает.
             }
         }
     }
@@ -292,16 +486,44 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val playlists = async { attempt { api.userPlaylists(token, uid) } }
             val albums = async { attempt { api.likedAlbums(token, uid) } }
             val artists = async { attempt { api.likedArtists(token, uid) } }
+            // Полка топа необязательна: сбой её не показывает, остальное работает.
+            val top = async { attempt { api.topArtists(token) } }
             val (pl, al, ar) = Triple(playlists.await(), albums.await(), artists.await())
+            val tp = top.await()
             val old = _collection.value
             _collection.value = CollectionUi(
                 loading = false,
                 playlists = pl ?: old.playlists,
                 albums = al ?: old.albums,
                 artists = ar ?: old.artists,
+                top = tp ?: old.top,
                 playlistsError = if (pl == null && old.playlists == null) "Не удалось загрузить плейлисты. Проверьте соединение." else null,
                 albumsError = if (al == null && old.albums == null) "Не удалось загрузить альбомы. Проверьте соединение." else null,
                 artistsError = if (ar == null && old.artists == null) "Не удалось загрузить исполнителей. Проверьте соединение." else null,
+            )
+        }
+    }
+
+    private val _monthTop = MutableStateFlow(MonthTopUi())
+    val monthTop: StateFlow<MonthTopUi> = _monthTop
+    private var monthTopJob: Job? = null
+
+    /**
+     * Страница «Топ месяца». Без `force` не спрашивает заново, пока данные есть
+     * или запрос идёт; «Повторить» идёт с `force`.
+     */
+    fun loadMonthTop(force: Boolean = false) {
+        val token = plastinka.tokenStore.load() ?: return
+        if (!force && (_monthTop.value.data != null || monthTopJob?.isActive == true)) return
+        monthTopJob?.cancel()
+        _monthTop.value = _monthTop.value.copy(loading = true)
+        monthTopJob = viewModelScope.launch {
+            val top = attempt { plastinka.api.monthTop(token) }
+            val old = _monthTop.value
+            _monthTop.value = MonthTopUi(
+                loading = false,
+                data = top ?: old.data,
+                error = if (top == null && old.data == null) "Не удалось собрать топ. Проверьте соединение." else null,
             )
         }
     }
@@ -407,26 +629,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _library.value = LibraryUi()
         collectionJob?.cancel()
         historyJob?.cancel()
+        monthTopJob?.cancel()
+        _monthTop.value = MonthTopUi()
         _history.value = HistoryUi()
         ru.plastinka.data.PlayLog.clear()
         playlist.reset()
         album.reset()
         artist.reset()
         _collection.value = CollectionUi()
+        _waveStations.value = WaveStations.Idle
         _login.value = LoginUi()
     }
 
     fun toggleLike(track: Track) {
-        val token = plastinka.tokenStore.load() ?: return
-        val uid = _library.value.account?.uid ?: return
-        val nowLiked = QueueHolder.toggleLike(track.id)
-        viewModelScope.launch {
-            try {
-                plastinka.api.setLike(token, uid, track.id, nowLiked)
-            } catch (_: Exception) {
-                QueueHolder.toggleLike(track.id) // откат
-            }
-        }
+        ru.plastinka.playback.TrackActions.toggleLike(plastinka, viewModelScope, track.id)
     }
 
     private fun deviceId(): String {

@@ -1,6 +1,6 @@
 package ru.plastinka.ui
 
-import android.content.Context
+import ru.plastinka.data.Prefs
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
@@ -32,23 +32,50 @@ enum class Accent(val key: String, val title: String, val color: Color) {
     }
 }
 
-/** Выбранный акцент: состояние Compose, смена сразу перекрашивает интерфейс. */
+/**
+ * Выбранный акцент: готовый или свой цвет. Состояние Compose, смена сразу
+ * перекрашивает интерфейс. В настройках одна строка: ключ готового акцента
+ * (`red`) или `#RRGGBB`; непонятное значение — красный.
+ */
 object AccentState {
-    private const val PREFS = "plastinka"
-    private const val KEY = "accent"
-
-    var current by mutableStateOf(Accent.Red)
+    /** Готовый акцент; когда выбран свой цвет, не используется. */
+    var preset by mutableStateOf(Accent.Red)
         private set
 
-    fun load(context: Context) {
-        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        current = Accent.fromKey(prefs.getString(KEY, null))
+    /** Свой цвет `0xRRGGBB` (уже приведён к читаемому на чёрном) или `null`. */
+    var custom by mutableStateOf<Int?>(null)
+        private set
+
+    val color: Color
+        get() = custom?.let { Color(0xFF000000.toInt() or it) } ?: preset.color
+
+    /** Название для подписи: «Красный» или «Свой цвет». */
+    val title: String get() = if (custom != null) "Свой цвет" else preset.title
+
+    /** После [Prefs.load]. */
+    fun load() {
+        val key = Prefs.accentKey()
+        val rgb = key?.let(ColorMath::parseHex)
+        if (rgb != null) {
+            custom = ColorMath.readable(rgb)
+            preset = Accent.Red
+        } else {
+            custom = null
+            preset = Accent.fromKey(key)
+        }
     }
 
-    fun select(context: Context, accent: Accent) {
-        current = accent
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putString(KEY, accent.key).apply()
+    fun selectPreset(accent: Accent) {
+        custom = null
+        preset = accent
+        Prefs.saveAccentKey(accent.key)
+    }
+
+    /** Свой цвет: слишком тёмный осветляется, чтобы не пропасть на чёрном фоне. */
+    fun selectCustom(rgb: Int) {
+        val value = ColorMath.readable(rgb)
+        custom = value
+        Prefs.saveAccentKey(ColorMath.formatHex(value))
     }
 }
 
@@ -76,7 +103,7 @@ object Pl {
     val growth = Color(0xFF4CD07D)
     val darkText = Color(0xFF0A0A0A)
 
-    val accent: Color get() = AccentState.current.color
+    val accent: Color get() = AccentState.color
     val accentSoft: Color get() = accent.copy(alpha = 0.14f)
 
     /** Цвет текста на акценте: на светлом — тёмный, на тёмном — белый. */
@@ -112,6 +139,7 @@ object PlType {
     val hero = style(FontWeight.ExtraBold, 40, 44, -0.02)
     val display = style(FontWeight.ExtraBold, 32, 38, -0.015)
     val playerTitle = style(FontWeight.ExtraBold, 28, 34, -0.01)
+    val lyrics = style(FontWeight.Bold, 24, 32, -0.005)
     val title = style(FontWeight.Bold, 22, 28, -0.005)
     val headline = style(FontWeight.Bold, 17, 22)
     val body = style(FontWeight.Normal, 16, 22)
@@ -121,6 +149,7 @@ object PlType {
     val caption = style(FontWeight.Normal, 12, 16)
     val captionStrong = style(FontWeight.SemiBold, 12, 16)
     val micro = style(FontWeight.SemiBold, 11, 14, 0.02)
+    val badge = style(FontWeight.Bold, 9, 12)
     val code = style(FontWeight.Bold, 40, 48, 0.08, tnum = true)
 }
 
@@ -149,7 +178,7 @@ private fun interTypography(): Typography {
 @Composable
 fun PlastinkaTheme(content: @Composable () -> Unit) {
     // Акцент читает из настроек MainActivity до показа; клиент тёмный всегда.
-    val accent = AccentState.current.color
+    val accent = AccentState.color
     val scheme = darkColorScheme(
         primary = accent,
         onPrimary = Pl.onAccent,

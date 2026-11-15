@@ -31,7 +31,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -76,11 +75,10 @@ fun EqBars(size: Dp, color: Color, animated: Boolean, modifier: Modifier = Modif
         heights.forEachIndexed { i, h ->
             val x = s * 0.14f + i * (w + s * 0.1f)
             val top = s * (0.84f - h * 0.68f)
-            drawRoundRect(
+            drawRect(
                 color,
                 topLeft = Offset(x, top),
                 size = Size(w, s * 0.84f - top),
-                cornerRadius = CornerRadius(w / 4),
             )
         }
     }
@@ -99,16 +97,28 @@ fun TrackRow(
     onClick: () -> Unit,
     onLike: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Номер места слева от обложки (топ месяца); `null` — без номера. */
+    number: Int? = null,
 ) {
     val available = track.available
+    val ai = rememberIsAi(track)
     Row(
         modifier
             .fillMaxWidth()
             .height(64.dp)
             .then(if (available) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(start = 16.dp, end = 6.dp),
+            .padding(start = 16.dp, end = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (number != null) {
+            PlText(
+                number.toString(),
+                PlType.secondary.copy(fontFeatureSettings = "tnum"),
+                Pl.text3,
+                Modifier.width(28.dp),
+                maxLines = 1,
+            )
+        }
         Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
             Cover(
                 track.coverUrl("100x100"),
@@ -139,20 +149,59 @@ fun TrackRow(
                 },
                 maxLines = 1,
             )
-            PlText(
-                if (available) track.artistNames else "Недоступен в вашем регионе",
-                PlType.secondary,
-                if (available) Pl.text2 else Pl.textDisabled,
-                maxLines = 1,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (track.explicit) ExplicitBadge()
+                if (ai) AiTag()
+                PlText(
+                    if (available) track.artistNames else "Недоступен в вашем регионе",
+                    PlType.secondary,
+                    if (available) Pl.text2 else Pl.textDisabled,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+            }
         }
-        HeartButton(liked, onLike, 22.dp)
+        // Зоны нажатия уже, чем в макете по высоте: значки встают с зазором 12 dp
+        // (зона сердца 34 dp при значке 22, зона «…» 32 dp при значке 20).
+        Spacer(Modifier.width(6.dp))
+        HeartButton(
+            liked,
+            onLike,
+            22.dp,
+            Modifier.size(width = 34.dp, height = 48.dp),
+            tint = if (available) null else Pl.textDisabled,
+        )
+        // «…» только если в меню есть действия (плагины включены).
+        TrackMoreButton(
+            track,
+            Modifier.size(width = 32.dp, height = 48.dp),
+            iconSize = 20.dp,
+            tint = if (available) Pl.text2 else Pl.textDisabled,
+        )
+    }
+}
+
+/** Значок «E» (explicit): 14 dp, плашка surface4 с радиусом 3 и буква в 9 sp. */
+@Composable
+fun ExplicitBadge() {
+    Box(
+        Modifier.size(14.dp).background(Pl.surface4, RoundedCornerShape(3.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        PlText("E", PlType.badge, Pl.text2, maxLines = 1)
     }
 }
 
 /** Сердце с зоной нажатия не меньше 40 dp. */
 @Composable
-fun HeartButton(liked: Boolean, onClick: () -> Unit, size: Dp, modifier: Modifier = Modifier) {
+fun HeartButton(
+    liked: Boolean,
+    onClick: () -> Unit,
+    size: Dp,
+    modifier: Modifier = Modifier,
+    /** Свой цвет значка (недоступный трек); `null` — обычный: акцент или text2. */
+    tint: Color? = null,
+) {
     Box(
         modifier
             .size(maxOf(40.dp, size + 12.dp))
@@ -163,7 +212,7 @@ fun HeartButton(liked: Boolean, onClick: () -> Unit, size: Dp, modifier: Modifie
         PlIcon(
             if (liked) R.drawable.ic_heart_filled else R.drawable.ic_heart,
             size,
-            if (liked) Pl.accent else Pl.text2,
+            tint ?: if (liked) Pl.accent else Pl.text2,
         )
     }
 }

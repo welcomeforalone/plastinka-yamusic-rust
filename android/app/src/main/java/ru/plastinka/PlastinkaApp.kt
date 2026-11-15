@@ -13,7 +13,16 @@ class PlastinkaApp : Application() {
     lateinit var fckCensor: FckCensor
         private set
 
+    /** Slopless: метки ИИ-треков (работает, только если плагин включён). */
+    lateinit var slopless: ru.plastinka.data.Slopless
+        private set
+
     val http: okhttp3.OkHttpClient by lazy { YandexApi.defaultHttp() }
+
+    /** Тексты песен: кэш только в памяти, токен берётся из хранилища при каждом запросе. */
+    val lyrics: ru.plastinka.data.LyricsRepository by lazy {
+        ru.plastinka.data.LyricsRepository(http) { tokenStore.load() }
+    }
 
     /**
      * Звук на диске быть не должен (правило проекта: только потоковое
@@ -33,9 +42,13 @@ class PlastinkaApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // Настройки и акцент грузим до первого кадра и до запуска сервиса воспроизведения.
+        ru.plastinka.data.Prefs.load(this)
+        ru.plastinka.ui.AccentState.load()
         tokenStore = TokenStore.get(this)
         api = YandexApi(http)
         fckCensor = FckCensor.get(http)
+        slopless = ru.plastinka.data.Slopless.get(http, cacheDir)
         removeLegacyAudio()
         ru.plastinka.data.PlayLog.init(this)
     }

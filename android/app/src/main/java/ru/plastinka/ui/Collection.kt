@@ -59,6 +59,7 @@ sealed interface CollectionRoute {
     data object Albums : CollectionRoute
     data object Artists : CollectionRoute
     data object History : CollectionRoute
+    data object TopMonth : CollectionRoute
     data class Playlist(val uid: Long, val kind: Long, val title: String, val cover: String?) : CollectionRoute
     data class Album(val id: String, val title: String, val cover: String?) : CollectionRoute
     data class Artist(val id: String, val name: String, val cover: String?) : CollectionRoute
@@ -73,6 +74,7 @@ private fun CollectionRoute.encode(): String = when (this) {
     CollectionRoute.Albums -> "A"
     CollectionRoute.Artists -> "R"
     CollectionRoute.History -> "S"
+    CollectionRoute.TopMonth -> "T"
     is CollectionRoute.Playlist -> listOf("p", uid, kind, title, cover.orEmpty()).joinToString(SEP)
     is CollectionRoute.Album -> listOf("a", id, title, cover.orEmpty()).joinToString(SEP)
     is CollectionRoute.Artist -> listOf("r", id, name, cover.orEmpty()).joinToString(SEP)
@@ -87,6 +89,7 @@ private fun decodeRoute(text: String): CollectionRoute? {
         "A" -> CollectionRoute.Albums
         "R" -> CollectionRoute.Artists
         "S" -> CollectionRoute.History
+        "T" -> CollectionRoute.TopMonth
         "p" -> CollectionRoute.Playlist(
             p.getOrNull(1)?.toLongOrNull() ?: return null,
             p.getOrNull(2)?.toLongOrNull() ?: return null,
@@ -108,10 +111,10 @@ private fun decodeRoute(text: String): CollectionRoute? {
 }
 
 /** Ключ сохранённого состояния экрана: маршрут и его место в стеке (один маршрут может встретиться дважды). */
-private fun stateKey(position: Int, route: CollectionRoute): String = "$position:${route.encode()}"
+internal fun stateKey(position: Int, route: CollectionRoute): String = "$position:${route.encode()}"
 
 /** Стек маршрутов переживает пересоздание активности: хранится списком строк. */
-private val StackSaver = Saver<List<CollectionRoute>, List<String>>(
+internal val StackSaver = Saver<List<CollectionRoute>, List<String>>(
     save = { stack -> stack.map { it.encode() } },
     restore = { saved ->
         saved.mapNotNull(::decodeRoute).ifEmpty { listOf(CollectionRoute.Hub) }
@@ -159,48 +162,71 @@ fun CollectionTab(
                 onBack = pop,
                 onOpen = { card -> push(CollectionRoute.Playlist(card.uid, card.kind, card.title, card.coverUri)) },
             )
-            is CollectionRoute.Playlist -> PlaylistScreen(
-                uid = top.uid,
-                kind = top.kind,
-                title = top.title,
-                coverUri = top.cover,
-                model = model,
-                player = player,
-                onBack = pop,
-            )
+            is CollectionRoute.Playlist, is CollectionRoute.Album, is CollectionRoute.Artist ->
+                DetailRouteScreen(top, model, player, onBack = pop, push = push)
             CollectionRoute.Albums -> AlbumsScreen(
                 model = model,
                 onBack = pop,
                 onOpen = { card -> push(CollectionRoute.Album(card.id, card.displayTitle, card.coverUri)) },
             )
-            is CollectionRoute.Album -> AlbumScreen(
-                id = top.id,
-                title = top.title,
-                coverUri = top.cover,
+            CollectionRoute.History -> HistoryScreen(model, player, onBack = pop)
+            CollectionRoute.TopMonth -> TopMonthScreen(
                 model = model,
                 player = player,
                 onBack = pop,
-                onOpenArtist = { artist ->
-                    artist.id?.takeIf { ru.plastinka.data.YandexApi.isNumericId(it) }
-                        ?.let { push(CollectionRoute.Artist(it, artist.name, null)) }
-                },
+                onOpenArtist = { top -> push(CollectionRoute.Artist(top.card.id, top.card.name, top.card.coverUri)) },
             )
-            CollectionRoute.History -> HistoryScreen(model, player, onBack = pop)
             CollectionRoute.Artists -> ArtistsScreen(
                 model = model,
                 onBack = pop,
+                onAllTop = { push(CollectionRoute.TopMonth) },
                 onOpen = { card -> push(CollectionRoute.Artist(card.id, card.name, card.coverUri)) },
             )
-            is CollectionRoute.Artist -> ArtistScreen(
-                id = top.id,
-                name = top.name,
-                coverUri = top.cover,
-                model = model,
-                player = player,
-                onBack = pop,
-                onOpenAlbum = { card -> push(CollectionRoute.Album(card.id, card.displayTitle, card.coverUri)) },
-            )
         }
+    }
+}
+
+/** Экраны плейлиста, альбома и исполнителя: общие для «Коллекции» и «Поиска». */
+@Composable
+internal fun DetailRouteScreen(
+    route: CollectionRoute,
+    model: AppViewModel,
+    player: PlayerController?,
+    onBack: () -> Unit,
+    push: (CollectionRoute) -> Unit,
+) {
+    when (route) {
+        is CollectionRoute.Playlist -> PlaylistScreen(
+            uid = route.uid,
+            kind = route.kind,
+            title = route.title,
+            coverUri = route.cover,
+            model = model,
+            player = player,
+            onBack = onBack,
+        )
+        is CollectionRoute.Album -> AlbumScreen(
+            id = route.id,
+            title = route.title,
+            coverUri = route.cover,
+            model = model,
+            player = player,
+            onBack = onBack,
+            onOpenArtist = { artist ->
+                artist.id?.takeIf { ru.plastinka.data.YandexApi.isNumericId(it) }
+                    ?.let { push(CollectionRoute.Artist(it, artist.name, null)) }
+            },
+        )
+        is CollectionRoute.Artist -> ArtistScreen(
+            id = route.id,
+            name = route.name,
+            coverUri = route.cover,
+            model = model,
+            player = player,
+            onBack = onBack,
+            onOpenAlbum = { card -> push(CollectionRoute.Album(card.id, card.displayTitle, card.coverUri)) },
+        )
+        else -> Unit
     }
 }
 
@@ -247,6 +273,15 @@ private fun CollectionHub(
             onOpen(CollectionRoute.Artists)
         }
         HubRow(R.drawable.ic_history, "История", null) { onOpen(CollectionRoute.History) }
+        val topArtists = collection.top.orEmpty()
+        if (topArtists.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            TopMonthShelf(
+                topArtists,
+                onAll = { onOpen(CollectionRoute.TopMonth) },
+                onOpenArtist = { top -> onOpen(CollectionRoute.Artist(top.card.id, top.card.name, top.card.coverUri)) },
+            )
+        }
         if (recent.isNotEmpty()) {
             Spacer(Modifier.height(12.dp))
             PlText("Недавнее", PlType.title, modifier = Modifier.padding(horizontal = 20.dp))
@@ -276,6 +311,7 @@ private fun LikedCard(count: Int, onOpen: () -> Unit, onPlay: () -> Unit) {
                 PlText("Мне нравится", PlType.headline, maxLines = 1)
                 PlText(tracksCount(count), PlType.secondary.copy(fontFeatureSettings = "tnum"), Pl.text2)
             }
+            Spacer(Modifier.width(14.dp))
             PlayButton(44.dp, playing = false, onClick = onPlay)
         }
     }
@@ -299,7 +335,7 @@ private fun HubRow(@DrawableRes icon: Int, label: String, count: Int?, onClick: 
             PlText(count.toString(), PlType.secondary.copy(fontFeatureSettings = "tnum"), Pl.text3)
             Spacer(Modifier.width(14.dp))
         }
-        PlIcon(R.drawable.ic_chevron_right, 16.dp, Pl.text3)
+        Chevron()
     }
 }
 
@@ -371,7 +407,7 @@ private fun PlaylistsScreen(model: AppViewModel, onBack: () -> Unit, onOpen: (Pl
     Column(Modifier.fillMaxSize()) {
         BackBar(onBack)
         PlText("Плейлисты", PlType.display, modifier = Modifier.padding(horizontal = 20.dp))
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(18.dp))
         SectionBody(
             items = collection.playlists,
             error = collection.playlistsError,
@@ -404,7 +440,7 @@ private fun AlbumsScreen(model: AppViewModel, onBack: () -> Unit, onOpen: (Album
     Column(Modifier.fillMaxSize()) {
         BackBar(onBack)
         PlText("Альбомы", PlType.display, modifier = Modifier.padding(horizontal = 20.dp))
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(18.dp))
         SectionBody(
             items = collection.albums,
             error = collection.albumsError,
@@ -436,14 +472,43 @@ internal fun albumSubtitle(card: AlbumCard): String =
     listOfNotNull(card.artistNames.takeIf { it.isNotEmpty() }, card.year?.toString()).joinToString(" · ")
 
 @Composable
-private fun ArtistsScreen(model: AppViewModel, onBack: () -> Unit, onOpen: (ArtistCard) -> Unit) {
+private fun ArtistsScreen(
+    model: AppViewModel,
+    onBack: () -> Unit,
+    onAllTop: () -> Unit,
+    onOpen: (ArtistCard) -> Unit,
+) {
     val collection by model.collection.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { if (collection.artists == null && !collection.loading) model.loadCollection() }
 
     Column(Modifier.fillMaxSize()) {
         BackBar(onBack)
         PlText("Исполнители", PlType.display, modifier = Modifier.padding(horizontal = 20.dp))
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(18.dp))
+        val topArtists = collection.top.orEmpty()
+        val liked = collection.artists
+        // Полка топа — первый элемент того же списка; понравившихся нет, а топ есть — полка видна.
+        if (liked != null && liked.isEmpty() && topArtists.isNotEmpty()) {
+            LazyColumn(Modifier.fillMaxSize()) {
+                item {
+                    TopMonthShelf(topArtists, onAll = onAllTop, onOpenArtist = { top ->
+                        onOpen(top.card)
+                    })
+                }
+                item {
+                    Centered {
+                        PlText("Исполнителей пока нет", PlType.bodyStrong, textAlign = TextAlign.Center)
+                        PlText(
+                            "Отмечайте исполнителей сердцем — они появятся здесь",
+                            PlType.secondary,
+                            Pl.text2,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                }
+            }
+            return@Column
+        }
         SectionBody(
             items = collection.artists,
             error = collection.artistsError,
@@ -452,6 +517,12 @@ private fun ArtistsScreen(model: AppViewModel, onBack: () -> Unit, onOpen: (Arti
             onRetry = model::loadCollection,
         ) { artists ->
             LazyColumn(Modifier.fillMaxSize()) {
+                if (topArtists.isNotEmpty()) {
+                    item {
+                        TopMonthShelf(topArtists, onAll = onAllTop, onOpenArtist = { top -> onOpen(top.card) })
+                        Spacer(Modifier.height(12.dp))
+                    }
+                }
                 items(artists.size, key = { index -> artists.getOrNull(index)?.id ?: index.toString() }) { index ->
                     artists.getOrNull(index)?.let { card ->
                         MediaRow(

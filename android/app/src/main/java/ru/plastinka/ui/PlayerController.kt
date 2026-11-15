@@ -1,6 +1,7 @@
 package ru.plastinka.ui
 
 import android.content.ComponentName
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
@@ -53,6 +54,18 @@ class PlayerController(val controller: MediaController) {
         }
     }
 
+    /**
+     * «Повторять трек» в волне: выкл ↔ один трек. Это тот же режим плеера, что видят
+     * кнопка в полноэкранном плеере и чип на экране «Моя волна».
+     */
+    fun toggleWaveRepeat() {
+        controller.repeatMode =
+            if (controller.repeatMode == Player.REPEAT_MODE_ONE) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
+    }
+
+    /** Повтор списка пользователя, пока играет волна (в ней повтор свой): вернуть при выходе из волны. */
+    private var listRepeat = Player.REPEAT_MODE_OFF
+
     fun playQueue(
         tracks: List<Track>,
         startIndex: Int,
@@ -69,11 +82,18 @@ class PlayerController(val controller: MediaController) {
         val playable = tracks.filter { it.available }
         val index = playable.indexOfFirst { it === target }
         if (index < 0) return
+        val wasWave = QueueHolder.state.value.isWave
         if (isWave) {
-            // Волна идёт линейно и догружается по индексу: режимы сбрасываем.
+            // Волна идёт линейно и догружается по индексу: перемешивание выключаем,
+            // повтор трека начинается выключенным (повтор списка запоминаем до выхода).
             controller.shuffleModeEnabled = false
+            if (!wasWave) listRepeat = controller.repeatMode
             controller.repeatMode = Player.REPEAT_MODE_OFF
+        } else if (wasWave) {
+            // Повтор одного трека был волновым: у списков остаётся прежний выбор пользователя.
+            controller.repeatMode = listRepeat
         }
+        QueueHolder.chosenId = if (isWave) null else target.id
         QueueHolder.set(playable, index, title, isWave, source)
         val items = playable.map(PlaybackService::mediaItemOf)
         controller.setMediaItems(items, index, 0)
@@ -88,7 +108,35 @@ class PlayerController(val controller: MediaController) {
     fun next() = controller.seekToNextMediaItem()
     fun previous() = controller.seekToPreviousMediaItem()
     fun seekTo(positionMs: Long) = controller.seekTo(positionMs)
-    fun seekTo(index: Int, positionMs: Long) = controller.seekTo(index, positionMs)
+    fun seekTo(index: Int, positionMs: Long) {
+        // Выбор из очереди — осознанный: ИИ-трек не пропускаем.
+        QueueHolder.chosenId = QueueHolder.state.value.tracks.getOrNull(index)?.id
+        controller.seekTo(index, positionMs)
+    }
+
+    /**
+     * Индекс трека, на который перейдёт «Следующий»: с учётом перемешивания и
+     * повтора списка. `null` — дальше ничего нет.
+     */
+    fun nextIndex(): Int? =
+        controller.nextMediaItemIndex.takeIf { it != C.INDEX_UNSET && it != controller.currentMediaItemIndex }
+
+    /**
+     * Индексы уже сыгранных треков перед текущим, ближайший первым (до `limit`):
+     * по порядку перемешивания, если оно включено, иначе по списку.
+     */
+    fun previousIndices(limit: Int): List<Int> {
+        val timeline = controller.currentTimeline
+        val shuffle = controller.shuffleModeEnabled
+        val out = ArrayList<Int>()
+        var at = controller.currentMediaItemIndex
+        while (out.size < limit) {
+            at = timeline.getPreviousWindowIndex(at, Player.REPEAT_MODE_OFF, shuffle)
+            if (at == C.INDEX_UNSET) break
+            out += at
+        }
+        return out
+    }
 
     val isPlayingNow: Boolean get() = controller.isPlaying
     val positionMs: Long get() = controller.currentPosition.coerceAtLeast(0)

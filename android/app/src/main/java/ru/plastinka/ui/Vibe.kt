@@ -18,14 +18,26 @@ object Vibe {
     private const val MIN_SATURATION = 0.35f
     private const val GRAY_BELOW = 0.08f
 
-    /** Цвет трека волны; `fallback` — акцент темы, если данных нет. */
-    fun pick(vibe: VibeColors?, fallback: Color): Color {
+    /**
+     * Цвет трека: у трека волны — из ответа сервиса, иначе средний цвет
+     * обложки `coverRgb` (`0xRRGGBB`). `fallback` — акцент темы, если данных нет.
+     */
+    fun pick(vibe: VibeColors?, coverRgb: Int?, fallback: Color): Color {
         val color = vibe?.accent?.let(::parseHex)
             ?: vibe?.average?.let(::parseHex)
             ?: vibe?.hue?.let(::fromHue)
+            ?: coverRgb?.let { Color(0xFF000000.toInt() or (it and 0xFFFFFF)) }
             ?: return fallback
-        return lift(color)
+        return lift(color.copy(alpha = 1f))
     }
+
+    /** У трека есть собственный цвет из ответа волны (тогда обложку считать не нужно). */
+    fun hasOwnColor(vibe: VibeColors?): Boolean =
+        vibe != null && (
+            vibe.accent?.let(::parseHex) != null ||
+                vibe.average?.let(::parseHex) != null ||
+                vibe.hue?.let(::fromHue) != null
+            )
 
     /** `#RRGGBB` или `#RRGGBBAA`. */
     fun parseHex(text: String): Color? {

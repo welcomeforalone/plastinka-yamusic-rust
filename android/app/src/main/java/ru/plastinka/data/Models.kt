@@ -14,11 +14,36 @@ data class Track(
     val coverUri: String?,
     /** Цвет трека для VibeColorizer (только у порций волны). */
     val vibe: VibeColors? = null,
+    /** Громкость по EBU R128 (поле `r128`), если сервис её сообщил: для нормализации. */
+    val loudness: Loudness? = null,
+    /** Пометка `contentWarning: explicit` (ненормативная лексика): значок «E». */
+    val explicit: Boolean = false,
 ) {
     val artistNames: String get() = artists.joinToString(", ") { it.name }
     fun coverUrl(size: String = "400x400"): String? =
         coverUri?.takeIf { it.contains("%%") }
             ?.let { "https://${it.replace("%%", size)}" }
+}
+
+/** Громкость трека по EBU R128: интегральная (LUFS) и истинный пик (дБFS). */
+data class Loudness(val integrated: Double, val truePeak: Double) {
+    /**
+     * Поправка громкости, дБ: к цели в -14 LUFS, но так, чтобы пик после
+     * усиления не вышел выше -1 дБFS; в пределах от -15 до +6 дБ (как на
+     * десктопе: src/api/tracks.rs).
+     */
+    fun gainDb(): Double =
+        minOf(TARGET_LUFS - integrated, PEAK_CEILING - truePeak).coerceIn(MIN_GAIN_DB, MAX_GAIN_DB)
+
+    /** Множитель амплитуды 0,18…2. */
+    fun gainFactor(): Float = Math.pow(10.0, gainDb() / 20.0).toFloat()
+
+    companion object {
+        const val TARGET_LUFS = -14.0
+        const val PEAK_CEILING = -1.0
+        const val MIN_GAIN_DB = -15.0
+        const val MAX_GAIN_DB = 6.0
+    }
 }
 
 /** Источники цвета волны: `derivedColors.accent` → `average` → `hue`. */
@@ -91,6 +116,27 @@ data class ArtistCard(
         coverUri?.takeIf { it.contains("%%") }?.let { "https://${it.replace("%%", size)}" }
 }
 
+/** Как исполнитель сдвинулся в топе месяца. */
+enum class Trend { Up, Down, Same, New }
+
+/** Исполнитель из топа месяца: место, сдвиг и сколько его слушали (секунды). */
+data class TopArtist(
+    val card: ArtistCard,
+    val position: Int?,
+    val trend: Trend?,
+    val listenedSeconds: Long,
+)
+
+/**
+ * Страница «Топ месяца»: исполнители и треки. `plays[i]` — число прослушиваний
+ * трека `tracks[i]`; список чисел совпадает по длине с треками.
+ */
+data class MonthTop(
+    val artists: List<TopArtist>,
+    val tracks: List<Track>,
+    val plays: List<Int>,
+)
+
 /** Альбом с треками (диски склеены по порядку). */
 data class AlbumDetails(val card: AlbumCard, val tracks: List<Track>)
 
@@ -147,3 +193,33 @@ internal fun JsonObject.str(vararg keys: String): String? {
 
 /** Объект не найден: неверный идентификатор или `error` в ответе. */
 class NotFoundException : Exception("не найден")
+
+/** Тип поиска: параметр `type` запроса `/search`. */
+enum class SearchKind(val apiType: String) {
+    All("all"),
+    Track("track"),
+    Album("album"),
+    Artist("artist"),
+    Playlist("playlist"),
+}
+
+/** Лучший результат поиска. */
+sealed interface SearchBest {
+    data class TrackHit(val track: Track) : SearchBest
+    data class AlbumHit(val card: AlbumCard) : SearchBest
+    data class ArtistHit(val card: ArtistCard) : SearchBest
+    data class PlaylistHit(val card: PlaylistCard) : SearchBest
+}
+
+/** Ответ поиска: для вкладки «Всё» заполнены все списки, для типа — только его. */
+data class SearchResult(
+    val best: SearchBest? = null,
+    val tracks: List<Track> = emptyList(),
+    val albums: List<AlbumCard> = emptyList(),
+    val artists: List<ArtistCard> = emptyList(),
+    val playlists: List<PlaylistCard> = emptyList(),
+    /** Есть следующая страница (только для одного типа). */
+    val hasNext: Boolean = false,
+) {
+    val isEmpty: Boolean get() = tracks.isEmpty() && albums.isEmpty() && artists.isEmpty() && playlists.isEmpty()
+}

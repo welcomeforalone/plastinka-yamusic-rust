@@ -2,6 +2,7 @@ package ru.plastinka.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,11 +22,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import ru.plastinka.R
@@ -43,17 +46,13 @@ fun LikesTab(library: LibraryUi, model: AppViewModel, player: PlayerController?,
     val tracks = library.tracks
 
     Box(Modifier.fillMaxSize()) {
-        Glow(
-            380.dp,
-            Modifier.align(Alignment.TopStart).offset(x = (-120).dp, y = (-130).dp),
-            alpha = 0.5f,
-        )
+        DetailGlow()
         LazyColumn(Modifier.fillMaxSize()) {
-            item { BackBar(onBack) }
+            item { BackBar(onBack, DETAIL_BAR_HEIGHT) }
             item {
                 TracksHeader(
                     cover = {
-                        GradientHeart(116.dp, 22.dp, 52.dp)
+                        GradientHeart(116.dp, 22.dp, 52.dp, shadow = true)
                     },
                     title = "Мне нравится",
                     totalMs = tracks.sumOf { it.durationMs ?: 0L },
@@ -100,13 +99,37 @@ fun LikesTab(library: LibraryUi, model: AppViewModel, player: PlayerController?,
     }
 }
 
+/** Высота верхней панели у экранов-списков с большой обложкой (макет 06: 56 dp). */
+val DETAIL_BAR_HEIGHT = 56.dp
+
+/** Свечение акцентом у левого верхнего угла экрана-списка (макет 06: круг 380 dp, центр в (70, 30)). */
+@Composable
+fun BoxScope.DetailGlow() {
+    // Контейнер лежит под строкой состояния (40 dp в макете), поэтому сдвиг на 40 dp выше.
+    Glow(
+        380.dp,
+        Modifier.align(Alignment.TopStart).offset(x = (-120).dp, y = (-200).dp),
+        alpha = 0.5f,
+    )
+}
+
+/** Тень большой обложки в шапке списка (макет: 0 8 24, чёрный 35 %). */
+fun Modifier.coverShadow(radius: Dp): Modifier = shadow(
+    12.dp,
+    RoundedCornerShape(radius),
+    clip = false,
+    ambientColor = Color.Transparent,
+    spotColor = Color.Black.copy(alpha = 0.35f),
+)
+
 /** Плитка с сердцем на градиенте акцента. */
 @Composable
-fun GradientHeart(size: androidx.compose.ui.unit.Dp, radius: androidx.compose.ui.unit.Dp, icon: androidx.compose.ui.unit.Dp) {
+fun GradientHeart(size: Dp, radius: Dp, icon: Dp, shadow: Boolean = false) {
     val accent = Pl.accent
     Box(
         Modifier
             .size(size)
+            .then(if (shadow) Modifier.coverShadow(radius) else Modifier)
             .clip(RoundedCornerShape(radius))
             .background(
                 Brush.linearGradient(
@@ -146,7 +169,7 @@ fun TracksHeader(
     /** Своя подпись с нажимаемыми частями; перекрывает `subtitle`. */
     subtitleContent: (@Composable () -> Unit)? = null,
 ) {
-    Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 14.dp)) {
+    Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 14.dp)) {
         cover()
         Spacer(Modifier.height(18.dp))
         PlText(title, PlType.hero)

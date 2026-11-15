@@ -10,6 +10,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.FormBody
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -124,6 +125,27 @@ class YandexApi(private val http: OkHttpClient) {
         }
     }
 
+    /**
+     * «Не нравится» треку: запись в аккаунт. Зовёт только Slopless и только
+     * после отдельного согласия пользователя. Токен — только в заголовке;
+     * ошибка — исключение с кодом ответа (без токена и адреса).
+     */
+    suspend fun addDisliked(token: String, uid: Long, trackId: String) {
+        withContext(Dispatchers.IO) {
+            if (!isNumericId(trackId)) return@withContext
+            val body = FormBody.Builder().add("track-ids", trackId).build()
+            http.newCall(
+                Request.Builder()
+                    .url("$API_BASE/users/$uid/dislikes/tracks/add-multiple")
+                    .header("Authorization", "OAuth $token")
+                    .header("X-Yandex-Music-Client", MUSIC_CLIENT)
+                    .post(body).build(),
+            ).execute().use { resp ->
+                if (!resp.isSuccessful) throw IllegalStateException("не нравится: ответ ${resp.code}")
+            }
+        }
+    }
+
     // -------------------------------------------------------------- треки
 
     /** Метаданные треков пачками (сервис отвечает 400 на плохой ID — режем пополам). */
@@ -168,14 +190,62 @@ class YandexApi(private val http: OkHttpClient) {
         }
     }
 
-    /** Поиск по трекам. */
-    suspend fun searchTracks(token: String, query: String, page: Int = 0): List<Track> =
+    /**
+     * Поиск `GET /search`: вкладка «Всё» (`type=all`) или один тип со страницами.
+     * Страница не больше 99 (дальше сервер отвечает 400), пустой запрос не шлём.
+     */
+    suspend fun search(token: String, kind: SearchKind, query: String, page: Int = 0): SearchResult =
         withContext(Dispatchers.IO) {
-            val obj = get(token, "$API_BASE/search?type=track&page=$page&text=${urlEncode(query)}")
-            obj["result"]?.jsonObject?.get("tracks")?.jsonObject?.get("results")?.jsonArray
-                ?.mapNotNull(::parseTrack)
-                .orEmpty()
+            if (query.isBlank() || page !in 0..SEARCH_MAX_PAGE) return@withContext SearchResult()
+            val url = "$API_BASE/search?type=${kind.apiType}&page=$page&nocorrect=false" +
+                "&text=${urlEncode(query)}"
+            parseSearch(get(token, url), kind, page)
         }
+
+    /**
+     * Разбор ответа поиска. Нет `result` или он строка (`"text-is-empty"`) —
+     * пустой результат; битый элемент списка и неизвестный тип лучшего
+     * результата пропускаются, остальное остаётся.
+     */
+    internal fun parseSearch(obj: JsonObject, kind: SearchKind, page: Int): SearchResult {
+        val result = obj["result"] as? JsonObject ?: return SearchResult()
+        fun block(name: String): JsonObject? = result[name] as? JsonObject
+        fun items(name: String): JsonArray = (block(name)?.get("results") as? JsonArray) ?: JsonArray(emptyList())
+        val tracks = items("tracks")
+        val albums = items("albums")
+        val artists = items("artists")
+        val playlists = items("playlists")
+        val best = (result["best"] as? JsonObject)?.let { b ->
+            val r = b["result"] ?: return@let null
+            when (b.str("type")) {
+                "track" -> parseTrackSafe(r)?.let { SearchBest.TrackHit(it) }
+                "album" -> parseAlbumCard(r)?.let { SearchBest.AlbumHit(it) }
+                "artist" -> parseArtistCard(r)?.let { SearchBest.ArtistHit(it) }
+                "playlist" -> parsePlaylistCard(r, liked = false)?.let { SearchBest.PlaylistHit(it) }
+                else -> null
+            }
+        }
+        // Блок выбранного типа: общее число и размер страницы для подгрузки.
+        val own = block(kind.apiType + "s")
+        val total = own?.str("total")?.toIntOrNull() ?: 0
+        val perPage = own?.str("perPage")?.toIntOrNull() ?: 0
+        val rawCount = when (kind) {
+            SearchKind.Track -> tracks.size
+            SearchKind.Album -> albums.size
+            SearchKind.Artist -> artists.size
+            SearchKind.Playlist -> playlists.size
+            SearchKind.All -> 0
+        }
+        return SearchResult(
+            best = best,
+            tracks = tracks.mapNotNull { parseTrackSafe(it) },
+            albums = albums.mapNotNull(::parseAlbumCard),
+            artists = artists.mapNotNull(::parseArtistCard),
+            playlists = playlists.mapNotNull { parsePlaylistCard(it, liked = false) },
+            hasNext = kind != SearchKind.All && rawCount > 0 && perPage > 0 &&
+                (page + 1) * perPage < total && page < SEARCH_MAX_PAGE,
+        )
+    }
 
     // -------------------------------------------------------------- поток
 
@@ -184,18 +254,23 @@ class YandexApi(private val http: OkHttpClient) {
      * неудаче — запасной путь `download-info` (MP3, MD5-подпись). Как в
      * десктопном клиенте.
      */
-    suspend fun streamUrl(token: String, trackId: String, lossless: Boolean = false): StreamResult =
+    suspend fun streamUrl(
+        token: String,
+        trackId: String,
+        quality: AudioQuality = AudioQuality.Normal,
+    ): StreamResult =
         withContext(Dispatchers.IO) {
-            val primary = fileInfoUrl(token, trackId, lossless)
+            val primary = fileInfoUrl(token, trackId, quality)
             if (primary is StreamResult.Url) return@withContext primary
             fallbackMp3Url(token, trackId).takeIf { it is StreamResult.Url || it == StreamResult.Unavailable }
                 ?: primary
         }
 
-    private fun fileInfoUrl(token: String, trackId: String, lossless: Boolean): StreamResult {
+    private fun fileInfoUrl(token: String, trackId: String, audio: AudioQuality): StreamResult {
         val ts = (System.currentTimeMillis() / 1000).toString()
-        val quality = if (lossless) "lossless" else "nq"
-        val codecs = if (lossless) "flac,flac-mp4,aac-mp4,aac,mp3" else "aac-mp4,aac,mp3"
+        // Один и тот же `quality` и `codecs` идут и в подпись, и в запрос.
+        val quality = audio.level
+        val codecs = audio.codecs
         val message = "$ts$trackId$quality${codecs.replace(",", "")}$TRANSPORT"
         val mac = Mac.getInstance("HmacSHA256").apply {
             init(SecretKeySpec(SIGN_KEY.toByteArray(), "HmacSHA256"))
@@ -262,7 +337,7 @@ class YandexApi(private val http: OkHttpClient) {
 
     /** Блокирующая версия для ResolvingDataSource (открывается в потоке загрузчика). */
     fun streamUrlBlocking(token: String, trackId: String): StreamResult =
-        kotlinx.coroutines.runBlocking { streamUrl(token, trackId) }
+        kotlinx.coroutines.runBlocking { streamUrl(token, trackId, Prefs.quality) }
 
     // -------------------------------------------------------------- волна
 
@@ -274,10 +349,13 @@ class YandexApi(private val http: OkHttpClient) {
         val tracks: List<Track>,
     )
 
-    /** Запустить «Мою волну» и получить первую порцию. */
-    suspend fun startWave(token: String): WaveBatch = withContext(Dispatchers.IO) {
+    /**
+     * Запустить «Мою волну» и получить первую порцию. `seeds` — из выбранных
+     * настроек волны ([WaveSettings.seeds]); без них обычная «Моя волна».
+     */
+    suspend fun startWave(token: String, seeds: List<String> = listOf(WAVE_SEED)): WaveBatch = withContext(Dispatchers.IO) {
         val body = kotlinx.serialization.json.buildJsonObject {
-            put("seeds", kotlinx.serialization.json.buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive(WAVE_SEED)) })
+            put("seeds", kotlinx.serialization.json.buildJsonArray { seeds.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })
             put("queue", kotlinx.serialization.json.buildJsonArray {})
             put("includeTracksInResponse", kotlinx.serialization.json.JsonPrimitive(true))
             put("includeWaveModel", kotlinx.serialization.json.JsonPrimitive(true))
@@ -285,6 +363,12 @@ class YandexApi(private val http: OkHttpClient) {
         }
         val text = post(token, "$API_BASE/rotor/session/new", body)
         parseBatch(text, null) ?: throw IllegalStateException("волна не началась")
+    }
+
+    /** Занятия для настроек волны: станции типа `activity` из `GET /rotor/stations/list`. */
+    suspend fun waveActivities(token: String): List<WaveActivity> = withContext(Dispatchers.IO) {
+        val obj = get(token, "$API_BASE/rotor/stations/list?language=ru")
+        WaveSettings.parseActivities(obj) ?: throw IllegalStateException("неожиданный ответ")
     }
 
     /** Следующая порция. `null` — сессия протухла: нужна новая. */
@@ -343,30 +427,113 @@ class YandexApi(private val http: OkHttpClient) {
 
     // ------------------------------------------------------- подборки лендинга
 
-    /** «Плейлист дня», «Дежавю», «Премьера» — блок personal-playlists лендинга. */
+    /**
+     * «Плейлист дня», «Дежавю», «Премьера»: `GET /landing-blocks/personal-playlists`.
+     * Новый адрес отвечает без обёртки `result` (как на десктопе).
+     */
     suspend fun personalPlaylists(token: String): List<ru.plastinka.data.GeneratedPlaylist> =
         withContext(Dispatchers.IO) {
-            val obj = get(token, "$API_BASE/landing3?blocks=personalplaylists")
-            obj["result"]?.jsonObject?.get("blocks")?.jsonArray
-                ?.firstOrNull { it.jsonObject["type"]?.jsonPrimitive?.content == "personal-playlists" }
-                ?.jsonObject?.get("entities")?.jsonArray
-                ?.mapNotNull { entity ->
-                    // Плейлист спрятан в data.data.
-                    val pl = entity.jsonObject["data"]?.jsonObject?.get("data")?.jsonObject
-                        ?: return@mapNotNull null
-                    ru.plastinka.data.GeneratedPlaylist(
-                        uid = pl["uid"]?.jsonPrimitive?.content?.toLongOrNull()
-                            ?: return@mapNotNull null,
-                        kind = pl["kind"]?.jsonPrimitive?.content?.toLongOrNull()
-                            ?: return@mapNotNull null,
-                        title = pl["title"]?.jsonPrimitive?.content ?: return@mapNotNull null,
-                        coverUri = pl["cover"]?.jsonObject?.get("uri")?.jsonPrimitive?.content
-                            ?: pl["ogImage"]?.jsonPrimitive?.content,
-                        trackCount = pl["trackCount"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
-                    )
-                }
-                .orEmpty()
+            val obj = get(token, "$API_BASE/landing-blocks/personal-playlists?count=10")
+            parsePersonalPlaylists(obj)
         }
+
+    /**
+     * Разбор `{"items":[{"data":{"playlist":…,"description":…}}]}`; на случай
+     * обёртки `result` смотрим и в неё. Элементы без `uid`, `kind` или названия
+     * пропускаются, остальное разбираем терпимо.
+     */
+    internal fun parsePersonalPlaylists(root: JsonObject): List<ru.plastinka.data.GeneratedPlaylist> {
+        val body = root["result"] as? JsonObject ?: root
+        return (body["items"] as? JsonArray).orEmpty().mapNotNull { item ->
+            val pl = ((item as? JsonObject)?.get("data") as? JsonObject)?.get("playlist") as? JsonObject
+                ?: return@mapNotNull null
+            fun text(key: String) = (pl[key] as? JsonPrimitive)?.content
+            // Владелец бывает и в `owner.uid`, обложка-мозаика — в `cover.itemsUri` (как на десктопе).
+            val ownerUid = ((pl["owner"] as? JsonObject)?.get("uid") as? JsonPrimitive)?.content
+            val cover = pl["cover"] as? JsonObject
+            val mosaic = (cover?.get("itemsUri") as? JsonArray)
+                ?.firstNotNullOfOrNull { (it as? JsonPrimitive)?.content?.takeIf { uri -> uri.contains("%%") } }
+            ru.plastinka.data.GeneratedPlaylist(
+                uid = (text("uid") ?: ownerUid)?.toLongOrNull() ?: return@mapNotNull null,
+                kind = text("kind")?.toLongOrNull() ?: return@mapNotNull null,
+                title = text("title") ?: return@mapNotNull null,
+                coverUri = (cover?.get("uri") as? JsonPrimitive)?.content?.takeIf { it.contains("%%") }
+                    ?: mosaic
+                    ?: text("ogImage"),
+                trackCount = text("trackCount")?.toIntOrNull() ?: 0,
+            )
+        }
+    }
+
+    // ------------------------------------------------------------ топ месяца
+
+    /** Исполнители топа месяца: `GET /personal/top/artists/month` (ответ без обёртки `result`). */
+    suspend fun topArtists(token: String): List<TopArtist> = withContext(Dispatchers.IO) {
+        parseTopArtists(get(token, "$API_BASE/personal/top/artists/month"))
+    }
+
+    /**
+     * Страница «Топ месяца»: исполнители и треки. Ошибка любого из двух запросов —
+     * ошибка страницы. Треки догружаются по идентификаторам в порядке топа; не
+     * догрузившийся пропускается вместе со своим числом прослушиваний.
+     */
+    suspend fun monthTop(token: String): MonthTop = withContext(Dispatchers.IO) {
+        val artists = parseTopArtists(get(token, "$API_BASE/personal/top/artists/month"))
+        val entries = parseTopTrackEntries(get(token, "$API_BASE/personal/top/tracks/month"))
+        val loaded = tracks(token, entries.map { it.first }).associateBy { it.id }
+        val tracks = mutableListOf<Track>()
+        val plays = mutableListOf<Int>()
+        for ((id, count) in entries) {
+            val track = loaded[id] ?: continue
+            tracks += track
+            plays += count
+        }
+        MonthTop(artists, tracks, plays)
+    }
+
+    /**
+     * Разбор `{"artists":[{"artist":…,"listenTimeSeconds":…,"top":{"position":…,"progress":…}}]}`.
+     * Элемент без годной карточки исполнителя пропускается, остальное терпимо.
+     */
+    internal fun parseTopArtists(root: JsonObject): List<TopArtist> {
+        val body = root["result"] as? JsonObject ?: root
+        return (body["artists"] as? JsonArray).orEmpty().mapNotNull { item ->
+            val obj = item as? JsonObject ?: return@mapNotNull null
+            val card = parseArtistCard(obj["artist"] ?: return@mapNotNull null) ?: return@mapNotNull null
+            val top = obj["top"] as? JsonObject
+            TopArtist(
+                card = card,
+                position = (top?.get("position") as? JsonPrimitive)?.content?.toIntOrNull(),
+                trend = when ((top?.get("progress") as? JsonPrimitive)?.content) {
+                    "up" -> Trend.Up
+                    "down" -> Trend.Down
+                    "same" -> Trend.Same
+                    "new" -> Trend.New
+                    else -> null
+                },
+                listenedSeconds = ((obj["listenTimeSeconds"] as? JsonPrimitive)?.content?.toLongOrNull() ?: 0L)
+                    .coerceAtLeast(0L),
+            )
+            // Повтор исполнителя сломал бы ключи списка: оставляем первое вхождение.
+        }.distinctBy { it.card.id }
+    }
+
+    /**
+     * Разбор `{"tracks":[{"track":{"track":{"id":…}},"playCount":8}]}`: пары
+     * «идентификатор, число прослушиваний». Элемент без годного числового
+     * идентификатора пропускается, нет `playCount` — 0.
+     */
+    internal fun parseTopTrackEntries(root: JsonObject): List<Pair<String, Int>> {
+        val body = root["result"] as? JsonObject ?: root
+        return (body["tracks"] as? JsonArray).orEmpty().mapNotNull { item ->
+            val obj = item as? JsonObject ?: return@mapNotNull null
+            val inner = (obj["track"] as? JsonObject)?.get("track") as? JsonObject
+            val id = (inner?.get("id") as? JsonPrimitive)?.content?.takeIf(::isNumericId)
+                ?: return@mapNotNull null
+            val count = (obj["playCount"] as? JsonPrimitive)?.content?.toIntOrNull()?.coerceAtLeast(0) ?: 0
+            id to count
+        }
+    }
 
     /** Треки подборки: `GET /users/{uid}/playlists/{kind}`. */
     suspend fun playlistTracks(token: String, ownerUid: Long, kind: Long): List<Track> =
@@ -475,7 +642,7 @@ class YandexApi(private val http: OkHttpClient) {
             .sortedByDescending { it.str("timestamp") ?: "" }
             .map { (it[wrapper] as? JsonObject) ?: it }
 
-    private fun parseTrackSafe(element: kotlinx.serialization.json.JsonElement): Track? =
+    internal fun parseTrackSafe(element: kotlinx.serialization.json.JsonElement): Track? =
         try {
             parseTrack(element)
         } catch (_: Exception) {
@@ -485,7 +652,7 @@ class YandexApi(private val http: OkHttpClient) {
     private fun hasError(obj: JsonObject): Boolean =
         obj["error"].let { it != null && it !is kotlinx.serialization.json.JsonNull }
 
-    private fun parseAlbumCard(element: kotlinx.serialization.json.JsonElement): AlbumCard? {
+    internal fun parseAlbumCard(element: kotlinx.serialization.json.JsonElement): AlbumCard? {
         val a = element as? JsonObject ?: return null
         if (hasError(a)) return null
         val id = a.str("id")?.takeIf(::isNumericId) ?: return null
@@ -510,7 +677,7 @@ class YandexApi(private val http: OkHttpClient) {
         )
     }
 
-    private fun parseArtistCard(element: kotlinx.serialization.json.JsonElement): ArtistCard? {
+    internal fun parseArtistCard(element: kotlinx.serialization.json.JsonElement): ArtistCard? {
         val a = element as? JsonObject ?: return null
         if (hasError(a)) return null
         val id = a.str("id")?.takeIf(::isNumericId) ?: return null
@@ -646,7 +813,7 @@ class YandexApi(private val http: OkHttpClient) {
     }
 
     /** Плейлист из списка: элемент либо сам плейлист, либо обёртка `{playlist}`. */
-    private fun parsePlaylistCard(element: kotlinx.serialization.json.JsonElement, liked: Boolean): PlaylistCard? {
+    internal fun parsePlaylistCard(element: kotlinx.serialization.json.JsonElement, liked: Boolean): PlaylistCard? {
         val outer = (element as? JsonObject) ?: return null
         val pl = (outer["playlist"] as? JsonObject) ?: outer
         val uid = (pl.str("uid") ?: pl.str("owner", "uid"))?.toLongOrNull() ?: return null
@@ -765,7 +932,17 @@ class YandexApi(private val http: OkHttpClient) {
             available = t["available"]?.jsonPrimitive?.content != "false",
             coverUri = album?.get("coverUri")?.jsonPrimitive?.content
                 ?: t["coverUri"]?.jsonPrimitive?.content,
+            loudness = parseLoudness(t["r128"]),
+            explicit = (t["contentWarning"] as? JsonPrimitive)?.content == "explicit",
         )
+    }
+
+    /** `r128`: `{"i": -9.4, "tp": 0.2}`; без обоих конечных чисел — `null`. */
+    private fun parseLoudness(element: kotlinx.serialization.json.JsonElement?): Loudness? {
+        val obj = element as? JsonObject ?: return null
+        fun number(key: String): Double? =
+            (obj[key] as? JsonPrimitive)?.content?.toDoubleOrNull()?.takeIf { it.isFinite() }
+        return Loudness(number("i") ?: return null, number("tp") ?: return null)
     }
 
     companion object {
@@ -786,6 +963,9 @@ class YandexApi(private val http: OkHttpClient) {
         /** Сколько альбомов отдаёт `brief-info` и сколько страниц `direct-albums` читаем. */
         private const val BRIEF_ALBUMS = 9
         private const val MAX_ALBUM_PAGES = 10
+
+        /** Последняя страница поиска: на больших номерах сервер отвечает 400. */
+        const val SEARCH_MAX_PAGE = 99
 
         /** Откуда играем (поле `from`): наш клиент, без личных данных. */
         private const val PLAY_FROM = "plastinka"
@@ -808,10 +988,14 @@ class YandexApi(private val http: OkHttpClient) {
             "oauth.yandex.ru", "oauth.yandex.com", "ya.ru", "yandex.ru", "yandex.com",
         )
 
-        /** Только https и только хосты Яндекса. */
+        /**
+         * Только https и только хосты Яндекса. Хост берётся разбором адреса,
+         * а не подстрокой: `https://чужой.хост?x=.yandex.net` не проходит.
+         */
         fun allowedUrl(url: String): Boolean {
-            if (!url.startsWith("https://")) return false
-            val host = url.removePrefix("https://").substringBefore('/').lowercase()
+            val parsed = url.toHttpUrlOrNull() ?: return false
+            if (!parsed.isHttps) return false
+            val host = parsed.host.lowercase()
             return host.endsWith(".yandex.net") || host.endsWith(".yandex.ru")
         }
 

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -35,6 +36,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import ru.plastinka.R
@@ -42,14 +44,15 @@ import ru.plastinka.data.AccountInfo
 
 private val SCREEN_PADDING = 24.dp
 
-/** Общая подложка ворот: чёрный фон и свечение акцентом сверху. */
+/** Общая подложка ворот: чёрный фон и свечение акцентом сверху (glowTop — верх круга от края экрана). */
 @Composable
-private fun GateBackground(glowAlpha: Float, content: @Composable () -> Unit) {
+private fun GateBackground(glowAlpha: Float, glowTop: Dp = (-190).dp, content: @Composable () -> Unit) {
     Box(Modifier.fillMaxSize().background(Pl.bg)) {
+        // Макеты 01 и 02: круг 320 dp, центр выше верхнего края экрана.
         Glow(
-            size = 420.dp,
+            size = 320.dp,
             alpha = glowAlpha,
-            modifier = Modifier.align(Alignment.TopCenter),
+            modifier = Modifier.align(Alignment.TopCenter).offset(y = glowTop),
         )
         content()
     }
@@ -310,7 +313,7 @@ fun SubscriptionRequiredScreen(
     onLogout: () -> Unit,
 ) {
     val context = LocalContext.current
-    GateBackground(glowAlpha = 0.4f) {
+    GateBackground(glowAlpha = 0.4f, glowTop = (-210).dp) {
         Column(
             Modifier
                 .fillMaxSize()

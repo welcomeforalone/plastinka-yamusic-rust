@@ -1,5 +1,6 @@
 package ru.plastinka.ui
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.lazy.LazyColumn
@@ -33,28 +34,31 @@ fun PlaylistScreen(
     val tracks = state?.data.orEmpty()
     val error = state?.error
     val coverUrl = coverUri?.takeIf { it.contains("%%") }?.let { "https://${it.replace("%%", "400x400")}" }
-    Column(Modifier.fillMaxSize()) {
-        BackBar(onBack)
-        LazyColumn(Modifier.fillMaxSize()) {
-            item {
-                TracksHeader(
-                    cover = { Cover(coverUrl, key, 116.dp, 22.dp) },
-                    title = title,
-                    totalMs = tracks.sumOf { it.durationMs ?: 0L },
-                    count = tracks.size,
-                    onPlay = { player?.playQueue(tracks, 0, title, source = source) },
-                    onShuffle = { player?.playQueue(tracks.shuffled(), 0, title, source = source) },
-                )
-            }
-            when {
-                error != null -> item { ErrorState(error) { model.loadPlaylist(uid, kind, force = true) } }
-                state == null || state.data == null -> item { LoadingBox() }
-                tracks.isEmpty() -> item {
-                    Centered {
-                        PlText("В плейлисте пока нет треков", PlType.bodyStrong, textAlign = TextAlign.Center)
-                    }
+    Box(Modifier.fillMaxSize()) {
+        DetailGlow()
+        Column(Modifier.fillMaxSize()) {
+            BackBar(onBack, DETAIL_BAR_HEIGHT)
+            LazyColumn(Modifier.fillMaxSize()) {
+                item {
+                    TracksHeader(
+                        cover = { Cover(coverUrl, key, 116.dp, 22.dp, Modifier.coverShadow(22.dp)) },
+                        title = title,
+                        totalMs = tracks.sumOf { it.durationMs ?: 0L },
+                        count = tracks.size,
+                        onPlay = { player?.playQueue(tracks, 0, title, source = source) },
+                        onShuffle = { player?.playQueue(tracks.shuffled(), 0, title, source = source) },
+                    )
                 }
-                else -> trackItems(tracks, playing, player, model, title, source)
+                when {
+                    error != null -> item { ErrorState(error) { model.loadPlaylist(uid, kind, force = true) } }
+                    state == null || state.data == null -> item { LoadingBox() }
+                    tracks.isEmpty() -> item {
+                        Centered {
+                            PlText("В плейлисте пока нет треков", PlType.bodyStrong, textAlign = TextAlign.Center)
+                        }
+                    }
+                    else -> trackItems(tracks, playing, player, model, title, source)
+                }
             }
         }
     }
