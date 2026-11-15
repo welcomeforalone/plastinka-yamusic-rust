@@ -41,6 +41,66 @@ data class GeneratedPlaylist(
         coverUri?.takeIf { it.contains("%%") }?.let { "https://${it.replace("%%", size)}" }
 }
 
+/** Плейлист пользователя: свой или понравившийся чужой. */
+data class PlaylistCard(
+    /** Владелец плейлиста. */
+    val uid: Long,
+    val kind: Long,
+    val title: String,
+    val coverUri: String?,
+    val trackCount: Int,
+    /** `true` — чужой, отмеченный «нравится». */
+    val liked: Boolean = false,
+) {
+    fun coverUrl(size: String = "200x200"): String? =
+        coverUri?.takeIf { it.contains("%%") }?.let { "https://${it.replace("%%", size)}" }
+}
+
+enum class AlbumKind(val title: String) {
+    Album("Альбом"),
+    Single("Сингл"),
+    Compilation("Сборник"),
+}
+
+/** Альбом в списке или в шапке. */
+data class AlbumCard(
+    val id: String,
+    val title: String,
+    val version: String?,
+    val year: Int?,
+    val kind: AlbumKind,
+    val artists: List<ArtistRef>,
+    val coverUri: String?,
+    val trackCount: Int,
+) {
+    /** Название с версией: «Название (Deluxe)». */
+    val displayTitle: String get() = if (version != null) "$title ($version)" else title
+    val artistNames: String get() = artists.joinToString(", ") { it.name }
+    fun coverUrl(size: String = "300x300"): String? =
+        coverUri?.takeIf { it.contains("%%") }?.let { "https://${it.replace("%%", size)}" }
+}
+
+/** Исполнитель в списке или в шапке. */
+data class ArtistCard(
+    val id: String,
+    val name: String,
+    val coverUri: String?,
+    val albumsCount: Int,
+) {
+    fun coverUrl(size: String = "300x300"): String? =
+        coverUri?.takeIf { it.contains("%%") }?.let { "https://${it.replace("%%", size)}" }
+}
+
+/** Альбом с треками (диски склеены по порядку). */
+data class AlbumDetails(val card: AlbumCard, val tracks: List<Track>)
+
+/** Страница исполнителя: шапка, популярные треки, альбомы. */
+data class ArtistDetails(
+    val card: ArtistCard,
+    val popular: List<Track>,
+    val albums: List<AlbumCard>,
+)
+
 data class ArtistRef(val id: String?, val name: String)
 
 data class AccountInfo(
@@ -78,5 +138,12 @@ internal fun JsonObject.str(vararg keys: String): String? {
     for (key in keys) {
         node = (node as? JsonObject)?.get(key) ?: return null
     }
-    return node?.let { el -> (el as? kotlinx.serialization.json.JsonPrimitive)?.content }
+    // JsonNull тоже примитив с текстом «null»: это отсутствие значения.
+    return node?.let { el ->
+        (el as? kotlinx.serialization.json.JsonPrimitive)
+            ?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.content
+    }
 }
+
+/** Объект не найден: неверный идентификатор или `error` в ответе. */
+class NotFoundException : Exception("не найден")

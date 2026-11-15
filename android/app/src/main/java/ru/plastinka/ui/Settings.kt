@@ -183,22 +183,6 @@ private fun SettingsMain(
     }
 }
 
-/** Верхняя панель подэкрана: стрелка назад. */
-@Composable
-private fun BackBar(onBack: () -> Unit) {
-    Box(
-        Modifier.fillMaxWidth().height(52.dp).padding(start = 8.dp),
-        contentAlignment = Alignment.CenterStart,
-    ) {
-        Box(
-            Modifier.size(44.dp).clip(CircleShape).clickable(onClick = onBack),
-            contentAlignment = Alignment.Center,
-        ) {
-            PlIcon(R.drawable.ic_back, 24.dp, Pl.text)
-        }
-    }
-}
-
 @Composable
 private fun SectionTitle(text: String) {
     PlText(text, PlType.title, modifier = Modifier.padding(horizontal = 20.dp))

@@ -58,15 +58,25 @@ class PlayerController(val controller: MediaController) {
         startIndex: Int,
         title: String,
         isWave: Boolean = false,
+        /** Откуда очередь (альбом, плейлист…): попадает в локальный журнал прослушиваний. */
+        source: ru.plastinka.data.HistoryContext? = null,
     ) {
+        // Пустой список или индекс вне списка: текущую очередь не трогаем.
+        if (tracks.getOrNull(startIndex) == null) return
+        // Недоступные треки в очередь не попадают; индекс пересчитывается:
+        // стартуем с нажатого трека или с ближайшего доступного после него.
+        val target = tracks.drop(startIndex).firstOrNull { it.available } ?: return
+        val playable = tracks.filter { it.available }
+        val index = playable.indexOfFirst { it === target }
+        if (index < 0) return
         if (isWave) {
             // Волна идёт линейно и догружается по индексу: режимы сбрасываем.
             controller.shuffleModeEnabled = false
             controller.repeatMode = Player.REPEAT_MODE_OFF
         }
-        QueueHolder.set(tracks, startIndex, title, isWave)
-        val items = tracks.map(PlaybackService::mediaItemOf)
-        controller.setMediaItems(items, startIndex, 0)
+        QueueHolder.set(playable, index, title, isWave, source)
+        val items = playable.map(PlaybackService::mediaItemOf)
+        controller.setMediaItems(items, index, 0)
         controller.prepare()
         controller.play()
     }

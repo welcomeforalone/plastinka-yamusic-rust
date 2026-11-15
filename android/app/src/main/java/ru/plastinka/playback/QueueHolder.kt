@@ -2,6 +2,7 @@ package ru.plastinka.playback
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import ru.plastinka.data.HistoryContext
 import ru.plastinka.data.Track
 
 /** Очередь воспроизведения, общая для UI и сервиса. */
@@ -14,6 +15,8 @@ object QueueHolder {
         val title: String = "",
         /** Очередь — «Моя волна»: сервис шлёт события и догружает порции. */
         val isWave: Boolean = false,
+        /** Откуда очередь: для локального журнала прослушиваний. */
+        val context: HistoryContext = HistoryContext.Other(""),
     )
 
     private val _state = MutableStateFlow(State())
@@ -22,8 +25,16 @@ object QueueHolder {
     private val _likes = MutableStateFlow<Set<String>>(emptySet())
     val likedIds: StateFlow<Set<String>> = _likes
 
-    fun set(tracks: List<Track>, startIndex: Int, title: String, isWave: Boolean = false) {
-        _state.value = State(tracks, startIndex, title, isWave)
+    fun set(
+        tracks: List<Track>,
+        startIndex: Int,
+        title: String,
+        isWave: Boolean = false,
+        source: HistoryContext? = null,
+    ) {
+        // Источник не назван: волна или просто подпись очереди.
+        val context = source ?: if (isWave) HistoryContext.Wave else HistoryContext.Other(title)
+        _state.value = State(tracks, startIndex, title, isWave, context)
     }
 
     /** Добавить догруженную порцию волны в конец очереди. */

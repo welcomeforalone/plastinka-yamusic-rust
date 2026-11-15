@@ -114,7 +114,7 @@ private fun MainScreen(library: LibraryUi, model: AppViewModel) {
                 when (tab) {
                     0 -> WaveTab(model, player, onOpenPlayer = { showPlayer = true })
                     1 -> SearchTab(model, player)
-                    2 -> LikesTab(library, model, player)
+                    2 -> CollectionTab(library, model, player, onOpenSettings = { tab = 3 })
                     else -> SettingsScreen(library, model)
                 }
             }

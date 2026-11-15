@@ -10,8 +10,14 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -254,5 +260,99 @@ fun Cover(
                 contentScale = androidx.compose.ui.layout.ContentScale.Crop,
             )
         }
+    }
+}
+
+/** Верхняя панель подэкрана: стрелка назад. */
+@Composable
+fun BackBar(onBack: () -> Unit) {
+    Box(
+        Modifier.fillMaxWidth().height(52.dp).padding(start = 8.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Box(
+            Modifier.size(44.dp).clip(CircleShape).clickable(onClick = onBack),
+            contentAlignment = Alignment.Center,
+        ) {
+            PlIcon(R.drawable.ic_back, 24.dp, Pl.text)
+        }
+    }
+}
+
+/** Строка списка: обложка 48 (радиус 8 — квадрат, 24 — круг), название и необязательная подпись. */
+@Composable
+fun MediaRow(
+    coverUrl: String?,
+    seed: String,
+    radius: Dp,
+    title: String,
+    subtitle: String?,
+    onClick: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().height(64.dp).clickable(onClick = onClick).padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Cover(coverUrl, seed, 48.dp, radius)
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            PlText(title, PlType.body, maxLines = 1)
+            if (subtitle != null) PlText(subtitle, PlType.secondary, Pl.text2, maxLines = 1)
+        }
+    }
+}
+
+/**
+ * Плитка: квадратная обложка с радиусом 16 на всю ширину `modifier`, под ней
+ * название (`secondaryStrong`) и подпись (`caption`).
+ */
+@Composable
+fun MediaTile(
+    coverUrl: String?,
+    seed: String,
+    title: String,
+    subtitle: String?,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val shape = RoundedCornerShape(16.dp)
+    Column(modifier.clip(shape).clickable(onClick = onClick), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(shape).background(coverPlaceholder(seed), shape)) {
+            if (coverUrl != null) {
+                AsyncImage(
+                    model = coverUrl,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                )
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        PlText(title, PlType.secondaryStrong, maxLines = 1)
+        if (!subtitle.isNullOrEmpty()) PlText(subtitle, PlType.caption, Pl.text3, maxLines = 1)
+    }
+}
+
+@Composable
+fun Centered(content: @Composable () -> Unit) {
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 48.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) { content() }
+}
+
+@Composable
+fun LoadingBox() {
+    Centered { CircularProgressIndicator(Modifier.size(28.dp), color = Pl.accent, strokeWidth = 2.dp) }
+}
+
+/** Ошибка загрузки: понятный текст и «Повторить». */
+@Composable
+fun ErrorState(message: String, onRetry: () -> Unit) {
+    Centered {
+        PlText(message, PlType.secondary, Pl.text2, textAlign = TextAlign.Center)
+        Spacer(Modifier.height(8.dp))
+        Pill("Повторить", kind = PillKind.Tonal, height = 44.dp, icon = R.drawable.ic_retry, onClick = onRetry)
     }
 }

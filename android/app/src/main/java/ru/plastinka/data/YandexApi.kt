@@ -5,6 +5,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -371,11 +372,300 @@ class YandexApi(private val http: OkHttpClient) {
     suspend fun playlistTracks(token: String, ownerUid: Long, kind: Long): List<Track> =
         withContext(Dispatchers.IO) {
             val obj = get(token, "$API_BASE/users/$ownerUid/playlists/$kind")
-            obj["result"]?.jsonObject?.get("tracks")?.jsonArray
-                ?.mapNotNull { it.jsonObject["track"]?.let(::parseTrack) }
-                ?.filter { it.available }
-                .orEmpty()
+            // Недоступные треки остаются в списке (серые), в очередь их отсеивает плеер.
+            ((obj["result"] as? JsonObject)?.get("tracks") as? JsonArray).orEmpty()
+                .mapNotNull { item -> (item as? JsonObject)?.get("track")?.let { parseTrackSafe(it) } }
         }
+
+    // ------------------------------------------------------------ коллекция
+
+    /**
+     * Свои плейлисты (без «Мне нравится», `kind` 3) и понравившиеся чужие.
+     * Один из двух запросов не удался — берём второй; оба — ошибка.
+     */
+    suspend fun userPlaylists(token: String, uid: Long): List<PlaylistCard> =
+        withContext(Dispatchers.IO) {
+            val own = runCatching {
+                val arr = get(token, "$API_BASE/users/$uid/playlists/list")["result"]?.jsonArray
+                    ?: throw IllegalStateException("нет result у плейлистов")
+                arr.mapNotNull { parsePlaylistCard(it, liked = false) }
+                    .filter { it.kind != LIKED_PLAYLIST_KIND }
+            }
+            val liked = runCatching {
+                val arr = get(token, "$API_BASE/users/$uid/likes/playlists")["result"]?.jsonArray
+                    ?: throw IllegalStateException("нет result у понравившихся плейлистов")
+                arr.mapNotNull { parsePlaylistCard(it, liked = true) }
+            }
+            // Ошибка авторизации важнее частичного результата.
+            (own.exceptionOrNull() as? UnauthorizedException)?.let { throw it }
+            (liked.exceptionOrNull() as? UnauthorizedException)?.let { throw it }
+            if (own.isFailure && liked.isFailure) {
+                throw own.exceptionOrNull() ?: IllegalStateException("плейлисты не получены")
+            }
+            val mine = own.getOrDefault(emptyList())
+            mine + liked.getOrDefault(emptyList()).filter { l ->
+                mine.none { it.uid == l.uid && it.kind == l.kind }
+            }
+        }
+
+    /** Понравившиеся альбомы, недавние первыми. */
+    suspend fun likedAlbums(token: String, uid: Long): List<AlbumCard> = withContext(Dispatchers.IO) {
+        val arr = get(token, "$API_BASE/users/$uid/likes/albums?rich=true")["result"] as? JsonArray
+            ?: throw IllegalStateException("нет result у альбомов")
+        recentFirst(arr, "album").mapNotNull(::parseAlbumCard)
+    }
+
+    /** Понравившиеся исполнители, недавние первыми. */
+    suspend fun likedArtists(token: String, uid: Long): List<ArtistCard> = withContext(Dispatchers.IO) {
+        val arr = get(token, "$API_BASE/users/$uid/likes/artists?with-timestamps=true")["result"] as? JsonArray
+            ?: throw IllegalStateException("нет result у исполнителей")
+        recentFirst(arr, "artist").mapNotNull(::parseArtistCard)
+    }
+
+    /** Альбом с треками: диски склеиваются по порядку. */
+    suspend fun albumWithTracks(token: String, id: String): AlbumDetails = withContext(Dispatchers.IO) {
+        if (!isNumericId(id)) throw NotFoundException()
+        val result = get(token, "$API_BASE/albums/$id/with-tracks")["result"] as? JsonObject
+            ?: throw IllegalStateException("нет result у альбома")
+        val card = parseAlbumCard(result) ?: throw NotFoundException()
+        val tracks = (result["volumes"] as? JsonArray).orEmpty().flatMap { volume ->
+            (volume as? JsonArray).orEmpty().mapNotNull { parseTrackSafe(it) }
+        }
+        AlbumDetails(card, tracks)
+    }
+
+    /**
+     * Исполнитель: `brief-info` (шапка, популярные треки, первые альбомы). Если
+     * в нём ровно 9 альбомов, а всего больше, догружается `direct-albums`.
+     */
+    suspend fun artistBrief(token: String, id: String): ArtistDetails = withContext(Dispatchers.IO) {
+        if (!isNumericId(id)) throw NotFoundException()
+        val result = get(token, "$API_BASE/artists/$id/brief-info")["result"] as? JsonObject
+            ?: throw IllegalStateException("нет result у исполнителя")
+        val card = (result["artist"] as? JsonObject)?.let(::parseArtistCard)
+            ?: throw NotFoundException()
+        val popular = (result["popularTracks"] as? JsonArray).orEmpty().mapNotNull { parseTrackSafe(it) }
+        var albums = (result["albums"] as? JsonArray).orEmpty().mapNotNull(::parseAlbumCard)
+        if (albums.size == BRIEF_ALBUMS && card.albumsCount > albums.size) {
+            try {
+                directAlbums(token, id, card.albumsCount).takeIf { it.isNotEmpty() }?.let { albums = it }
+            } catch (_: Exception) {
+                // Дозагрузка не удалась: остаются первые альбомы из brief-info.
+            }
+        }
+        ArtistDetails(card, popular, albums)
+    }
+
+    /** Все альбомы исполнителя страницами по 100, не больше 10 страниц. */
+    private fun directAlbums(token: String, id: String, expected: Int): List<AlbumCard> {
+        val out = mutableListOf<AlbumCard>()
+        for (page in 0 until MAX_ALBUM_PAGES) {
+            val obj = get(token, "$API_BASE/artists/$id/direct-albums?page=$page&page-size=100&sort-by=year")
+            val items = ((obj["result"] as? JsonObject)?.get("albums") as? JsonArray)
+                .orEmpty().mapNotNull(::parseAlbumCard)
+            out += items
+            if (items.isEmpty() || out.size >= expected) break
+        }
+        return out
+    }
+
+    /** Элементы списка коллекции: распаковка обёртки и сортировка по `timestamp` (новые первыми). */
+    private fun recentFirst(arr: JsonArray, wrapper: String): List<JsonObject> =
+        arr.mapNotNull { it as? JsonObject }
+            .sortedByDescending { it.str("timestamp") ?: "" }
+            .map { (it[wrapper] as? JsonObject) ?: it }
+
+    private fun parseTrackSafe(element: kotlinx.serialization.json.JsonElement): Track? =
+        try {
+            parseTrack(element)
+        } catch (_: Exception) {
+            null
+        }
+
+    private fun hasError(obj: JsonObject): Boolean =
+        obj["error"].let { it != null && it !is kotlinx.serialization.json.JsonNull }
+
+    private fun parseAlbumCard(element: kotlinx.serialization.json.JsonElement): AlbumCard? {
+        val a = element as? JsonObject ?: return null
+        if (hasError(a)) return null
+        val id = a.str("id")?.takeIf(::isNumericId) ?: return null
+        val title = a.str("title")?.takeIf { it.isNotBlank() } ?: return null
+        val artists = (a["artists"] as? JsonArray).orEmpty().mapNotNull { r ->
+            val o = r as? JsonObject ?: return@mapNotNull null
+            ArtistRef(o.str("id"), o.str("name") ?: return@mapNotNull null)
+        }
+        return AlbumCard(
+            id = id,
+            title = title,
+            version = a.str("version")?.takeIf { it.isNotBlank() },
+            year = a.str("year")?.toIntOrNull(),
+            kind = when (a.str("type")) {
+                "single" -> AlbumKind.Single
+                "compilation" -> AlbumKind.Compilation
+                else -> AlbumKind.Album
+            },
+            artists = artists,
+            coverUri = (a.str("coverUri") ?: a.str("ogImage"))?.takeIf { it.contains("%%") },
+            trackCount = a.str("trackCount")?.toIntOrNull() ?: 0,
+        )
+    }
+
+    private fun parseArtistCard(element: kotlinx.serialization.json.JsonElement): ArtistCard? {
+        val a = element as? JsonObject ?: return null
+        if (hasError(a)) return null
+        val id = a.str("id")?.takeIf(::isNumericId) ?: return null
+        val name = a.str("name")?.takeIf { it.isNotBlank() } ?: return null
+        return ArtistCard(
+            id = id,
+            name = name,
+            coverUri = (a.str("cover", "uri") ?: a.str("ogImage"))?.takeIf { it.contains("%%") },
+            albumsCount = a.str("counts", "directAlbums")?.toIntOrNull() ?: 0,
+        )
+    }
+
+    // ------------------------------------------------------------- история
+
+    /**
+     * Сообщение о прослушивании: `POST /play-audio` (форма). Поля — как у
+     * десктопа. Токен только в заголовке. Ошибка — исключение с кодом ответа
+     * (без токена и адреса); вызывающий её глотает.
+     */
+    suspend fun playAudio(
+        token: String,
+        uid: Long,
+        trackId: String,
+        albumId: String?,
+        playId: String,
+        lengthSeconds: Int?,
+        playedSeconds: Int,
+        startedAtMs: Long,
+    ) {
+        withContext(Dispatchers.IO) {
+            if (!isNumericId(trackId)) return@withContext
+            val form = FormBody.Builder()
+                .add("track-id", trackId)
+                .add("from-cache", "false")
+                .add("from", PLAY_FROM)
+                .add("play-id", playId)
+                .add("uid", uid.toString())
+                .add("timestamp", utcStamp(startedAtMs))
+                .add("client-now", utcStamp(System.currentTimeMillis()))
+                .add("total-played-seconds", playedSeconds.toString())
+                .add("end-position-seconds", playedSeconds.toString())
+            albumId?.takeIf(::isNumericId)?.let { form.add("album-id", it) }
+            lengthSeconds?.let { form.add("track-length-seconds", it.toString()) }
+            http.newCall(
+                Request.Builder()
+                    .url("$API_BASE/play-audio")
+                    .header("Authorization", "OAuth $token")
+                    .header("X-Yandex-Music-Client", MUSIC_CLIENT)
+                    .post(form.build()).build(),
+            ).execute().use { resp ->
+                if (!resp.isSuccessful) throw IllegalStateException("play-audio: ответ ${resp.code}")
+            }
+        }
+    }
+
+    /** Трек из ответа истории: полная модель или только идентификатор. */
+    private class RawSlot(val track: Track?, val id: String?)
+    private class RawGroup(val context: HistoryContext, val slots: List<RawSlot>)
+    private class RawDay(val date: java.time.LocalDate?, val groups: List<RawGroup>)
+
+    /**
+     * История с сервера: `GET /music-history`. Дни свежие первыми; полные модели
+     * есть у первых треков, остальные догружаются пачкой. Не больше 30 дней и 300
+     * треков. Формат пересказан по справке, вживую не проверен.
+     */
+    suspend fun history(token: String): List<HistoryDay> = withContext(Dispatchers.IO) {
+        val result = get(token, "$API_BASE/music-history?fullModelsCount=$HISTORY_FULL_MODELS")["result"] as? JsonObject
+            ?: throw IllegalStateException("нет result у истории")
+        val tabs = result["historyTabs"] as? JsonArray
+            ?: throw IllegalStateException("нет historyTabs у истории")
+        var budget = HISTORY_MAX_TRACKS
+        val rawDays = mutableListOf<RawDay>()
+        for (tab in tabs.take(HISTORY_MAX_DAYS)) {
+            if (budget <= 0) break
+            val tabObj = tab as? JsonObject ?: continue
+            val date = tabObj.str("date")?.take(10)?.let { runCatching { java.time.LocalDate.parse(it) }.getOrNull() }
+            val groups = mutableListOf<RawGroup>()
+            for (item in (tabObj["items"] as? JsonArray).orEmpty()) {
+                val itemObj = item as? JsonObject ?: continue
+                val context = parseHistoryContext(itemObj["context"]) ?: continue
+                val slots = (itemObj["tracks"] as? JsonArray).orEmpty()
+                    .mapNotNull(::parseHistorySlot).take(budget)
+                budget -= slots.size
+                if (slots.isNotEmpty()) groups += RawGroup(context, slots)
+            }
+            if (groups.isNotEmpty()) rawDays += RawDay(date, groups)
+        }
+        val missing = rawDays.flatMap { d -> d.groups.flatMap { g -> g.slots } }
+            .mapNotNull { it.id }.distinct()
+        val loaded = if (missing.isEmpty()) emptyMap() else tracks(token, missing).associateBy { it.id }
+        // Недоступные и не найденные (без названия) отбрасываются, пустые группы и дни — тоже.
+        rawDays.mapNotNull { day ->
+            val groups = day.groups.mapNotNull { g ->
+                val tracks = g.slots.mapNotNull { it.track ?: it.id?.let(loaded::get) }
+                    .filter { it.title.isNotBlank() }
+                tracks.takeIf { it.isNotEmpty() }?.let { HistoryGroup(g.context, it) }
+            }
+            groups.takeIf { it.isNotEmpty() }?.let { HistoryDay(day.date, it) }
+        }
+    }
+
+    /** `{type, data:{itemId, fullModel}}` у трека. */
+    private fun parseHistorySlot(element: kotlinx.serialization.json.JsonElement): RawSlot? {
+        val data = (element as? JsonObject)?.get("data") as? JsonObject ?: return null
+        (data["fullModel"] as? JsonObject)?.let { parseTrackSafe(it) }?.let { return RawSlot(it, null) }
+        val id = (data["itemId"] as? JsonObject)?.str("trackId") ?: return null
+        return RawSlot(null, id)
+    }
+
+    /** `{type, data:{itemId, fullModel}}` у контекста. */
+    private fun parseHistoryContext(element: kotlinx.serialization.json.JsonElement?): HistoryContext? {
+        val o = element as? JsonObject ?: return null
+        val kind = o.str("type") ?: return null
+        val data = o["data"] as? JsonObject
+        val itemId = data?.get("itemId")
+        val full = data?.get("fullModel") as? JsonObject
+        // Идентификатор — в itemId (строкой или объектом {id}) или в самой модели.
+        val single = ((itemId as? JsonObject)?.str("id")
+            ?: (itemId as? JsonPrimitive)?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.content
+            ?: full?.str("id"))?.takeIf(::isNumericId)
+        return when (kind) {
+            "album" -> HistoryContext.Album(single ?: return null, full?.str("title") ?: "Альбом")
+            "artist" -> HistoryContext.Artist(single ?: return null, full?.str("name") ?: "Исполнитель")
+            "playlist" -> {
+                val idObj = itemId as? JsonObject
+                val uid = (idObj?.str("uid") ?: full?.str("owner", "uid"))?.takeIf(::isNumericId) ?: return null
+                val plKind = (idObj?.str("kind") ?: full?.str("kind"))?.takeIf(::isNumericId) ?: return null
+                HistoryContext.Playlist(uid, plKind, full?.str("title") ?: "Плейлист")
+            }
+            "wave" -> HistoryContext.Wave
+            else -> HistoryContext.Other(full?.str("title") ?: full?.str("name") ?: "Подборка")
+        }
+    }
+
+    /** Плейлист из списка: элемент либо сам плейлист, либо обёртка `{playlist}`. */
+    private fun parsePlaylistCard(element: kotlinx.serialization.json.JsonElement, liked: Boolean): PlaylistCard? {
+        val outer = (element as? JsonObject) ?: return null
+        val pl = (outer["playlist"] as? JsonObject) ?: outer
+        val uid = (pl.str("uid") ?: pl.str("owner", "uid"))?.toLongOrNull() ?: return null
+        val kind = pl.str("kind")?.toLongOrNull() ?: return null
+        val title = pl.str("title") ?: return null
+        val cover = pl["cover"] as? JsonObject
+        val coverUri = cover?.str("uri")?.takeIf { it.contains("%%") }
+            ?: (cover?.get("itemsUri") as? kotlinx.serialization.json.JsonArray)
+                ?.firstNotNullOfOrNull { (it as? JsonPrimitive)?.content?.takeIf { s -> s.contains("%%") } }
+            ?: pl.str("ogImage")?.takeIf { it.contains("%%") }
+        return PlaylistCard(
+            uid = uid,
+            kind = kind,
+            title = title,
+            coverUri = coverUri,
+            trackCount = pl.str("trackCount")?.toIntOrNull() ?: 0,
+            liked = liked,
+        )
+    }
 
     private fun parseBatch(text: String, fallbackSession: String?): WaveBatch? {
         val result = json.parseToJsonElement(text).jsonObject["result"]?.jsonObject
@@ -489,6 +779,31 @@ class YandexApi(private val http: OkHttpClient) {
         const val TRANSPORT = "raw"
         const val WAVE_SEED = "user:onyourwave"
         const val WAVE_QUEUE_LEN = 5
+
+        /** `kind` плейлиста «Мне нравится»: у него свой раздел. */
+        const val LIKED_PLAYLIST_KIND = 3L
+
+        /** Сколько альбомов отдаёт `brief-info` и сколько страниц `direct-albums` читаем. */
+        private const val BRIEF_ALBUMS = 9
+        private const val MAX_ALBUM_PAGES = 10
+
+        /** Откуда играем (поле `from`): наш клиент, без личных данных. */
+        private const val PLAY_FROM = "plastinka"
+
+        private val STAMP = java.time.format.DateTimeFormatter
+            .ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
+            .withZone(java.time.ZoneOffset.UTC)
+
+        /** RFC 3339 UTC с миллисекундами. */
+        fun utcStamp(ms: Long): String = STAMP.format(java.time.Instant.ofEpochMilli(ms))
+
+        /** Пределы истории: полные модели в ответе, дни и треки. */
+        private const val HISTORY_FULL_MODELS = 50
+        private const val HISTORY_MAX_DAYS = 30
+        private const val HISTORY_MAX_TRACKS = 300
+
+        /** Идентификатор для адреса запроса: только цифры. */
+        fun isNumericId(id: String): Boolean = id.length in 1..20 && id.all { it in '0'..'9' }
         private val ALLOWED_HOSTS = listOf(
             "oauth.yandex.ru", "oauth.yandex.com", "ya.ru", "yandex.ru", "yandex.com",
         )

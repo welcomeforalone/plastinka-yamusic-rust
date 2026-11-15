@@ -19,9 +19,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import ru.plastinka.playback.QueueHolder
+import ru.plastinka.playback.currentTrack
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -135,7 +140,7 @@ fun TrackRow(
                 maxLines = 1,
             )
             PlText(
-                if (available) track.artistNames else "Недоступен",
+                if (available) track.artistNames else "Недоступен в вашем регионе",
                 PlType.secondary,
                 if (available) Pl.text2 else Pl.textDisabled,
                 maxLines = 1,
@@ -160,5 +165,43 @@ fun HeartButton(liked: Boolean, onClick: () -> Unit, size: Dp, modifier: Modifie
             size,
             if (liked) Pl.accent else Pl.text2,
         )
+    }
+}
+
+/** Состояние «что играет»: текущий трек очереди, идёт ли звук и множество лайков. */
+class PlayingState(val currentId: String?, val soundOn: Boolean, val liked: Set<String>)
+
+@Composable
+fun rememberPlayingState(player: PlayerController?): PlayingState {
+    val liked by QueueHolder.likedIds.collectAsStateWithLifecycle()
+    val queue by QueueHolder.state.collectAsStateWithLifecycle()
+    val soundOn = player?.isPlaying?.collectAsStateWithLifecycle()?.value ?: false
+    return PlayingState(queue.currentTrack()?.id, soundOn, liked)
+}
+
+/**
+ * Строки треков для `LazyColumn`. Недоступные показываются серыми и не
+ * нажимаются; нажатие запускает очередь `tracks` с этого трека (недоступные
+ * плеер из очереди отсеивает сам).
+ */
+fun LazyListScope.trackItems(
+    tracks: List<Track>,
+    state: PlayingState,
+    player: PlayerController?,
+    model: AppViewModel,
+    queueTitle: String,
+    source: ru.plastinka.data.HistoryContext? = null,
+) {
+    items(tracks.size, key = { index -> "$index:${tracks.getOrNull(index)?.id}" }) { index ->
+        tracks.getOrNull(index)?.let { track ->
+            TrackRow(
+                track,
+                current = track.id == state.currentId,
+                soundOn = state.soundOn,
+                liked = state.liked.contains(track.id),
+                onClick = { player?.playQueue(tracks, index, queueTitle, source = source) },
+                onLike = { model.toggleLike(track) },
+            )
+        }
     }
 }

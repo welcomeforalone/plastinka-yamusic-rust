@@ -51,8 +51,8 @@ class PlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
 
-        // Источник данных: plastinka://track/<id> решается в адрес — сначала
-        // кэш (файл, работает офлайн), потом FckCensor, потом поток Яндекса.
+        // Источник данных: plastinka://track/<id> решается в сетевой адрес —
+        // сначала FckCensor, потом поток Яндекса. Звук только потоком.
         val source = androidx.media3.datasource.DataSource.Factory {
             PlastinkaDataSource(app.http) { uri -> resolveUri(uri) }
         }
@@ -71,14 +71,46 @@ class PlaybackService : MediaSessionService() {
             .build()
 
         player.addListener(object : Player.Listener {
+            /** Текущий трек сменился, но ещё не зазвучал: в журнал он попадёт, когда пойдёт звук. */
+            private var pendingLog = false
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying && pendingLog) logPlay()
+                if (isPlaying) reportSounded() else reportPaused()
+            }
+
+            /** Очередь доиграна до конца: последний трек закрывается как «доигран». */
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED) reportFinish(ended = true)
+            }
+
+            /** Запись в локальный журнал (только метаданные трека и откуда играл). */
+            private fun logPlay() {
+                pendingLog = false
+                val state = QueueHolder.state.value
+                state.currentTrack()?.let { ru.plastinka.data.PlayLog.record(it, state.context) }
+            }
+
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                // Звук уже идёт (автопереход к следующему) — пишем сразу, иначе ждём начала звука.
+                // Прежний трек закончился или сменился: сообщаем, сколько сыграно.
+                reportFinish(
+                    ended = reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
+                        reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT,
+                )
+                pendingLog = true
+                QueueHolder.setCurrent(player.currentMediaItemIndex)
+                reportBegin()
+                if (player.isPlaying) {
+                    logPlay()
+                    reportSounded()
+                }
                 val now = System.currentTimeMillis()
                 val previousId = Wave.previousTrackId
                 val previousStart = Wave.startedAtMs
                 val previousTrack = previousId
                     ?.let { id -> QueueHolder.state.value.tracks.firstOrNull { it.id == id } }
 
-                QueueHolder.setCurrent(player.currentMediaItemIndex)
                 Wave.previousTrackId = QueueHolder.currentTrack()?.id
                 Wave.startedAtMs = now
 
@@ -119,6 +151,90 @@ class PlaybackService : MediaSessionService() {
         mediaSession = MediaSession.Builder(this, player)
             .setSessionActivity(sessionActivity)
             .build()
+    }
+
+    // ------------------------------------------------------ play-audio
+
+    /**
+     * Трек, о котором сообщаем Яндексу (как `Tracker` на десктопе): сообщение о
+     * начале (сыграно 0, один раз за трек) и о конце (сколько сыграно). Не
+     * шлём о треках, которые не зазвучали, и о заменах FckCensor.
+     */
+    private class PlayReport(
+        val trackId: String,
+        val albumId: String?,
+        val lengthSeconds: Int?,
+        val playId: String,
+        val startedMs: Long,
+    ) {
+        var startedSent = false
+        var playedMs = 0L
+        var resumedAt: Long? = null
+    }
+
+    private var report: PlayReport? = null
+
+    private fun reportBegin() {
+        val track = QueueHolder.currentTrack()
+        // Замена FckCensor — не поток Яндекса: о ней не сообщаем.
+        report = track?.takeIf { app.fckCensor.replacementUrl(it.id) == null }?.let {
+            PlayReport(
+                trackId = it.id,
+                albumId = it.albumId,
+                lengthSeconds = it.durationMs?.let { ms -> (ms / 1000).toInt() },
+                playId = java.util.UUID.randomUUID().toString(),
+                startedMs = System.currentTimeMillis(),
+            )
+        }
+    }
+
+    /** Звук пошёл: сообщение о начале (один раз за трек), дальше копится время игры. */
+    private fun reportSounded() {
+        val r = report ?: return
+        if (r.resumedAt == null) r.resumedAt = System.currentTimeMillis()
+        if (!r.startedSent) {
+            r.startedSent = true
+            sendReport(r, 0)
+        }
+    }
+
+    private fun reportPaused() {
+        val r = report ?: return
+        r.resumedAt?.let { r.playedMs += System.currentTimeMillis() - it }
+        r.resumedAt = null
+    }
+
+    /** Трек сменился или кончился: сообщение о сыгранном (доигран — вся длительность). */
+    private fun reportFinish(ended: Boolean) {
+        reportPaused()
+        val r = report ?: return
+        report = null
+        if (!r.startedSent) return
+        val length = r.lengthSeconds
+        val played = if (ended && length != null) length else (r.playedMs / 1000).toInt()
+        sendReport(r, if (length != null) played.coerceAtMost(length) else played)
+    }
+
+    /**
+     * Отправка в фоне: без токена или аккаунта с Плюсом ничего не шлётся, ошибка
+     * глотается (в лог — только код ответа и id трека), повторов нет.
+     */
+    private fun sendReport(r: PlayReport, playedSeconds: Int) {
+        val token = app.tokenStore.load() ?: return
+        val uid = AccountHolder.uid ?: return
+        val job = scope.launch {
+            try {
+                app.api.playAudio(
+                    token, uid, r.trackId, r.albumId, r.playId,
+                    r.lengthSeconds, playedSeconds, r.startedMs,
+                )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "play-audio не отправлен (трек ${r.trackId}): ${e.message}")
+            }
+        }
+        AccountHolder.track(job)
     }
 
     /** Событие волны: ошибки молча глотаем, как на десктопе. */
@@ -172,10 +288,9 @@ class PlaybackService : MediaSessionService() {
         player.addMediaItems(batch.tracks.map(::mediaItemOf))
     }
 
-    /** Кэш → FckCensor-замена → поток Яндекса. */
+    /** plastinka://track/<id> → сетевой адрес потока. */
     private fun resolveUri(uri: String): String? {
         val trackId = TrackUris.trackIdOf(uri) ?: return null
-        ru.plastinka.data.TrackCache.cachedUri(trackId)?.let { return it }
         return resolve(trackId)
     }
 
@@ -241,7 +356,7 @@ class PlaybackService : MediaSessionService() {
 
 /**
  * Источник данных плеера: `plastinka://track/<id>` решается в реальный адрес
- * (кэш-файл или https), дальше читает File- или OkHttp-источник.
+ * (только сеть), дальше читает OkHttp-источник. Локальные файлы не читаются.
  */
 class PlastinkaDataSource(
     private val http: okhttp3.OkHttpClient,
@@ -256,13 +371,13 @@ class PlastinkaDataSource(
                 ?: throw java.io.IOException("звук трека недоступен")
             else -> dataSpec.uri.toString()
         }
-        val source = if (target.startsWith("file:")) {
-            androidx.media3.datasource.FileDataSource()
-        } else {
-            OkHttpDataSource.Factory(http)
-                .setUserAgent("Plastinka/0.1 Android")
-                .createDataSource()
+        // Звук только потоком из сети: ни file://, ни другие схемы не принимаются.
+        if (!target.startsWith("http://") && !target.startsWith("https://")) {
+            throw java.io.IOException("звук трека недоступен")
         }
+        val source = OkHttpDataSource.Factory(http)
+            .setUserAgent("Plastinka/0.1 Android")
+            .createDataSource()
         inner = source
         return source.open(dataSpec.buildUpon().setUri(android.net.Uri.parse(target)).build())
     }
