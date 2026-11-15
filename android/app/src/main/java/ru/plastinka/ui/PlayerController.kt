@@ -18,12 +18,39 @@ class PlayerController(val controller: MediaController) {
     private val _isPlaying = MutableStateFlow(controller.isPlaying)
     val isPlaying: StateFlow<Boolean> = _isPlaying
 
+    /** Перемешивание и повтор: настоящие режимы MediaController. */
+    private val _shuffle = MutableStateFlow(controller.shuffleModeEnabled)
+    val shuffle: StateFlow<Boolean> = _shuffle
+    private val _repeatMode = MutableStateFlow(controller.repeatMode)
+    val repeatMode: StateFlow<Int> = _repeatMode
+
     init {
         controller.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 _isPlaying.value = isPlaying
             }
+
+            override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+                _shuffle.value = shuffleModeEnabled
+            }
+
+            override fun onRepeatModeChanged(repeatMode: Int) {
+                _repeatMode.value = repeatMode
+            }
         })
+    }
+
+    fun toggleShuffle() {
+        controller.shuffleModeEnabled = !controller.shuffleModeEnabled
+    }
+
+    /** Повтор по кругу: выкл, вся очередь, один трек. */
+    fun cycleRepeat() {
+        controller.repeatMode = when (controller.repeatMode) {
+            Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
+            Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
+            else -> Player.REPEAT_MODE_OFF
+        }
     }
 
     fun playQueue(
@@ -32,6 +59,11 @@ class PlayerController(val controller: MediaController) {
         title: String,
         isWave: Boolean = false,
     ) {
+        if (isWave) {
+            // Волна идёт линейно и догружается по индексу: режимы сбрасываем.
+            controller.shuffleModeEnabled = false
+            controller.repeatMode = Player.REPEAT_MODE_OFF
+        }
         QueueHolder.set(tracks, startIndex, title, isWave)
         val items = tracks.map(PlaybackService::mediaItemOf)
         controller.setMediaItems(items, startIndex, 0)
@@ -53,6 +85,17 @@ class PlayerController(val controller: MediaController) {
     val durationMs: Long get() = controller.duration.coerceAtLeast(0)
 
     fun release() = controller.release()
+
+    /** Остановить воспроизведение, очистить очередь плеера и отпустить контроллер. */
+    fun stopAndRelease() {
+        try {
+            controller.stop()
+            controller.clearMediaItems()
+        } catch (_: Exception) {
+            // Контроллер мог уже отключиться — освободить его всё равно нужно.
+        }
+        controller.release()
+    }
 
     companion object {
         fun build(context: android.content.Context, onReady: (PlayerController?) -> Unit) {

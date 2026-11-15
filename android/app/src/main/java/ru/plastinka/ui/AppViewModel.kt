@@ -53,23 +53,46 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var pollJob: Job? = null
     private var searchJob: Job? = null
 
-    val loggedIn: Boolean get() = plastinka.tokenStore.load() != null
+    // Состояние, а не геттер: экран перерисовывается и при входе, и при выходе.
+    private val _loggedIn = MutableStateFlow(plastinka.tokenStore.load() != null)
+    val loggedInState: StateFlow<Boolean> = _loggedIn
+
+    val loggedIn: Boolean get() = _loggedIn.value
+
+    private val _searchError = MutableStateFlow<String?>(null)
+    val searchError: StateFlow<String?> = _searchError
+
+    /** Запрос отправлен, ответа ещё нет: экран показывает индикатор, а не «ничего не нашлось». */
+    private val _searching = MutableStateFlow(false)
+    val searching: StateFlow<Boolean> = _searching
 
     fun setQuery(text: String) {
         _query.value = text
         searchJob?.cancel()
+        _searchError.value = null
         if (text.isBlank()) {
             _search.value = emptyList()
+            _searching.value = false
             return
         }
+        _searching.value = true
         searchJob = viewModelScope.launch {
             delay(350)
-            val token = plastinka.tokenStore.load() ?: return@launch
-            _search.value = try {
-                plastinka.api.searchTracks(token, text.trim())
-            } catch (e: Exception) {
-                emptyList()
+            val token = plastinka.tokenStore.load()
+            if (token == null) {
+                _searching.value = false
+                return@launch
             }
+            try {
+                _search.value = plastinka.api.searchTracks(token, text.trim())
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _search.value = emptyList()
+                _searchError.value = "Не удалось выполнить поиск. Проверьте соединение."
+            }
+            // Отменённый запрос сюда не доходит: флаг держит новый запрос.
+            _searching.value = false
         }
     }
 
@@ -102,6 +125,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val token = plastinka.api.pollToken(code)
                 if (token != null) {
                     plastinka.tokenStore.save(token)
+                    _loggedIn.value = true
                     _login.value = LoginUi(phase = LoginPhase.Done)
                     loadLibrary()
                     return
@@ -133,11 +157,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val _waveStarting = MutableStateFlow(false)
     val waveStarting: StateFlow<Boolean> = _waveStarting
 
+    private val _waveError = MutableStateFlow<String?>(null)
+    val waveError: StateFlow<String?> = _waveError
+
     /** Запустить «Мою волну»: сессия rotor + первая порция в очередь. */
     fun startWave(player: PlayerController?) {
         val token = plastinka.tokenStore.load() ?: return
         if (_waveStarting.value) return
         _waveStarting.value = true
+        _waveError.value = null
         waveJob = viewModelScope.launch {
             try {
                 val batch = plastinka.api.startWave(token)
@@ -147,7 +175,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 if (batch.tracks.isEmpty()) throw IllegalStateException("волна прислала 0 треков")
                 player?.playQueue(batch.tracks, 0, "Моя волна", isWave = true)
             } catch (e: Exception) {
-                _library.value = _library.value.copy(error = "Волна не началась: ${e.message}")
+                _waveError.value = "Волна не началась: ${e.message ?: "ошибка сети"}"
             } finally {
                 _waveStarting.value = false
             }
@@ -195,10 +223,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private var libraryJob: Job? = null
+
     fun loadLibrary() {
         val token = plastinka.tokenStore.load() ?: return
         _library.value = _library.value.copy(loading = true, error = null)
-        viewModelScope.launch {
+        libraryJob?.cancel()
+        libraryJob = viewModelScope.launch {
             try {
                 val status = plastinka.api.accountStatus(token)
                 val ids = plastinka.api.likedIds(token, status.uid)
@@ -209,6 +240,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     tracks = tracks,
                     account = status,
                 )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _library.value = LibraryUi(loading = false, error = e.message ?: "ошибка загрузки")
             }
@@ -218,6 +251,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun logout() {
         plastinka.tokenStore.clear()
+        _loggedIn.value = false
+        libraryJob?.cancel() // запоздавший ответ не должен вернуть аккаунт после выхода
         QueueHolder.set(emptyList(), -1, "")
         _library.value = LibraryUi()
         _login.value = LoginUi()

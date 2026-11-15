@@ -18,13 +18,15 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        ru.plastinka.ui.AccentState.load(this)
         if (model.loggedIn) model.loadLibrary()
         setContent {
             PlastinkaTheme {
                 val login by model.login.collectAsStateWithLifecycle()
                 val library by model.library.collectAsStateWithLifecycle()
+                val loggedIn by model.loggedInState.collectAsStateWithLifecycle()
                 RootScreen(
-                    loggedIn = model.loggedIn,
+                    loggedIn = loggedIn,
                     login = login,
                     library = library,
                     model = model,
