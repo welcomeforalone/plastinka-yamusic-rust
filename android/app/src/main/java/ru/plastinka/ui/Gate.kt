@@ -351,7 +351,7 @@ fun SubscriptionRequiredScreen(
                     .padding(start = 12.dp, end = 16.dp, top = 12.dp, bottom = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Avatar(44.dp)
+                Avatar(44.dp, account.avatarUrl)
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     PlText(account.displayName, PlType.bodyStrong, maxLines = 1)

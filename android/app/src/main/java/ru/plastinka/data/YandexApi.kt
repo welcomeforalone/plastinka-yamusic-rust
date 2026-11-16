@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
@@ -97,6 +98,10 @@ class YandexApi(private val http: OkHttpClient) {
             displayName = account["displayName"]?.jsonPrimitive?.content
                 ?: account["login"]?.jsonPrimitive?.content ?: "",
             hasPlus = hasPlusFlag(result["plus"]) || hasPlusFlag(result["subscription"]),
+            avatarUrl = account["avatar"]?.jsonPrimitive?.contentOrNull
+                ?.takeIf { it.isNotBlank() }
+                // Аватар приходит идентификатором yapic, адрес собираем сами.
+                ?.let { "https://avatars.yandex.net/get-yapic/$it/islands-200" },
         )
     }
 

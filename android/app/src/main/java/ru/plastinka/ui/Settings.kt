@@ -84,7 +84,7 @@ private fun SettingsMain(
                 Modifier.fillMaxWidth().padding(14.dp, 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Avatar(48.dp)
+                Avatar(48.dp, library.account?.avatarUrl)
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     PlText(library.account?.displayName ?: "", PlType.headline, maxLines = 1)

@@ -194,9 +194,12 @@ fun PlayButton(
     }
 }
 
-/** Аватар: серый градиент и иконка пользователя. */
+/**
+ * Аватар: с адресом — картинка с бека (пока грузится — градиент-подложка),
+ * без — серый градиент и иконка пользователя.
+ */
 @Composable
-fun Avatar(size: Dp, modifier: Modifier = Modifier) {
+fun Avatar(size: Dp, url: String? = null, modifier: Modifier = Modifier) {
     Box(
         modifier
             .size(size)
@@ -210,7 +213,16 @@ fun Avatar(size: Dp, modifier: Modifier = Modifier) {
             ),
         contentAlignment = Alignment.Center,
     ) {
-        PlIcon(R.drawable.ic_user, size * 0.5f, Pl.text)
+        if (url != null) {
+            AsyncImage(
+                model = url,
+                contentDescription = null,
+                modifier = Modifier.size(size),
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+            )
+        } else {
+            PlIcon(R.drawable.ic_user, size * 0.5f, Pl.text)
+        }
     }
 }
 

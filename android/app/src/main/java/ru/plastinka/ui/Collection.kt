@@ -256,7 +256,7 @@ private fun CollectionHub(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             PlText("Коллекция", PlType.display, modifier = Modifier.weight(1f))
-            Avatar(36.dp, Modifier.clickable(onClick = onOpenSettings))
+            Avatar(36.dp, library.account?.avatarUrl, Modifier.clickable(onClick = onOpenSettings))
         }
         Spacer(Modifier.height(16.dp))
         LikedCard(

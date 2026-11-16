@@ -153,6 +153,8 @@ data class AccountInfo(
     val uid: Long,
     val displayName: String,
     val hasPlus: Boolean,
+    /** Аватар с бека (avatars.yandex.net), если у аккаунта он есть. */
+    val avatarUrl: String? = null,
 )
 
 data class DeviceCode(

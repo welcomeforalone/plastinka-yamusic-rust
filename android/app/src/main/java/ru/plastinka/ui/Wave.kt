@@ -94,13 +94,13 @@ internal fun queueSourceLabel(queue: QueueHolder.State): String = when (val c = 
 
 /** Заголовок «Моя волна» и аватар справа (макеты 03 и 04): по центру одной строки, поля 20. */
 @Composable
-private fun WaveHeader(onOpenSettings: () -> Unit) {
+private fun WaveHeader(avatarUrl: String?, onOpenSettings: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 20.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         PlText("Моя волна", PlType.display, modifier = Modifier.weight(1f))
-        Avatar(36.dp, Modifier.clickable(onClick = onOpenSettings))
+        Avatar(36.dp, avatarUrl, Modifier.clickable(onClick = onOpenSettings))
     }
 }
 
@@ -108,6 +108,7 @@ private fun WaveHeader(onOpenSettings: () -> Unit) {
 private fun WaveIdle(model: AppViewModel, player: PlayerController?, onOpenSettings: () -> Unit) {
     val starting by model.waveStarting.collectAsStateWithLifecycle()
     val error by model.waveError.collectAsStateWithLifecycle()
+    val library by model.library.collectAsStateWithLifecycle()
 
     Box(Modifier.fillMaxSize()) {
         // Два свечения макета 03: акцент (круг 360, центр на кольцах) и фиолетовое справа сверху.
@@ -120,7 +121,7 @@ private fun WaveIdle(model: AppViewModel, player: PlayerController?, onOpenSetti
             alpha = 0.3f,
         )
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 12.dp, bottom = 16.dp)) {
-            WaveHeader(onOpenSettings)
+            WaveHeader(library.account?.avatarUrl, onOpenSettings)
             // Кольца: верх первого на 92 dp ниже заголовка (макет 03).
             Spacer(Modifier.height(92.dp))
             Box(Modifier.fillMaxWidth().height(272.dp), contentAlignment = Alignment.Center) {
@@ -235,6 +236,7 @@ private fun WavePlaying(
     val tint = rememberTint(queue, track)
     val playing = player?.isPlaying?.collectAsStateWithLifecycle()?.value ?: false
     val liked by QueueHolder.likedIds.collectAsStateWithLifecycle()
+    val library by model.library.collectAsStateWithLifecycle()
     val progress by rememberProgress(player, track)
     var preview by remember { mutableStateOf<Float?>(null) }
     val next = queue.tracks.getOrNull(queue.current + 1)
@@ -261,7 +263,7 @@ private fun WavePlaying(
         // В Column внутри прокрутки высота распорки считается от minHeight, а не от бесконечного максимума.
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
             Column(Modifier.heightIn(min = this@BoxWithConstraints.maxHeight).padding(top = 12.dp)) {
-                WaveHeader(onOpenSettings)
+                WaveHeader(library.account?.avatarUrl, onOpenSettings)
                 // Рамка обложки 2 dp снаружи: верх обложки на 30 dp ниже заголовка (макет: 90 → 120).
                 Spacer(Modifier.height(28.dp))
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
