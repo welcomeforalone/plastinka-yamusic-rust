@@ -89,6 +89,8 @@ class YandexApi(private val http: OkHttpClient) {
             ?: throw IllegalStateException("нет account у статуса")
         val uid = account["uid"]?.jsonPrimitive?.content?.toLongOrNull()
             ?: throw UnauthorizedException()
+        // У account/status нет поля аватара — картинку даёт Яндекс Паспорт.
+        val avatarUrl = passportAvatarUrl(token)
         val hasPlusFlag = { node: kotlinx.serialization.json.JsonElement? ->
             (node as? kotlinx.serialization.json.JsonObject)
                 ?.get("hasPlus")?.jsonPrimitive?.content == "true"
@@ -98,11 +100,29 @@ class YandexApi(private val http: OkHttpClient) {
             displayName = account["displayName"]?.jsonPrimitive?.content
                 ?: account["login"]?.jsonPrimitive?.content ?: "",
             hasPlus = hasPlusFlag(result["plus"]) || hasPlusFlag(result["subscription"]),
-            avatarUrl = account["avatar"]?.jsonPrimitive?.contentOrNull
-                ?.takeIf { it.isNotBlank() }
-                // Аватар приходит идентификатором yapic, адрес собираем сами.
-                ?.let { "https://avatars.yandex.net/get-yapic/$it/islands-200" },
+            avatarUrl = avatarUrl,
         )
+    }
+
+    /**
+     * Аватар из Яндекс Паспорта (`GET login.yandex.ru/info`): отдаёт
+     * `default_avatar_id` — идентификатор yapic. Любая ошибка — `null`:
+     * аватар не должен мешать входу.
+     */
+    private suspend fun passportAvatarUrl(token: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val obj = get(token, "https://login.yandex.ru/info")
+            val id = obj["default_avatar_id"]?.jsonPrimitive?.contentOrNull
+            val empty = obj["is_avatar_empty"]?.jsonPrimitive?.contentOrNull == "true"
+            if (!empty && !id.isNullOrBlank()) {
+                "https://avatars.yandex.net/get-yapic/$id/islands-200"
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("YandexApi", "passport: не получен аватар: ${e.message}")
+            null
+        }
     }
 
     // -------------------------------------------------------------- лайки
