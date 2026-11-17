@@ -1,6 +1,7 @@
 package ru.plastinka.data
 
 import android.util.Log
+import androidx.compose.runtime.mutableIntStateOf
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -11,10 +12,13 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
+import java.io.File
 
 /** Состояние списка FckCensor для страницы плагинов. */
 sealed interface FckState {
@@ -26,18 +30,23 @@ sealed interface FckState {
 }
 
 /**
- * FckCensor: список без цензуры Hazzz895/FckCensorData. Для нас главное —
- * хранилища звука (`tracksStorages`): прямые ссылки на файлы без цензуры,
- * `urlTemplate` с `%%`. Порядок тот же, что в десктопном клиенте.
+ * FckCensor: список без цензуры Hazzz895/FckCensorData (`list_v2.json`). Из него берём
+ * названия, исполнителей и обложки без цензуры ([TrackPatch], [AlbumPatch]) и хранилища
+ * звука (`tracksStorages`): прямые ссылки на файлы без цензуры, `urlTemplate` с `%%`.
  *
- * Плагин выключен по умолчанию: пока он выключен, список не запрашивается, а
- * [replacementUrl] всегда `null` — все места (поток, громкость, значок
- * качества, отчёты о прослушивании) смотрят замену только через него.
- * Список живёт в памяти, на диск не пишется.
+ * Подмены применяет сама модель: [Track.title], [Track.artists], [Track.coverUri] и такие же
+ * поля [AlbumCard] читают [trackPatch] и [albumPatch]. Поэтому все экраны, плеер и шторка
+ * показывают одно и то же без правок в каждом месте. Чтение идёт через снимок состояния
+ * Compose: включили или выключили плагин, пришёл новый список — экраны перерисовываются
+ * сразу. Идентификатор трека всегда настоящий.
+ *
+ * Плагин выключен по умолчанию: пока он выключен, список не запрашивается, а [trackPatch],
+ * [albumPatch] и [replacementUrl] всегда `null`. Список живёт в памяти и в кэше на диске
+ * (`cacheDir/plugins/fckcensor-list.json`, только метаданные): раз в 6 часов обновляется,
+ * без сети работает по кэшу. Звук на диск не пишется.
  */
-class FckCensor(private val http: OkHttpClient) {
+class FckCensor(private val http: OkHttpClient, private val cacheDir: File) {
 
-    @Volatile private var urls: Map<String, String> = emptyMap()
     @Volatile private var fetchedAtMs: Long = 0
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
@@ -46,15 +55,17 @@ class FckCensor(private val http: OkHttpClient) {
     val state: StateFlow<FckState> = _state
 
     /** Прямая ссылка на звук без цензуры, если плагин включён и трек есть в хранилище. */
-    fun replacementUrl(trackId: String): String? = if (enabled) urls[trackId] else null
+    fun replacementUrl(trackId: String): String? = if (enabled) active.urls[trackId] else null
 
     /** Переключатель сменился (вызывает [Prefs]): включили — грузим список, выключили — забываем его. */
     fun onToggle() {
         if (enabled) {
+            // Экраны сразу видят «включено»: подмены появятся, как только список прочитается.
+            publish(active)
             scope.launch { refresh() }
         } else {
-            urls = emptyMap()
             fetchedAtMs = 0
+            publish(CensorList.EMPTY)
             _state.value = FckState.Off
         }
     }
@@ -64,24 +75,34 @@ class FckCensor(private val http: OkHttpClient) {
         scope.launch { refresh(force = true) }
     }
 
-    /** Подгрузить/обновить список (кэш 6 часов, как на десктопе). Выключенный плагин ничего не делает. */
+    /**
+     * Подгрузить/обновить список. Сначала кэш на диске (работает без сети), потом, если он
+     * старше 6 часов, GitHub. Выключенный плагин ничего не делает.
+     */
     suspend fun refresh(force: Boolean = false) = withContext(Dispatchers.IO) {
         if (!enabled) return@withContext
         mutex.withLock {
             if (!enabled) return@withLock
-            val fresh = System.currentTimeMillis() - fetchedAtMs < CACHE_MS
-            if (!force && fresh && urls.isNotEmpty()) {
-                _state.value = FckState.Ready(urls.size)
+            if (loaded == null) {
+                readCache()?.let { (list, at) ->
+                    if (!enabled) return@withLock
+                    fetchedAtMs = at
+                    publish(list)
+                }
+            }
+            val age = System.currentTimeMillis() - fetchedAtMs
+            if (!force && loaded != null && age in 0 until CACHE_MS) {
+                _state.value = FckState.Ready(active.count)
                 return@withLock
             }
-            if (urls.isEmpty()) _state.value = FckState.Loading
+            if (loaded == null) _state.value = FckState.Loading
             try {
                 val text = http.newCall(pluginRequest(LIST_URL)).execute().use { resp ->
                     if (!resp.isSuccessful) throw ListError("GitHub ответил кодом ${resp.code}")
                     resp.readLimited(LIST_LIMIT) ?: throw ListError("список слишком большой")
                 }
                 val parsed = try {
-                    parseStorageUrls(text)
+                    CensorList.parse(text)
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
                 } catch (_: Exception) {
@@ -89,10 +110,11 @@ class FckCensor(private val http: OkHttpClient) {
                 }
                 // Пока грузили, плагин могли выключить.
                 if (!enabled) return@withLock
-                urls = parsed
                 fetchedAtMs = System.currentTimeMillis()
-                _state.value = FckState.Ready(parsed.size)
-                Log.i(TAG, "список загружен: ${parsed.size} замен")
+                publish(parsed)
+                writeCache(text, fetchedAtMs)
+                _state.value = FckState.Ready(parsed.count)
+                Log.i(TAG, "список загружен: ${parsed.count} замен")
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: ListError) {
@@ -105,87 +127,109 @@ class FckCensor(private val http: OkHttpClient) {
         }
     }
 
-    /** Ошибка: прежний список (если был) продолжает работать, страница показывает причину. */
+    /** Ошибка: прежний список (из памяти или кэша), если был, продолжает работать, страница показывает причину. */
     private fun fail(message: String) {
         Log.w(TAG, "список не загружен: $message")
-        _state.value = if (urls.isEmpty()) FckState.Failed(message) else FckState.Ready(urls.size)
+        _state.value = if (loaded == null) FckState.Failed(message) else FckState.Ready(active.count)
     }
 
     private class ListError(message: String) : Exception(message)
 
-    private fun parseStorageUrls(text: String): Map<String, String> {
-        val out = HashMap<String, String>()
-        val root = Json.parseToJsonElement(text).jsonObject
-        val sources = root["sources"]?.jsonArray ?: return out
-        for (source in sources) {
-            val storages = source.jsonObject["tracksStorages"]?.jsonArray ?: continue
-            for (storage in storages) {
-                val st = storage.jsonObject
-                val template = (st["urlTemplate"] as? JsonPrimitive)?.content
-                    ?.let(::normalizeTemplate) ?: continue
-                // trackIds: файл — шаблон с номером самого трека.
-                st["trackIds"]?.jsonArray?.forEach { item ->
-                    val id = when (item) {
-                        is JsonPrimitive -> item.content
-                        else -> item.jsonObject["id"]?.let { (it as? JsonPrimitive)?.content }
-                    }
-                    if (id != null && plausibleId(id)) {
-                        out[id] = template.replace("%%", id)
-                    }
-                }
-                // tracks: номер трека → номер файла, ссылка или объект с url.
-                (st["tracks"] as? kotlinx.serialization.json.JsonObject)?.forEach { (key, value) ->
-                    val id = key.takeIf(::plausibleId) ?: return@forEach
-                    val url = fileUrl(value, template) ?: return@forEach
-                    out[id] = url
-                }
-            }
+    // ------------------------------------------------------------ кэш на диске
+
+    private fun cacheFile() = File(File(cacheDir, "plugins"), CACHE_FILE)
+
+    /** Список из кэша и когда он получен. Нет файла, он битый или слишком большой — `null`, без ошибки. */
+    private fun readCache(): Pair<CensorList, Long>? = try {
+        val file = cacheFile()
+        if (!file.isFile || file.length() > CACHE_FILE_LIMIT) {
+            null
+        } else {
+            val root = Json.parseToJsonElement(file.readText()) as? JsonObject
+            val at = (root?.get("fetched") as? JsonPrimitive)?.longOrNull
+            val body = (root?.get("body") as? JsonPrimitive)?.takeIf { it.isString }?.content
+            if (at == null || body == null) null else CensorList.parse(body) to at
         }
-        return out
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
     }
 
-    private fun normalizeTemplate(raw: String): String? {
-        if (raw.length > 1800 || !raw.contains("%%") || raw.any { it.isWhitespace() }) return null
-        val url = if (raw.contains("://")) raw else "https://$raw"
-        return url.takeIf(::plausibleUrl)
-    }
-
-    private fun fileUrl(value: kotlinx.serialization.json.JsonElement, template: String): String? {
-        val raw: String = when (value) {
-            is JsonPrimitive -> value.content
-            else -> {
-                val url = value.jsonObject["url"] ?: return null
-                (url as? JsonPrimitive)?.content ?: return null
+    /** Запись кэша: временный файл и переименование. Сбой записи не мешает работе. */
+    private fun writeCache(body: String, fetchedMs: Long) {
+        try {
+            val file = cacheFile()
+            file.parentFile?.mkdirs()
+            val tmp = File(file.parentFile, "$CACHE_FILE.tmp")
+            tmp.writeText(
+                buildJsonObject {
+                    put("fetched", fetchedMs)
+                    put("body", body)
+                }.toString(),
+            )
+            if (!tmp.renameTo(file)) {
+                file.delete()
+                tmp.renameTo(file)
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "кэш списка не записан: ${e.javaClass.simpleName}")
         }
-        if (raw.length > 1800 || raw.any { it.isWhitespace() }) return null
-        val url = if (raw.contains("://")) raw else template.replace("%%", raw)
-        return url.takeIf(::plausibleUrl)
     }
-
-    private fun plausibleUrl(url: String): Boolean =
-        url.startsWith("https://") && url.length <= 2000 && !url.any { it.isWhitespace() }
-
-    private fun plausibleId(id: String): Boolean =
-        id.length in 1..32 && id.all { it.isDigit() }
 
     companion object {
         private const val TAG = "FckCensor"
         const val LIST_URL = "https://raw.githubusercontent.com/Hazzz895/FckCensorData/main/list_v2.json"
         private const val LIST_LIMIT = 8 * 1024 * 1024
+        private const val CACHE_FILE_LIMIT = 24L * 1024 * 1024
+        private const val CACHE_FILE = "fckcensor-list.json"
         private const val CACHE_MS = 6 * 3600 * 1000L
 
         /** Переключатель плагина: по умолчанию выключен, значение ставит [Prefs]. */
         @Volatile var enabled = false
+
+        /** Список, по которому сейчас работаем (пустой, пока плагин выключен или список не получен). */
+        @Volatile private var active: CensorList = CensorList.EMPTY
+
+        /** Список уже есть (из кэша или с GitHub). */
+        private val loaded: CensorList? get() = active.takeIf { it !== CensorList.EMPTY }
+
+        private val revisionState = mutableIntStateOf(0)
+        private val _revision = MutableStateFlow(0)
+
+        /** Растёт, когда подмены или переключатель изменились: сервис воспроизведения обновляет шторку. */
+        val revision: StateFlow<Int> = _revision
+
+        private fun publish(list: CensorList) = synchronized(this) {
+            active = list
+            revisionState.intValue += 1
+            _revision.value += 1
+        }
+
+        /**
+         * Подмена трека для показа или `null` (плагин выключен, списка нет, трека в нём нет).
+         * Вызывается из свойств [Track]; чтение счётчика подписывает экран на изменения.
+         */
+        fun trackPatch(id: String): TrackPatch? {
+            // Чтение идёт всегда: так Compose запоминает, что экран зависит от списка.
+            if (revisionState.intValue < 0 || !enabled) return null
+            return active.tracks[id]
+        }
+
+        /** Подмена альбома для показа или `null`. См. [trackPatch]. */
+        fun albumPatch(id: String): AlbumPatch? {
+            if (revisionState.intValue < 0 || !enabled) return null
+            return active.albums[id]
+        }
 
         @Volatile private var instance: FckCensor? = null
 
         /** Созданный экземпляр (после старта приложения) или `null`. */
         val current: FckCensor? get() = instance
 
-        fun get(http: OkHttpClient): FckCensor =
+        fun get(http: OkHttpClient, cacheDir: File): FckCensor =
             instance ?: synchronized(this) {
-                instance ?: FckCensor(http).also { instance = it }
+                instance ?: FckCensor(http, cacheDir).also { instance = it }
             }
     }
 }

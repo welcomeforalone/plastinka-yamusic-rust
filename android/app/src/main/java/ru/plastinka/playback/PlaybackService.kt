@@ -31,6 +31,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import ru.plastinka.PlastinkaApp
 import ru.plastinka.R
+import ru.plastinka.data.FckCensor
 import ru.plastinka.data.Prefs
 import ru.plastinka.data.StreamResult
 import ru.plastinka.data.Track
@@ -207,6 +208,12 @@ class PlaybackService : MediaSessionService() {
             app.slopless.version.collect { mainHandler.post { slopCheck(player) } }
         }
 
+        // FckCensor: список пришёл или плагин переключили — названия, исполнители и обложка
+        // в шторке и на экране блокировки обновляются без перезапуска трека.
+        scope.launch {
+            FckCensor.revision.collect { mainHandler.post { refreshMetadata(player) } }
+        }
+
         // Клик по уведомлению открывает приложение (singleTask — тот же экран).
         val sessionActivity = android.app.PendingIntent.getActivity(
             this,
@@ -331,6 +338,24 @@ class PlaybackService : MediaSessionService() {
         player.stop()
         player.seekTo(index, position)
         player.prepare()
+    }
+
+    /**
+     * Обновляет подписи треков очереди (`MediaMetadata`) по текущему состоянию FckCensor.
+     * Звук и позиция не меняются: ExoPlayer обновляет элемент на месте, если не менялся адрес.
+     * Только на главном потоке.
+     */
+    private fun refreshMetadata(player: Player) {
+        val byId = QueueHolder.state.value.tracks.associateBy { it.id }
+        for (i in 0 until player.mediaItemCount) {
+            val old = player.getMediaItemAt(i)
+            val track = byId[old.mediaId] ?: continue
+            val fresh = mediaItemOf(track)
+            val a = old.mediaMetadata
+            val b = fresh.mediaMetadata
+            if (a.title == b.title && a.artist == b.artist && a.artworkUri == b.artworkUri) continue
+            player.replaceMediaItem(i, fresh)
+        }
     }
 
     // ------------------------------------------------------ Slopless

@@ -98,8 +98,8 @@ private val SETTINGS_INDEX: List<SettingsEntry> = listOf(
     ),
     SettingsEntry(
         SettingsPage.Plugins, "FckCensor",
-        "Звук без цензуры из списка FckCensorData для треков, которые в нём есть",
-        "цензура explicit замена трека плагин",
+        "Названия, исполнители, обложки и звук без цензуры из списка FckCensorData для треков, которые в нём есть",
+        "цензура explicit замена трека название обложка плагин",
     ),
     SettingsEntry(
         SettingsPage.Plugins, "Slopless", "Метки ИИ-исполнителей и ИИ-треков по базе slopless.art",

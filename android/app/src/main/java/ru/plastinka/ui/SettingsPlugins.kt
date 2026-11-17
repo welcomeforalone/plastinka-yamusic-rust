@@ -83,8 +83,8 @@ private fun FckCensorCard() {
     GroupCard {
         ToggleRow(
             title = "FckCensor",
-            subtitle = "Звук без цензуры из списка FckCensorData для треков, которые в нём есть. " +
-                "Играет потоком, на устройство ничего не сохраняется",
+            subtitle = "Названия, исполнители, обложки и звук без цензуры из списка FckCensorData " +
+                "для треков, которые в нём есть. Звук играет потоком, на устройство сохраняется только список",
             checked = Prefs.fckCensor,
             onChange = Prefs::changeFckCensor,
         )
@@ -107,7 +107,7 @@ private fun FckCensorCard() {
             }
         }
     }
-    SettingsNote("Замены действуют со следующего трека. Играющий доиграет как есть.")
+    SettingsNote("Названия и обложки меняются сразу. Звук заменяется со следующего трека, играющий доиграет как есть.")
 }
 
 // ----------------------------------------------------------------- Slopless
@@ -201,13 +201,13 @@ private fun SloplessCard() {
 
 private val sampleTrack = Track(
     id = "0",
-    title = "Название",
-    artists = listOf(ArtistRef(null, "Исполнитель")),
+    sourceTitle = "Название",
+    sourceArtists = listOf(ArtistRef(null, "Исполнитель")),
     albumId = null,
     albumTitle = "Альбом",
     durationMs = null,
     available = true,
-    coverUri = null,
+    sourceCoverUri = null,
 )
 
 @Composable

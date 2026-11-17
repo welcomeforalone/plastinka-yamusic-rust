@@ -2,16 +2,24 @@ package ru.plastinka.data
 
 import kotlinx.serialization.json.JsonObject
 
-/** Трек каталога. Парсится мягко: поля нет — значение по умолчанию. */
+/**
+ * Трек каталога. Парсится мягко: поля нет — значение по умолчанию.
+ *
+ * `source*` — то, что прислал Яндекс (с цензурой). Показывают [title], [artists] и
+ * [coverUri]: при включённом FckCensor и треке из списка они отдают версию без цензуры
+ * (чтение идёт через снимок состояния Compose, поэтому переключатель плагина перерисовывает
+ * списки сразу). Настоящий трек остаётся настоящим: [id] не меняется, лайки, «Не нравится»,
+ * отчёты о прослушивании, события волны и тексты Яндекса работают по нему.
+ */
 data class Track(
     val id: String,
-    val title: String,
-    val artists: List<ArtistRef>,
+    val sourceTitle: String,
+    val sourceArtists: List<ArtistRef>,
     val albumId: String?,
     val albumTitle: String?,
     val durationMs: Long?,
     val available: Boolean,
-    val coverUri: String?,
+    val sourceCoverUri: String?,
     /** Цвет трека для VibeColorizer (только у порций волны). */
     val vibe: VibeColors? = null,
     /** Громкость по EBU R128 (поле `r128`), если сервис её сообщил: для нормализации. */
@@ -19,6 +27,15 @@ data class Track(
     /** Пометка `contentWarning: explicit` (ненормативная лексика): значок «E». */
     val explicit: Boolean = false,
 ) {
+    /** Название для показа: без цензуры, если плагин включён и трек есть в списке. */
+    val title: String get() = FckCensor.trackPatch(id)?.title ?: sourceTitle
+
+    /** Исполнители для показа (см. [title]). Slopless спрашивает и [sourceArtists]. */
+    val artists: List<ArtistRef> get() = FckCensor.trackPatch(id)?.artists ?: sourceArtists
+
+    /** Обложка для показа (см. [title]). */
+    val coverUri: String? get() = FckCensor.trackPatch(id)?.coverUri ?: sourceCoverUri
+
     val artistNames: String get() = artists.joinToString(", ") { it.name }
     fun coverUrl(size: String = "400x400"): String? =
         coverUri?.takeIf { it.contains("%%") }
@@ -76,19 +93,34 @@ enum class AlbumKind(val title: String) {
     Compilation("Сборник"),
 }
 
-/** Альбом в списке или в шапке. */
+/**
+ * Альбом в списке или в шапке. Как у [Track]: `source*` — от Яндекса, [title], [artists] и
+ * [coverUri] — для показа (с учётом FckCensor).
+ */
 data class AlbumCard(
     val id: String,
-    val title: String,
+    val sourceTitle: String,
     val version: String?,
     val year: Int?,
     val kind: AlbumKind,
-    val artists: List<ArtistRef>,
-    val coverUri: String?,
+    val sourceArtists: List<ArtistRef>,
+    val sourceCoverUri: String?,
     val trackCount: Int,
 ) {
-    /** Название с версией: «Название (Deluxe)». */
-    val displayTitle: String get() = if (version != null) "$title ($version)" else title
+    val title: String get() = FckCensor.albumPatch(id)?.title ?: sourceTitle
+    val artists: List<ArtistRef> get() = FckCensor.albumPatch(id)?.artists ?: sourceArtists
+    val coverUri: String? get() = FckCensor.albumPatch(id)?.coverUri ?: sourceCoverUri
+
+    /** Название с версией: «Название (Deluxe)». Подменённое название идёт без версии цензурного. */
+    val displayTitle: String
+        get() {
+            val patched = FckCensor.albumPatch(id)?.title
+            return when {
+                patched != null -> patched
+                version != null -> "$sourceTitle ($version)"
+                else -> sourceTitle
+            }
+        }
     val artistNames: String get() = artists.joinToString(", ") { it.name }
     fun coverUrl(size: String = "300x300"): String? =
         coverUri?.takeIf { it.contains("%%") }?.let { "https://${it.replace("%%", size)}" }

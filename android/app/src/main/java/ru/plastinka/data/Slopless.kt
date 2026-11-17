@@ -80,7 +80,8 @@ class Slopless(private val http: OkHttpClient, private val cacheDir: File) {
      */
     fun trackLabel(track: Track): SlopLabel {
         var pending = false
-        for (artist in track.artists) {
+        // Исполнители и настоящие, и показанные (FckCensor): в базе slopless.art лежат настоящие номера.
+        for (artist in track.sourceArtists + track.artists) {
             val id = artist.id ?: continue
             val verdict = cache[id]
             when {
@@ -96,7 +97,7 @@ class Slopless(private val http: OkHttpClient, private val cacheDir: File) {
 
     /** Попросить данные об исполнителях треков (видимые строки, плеер, следующий трек). */
     fun wantTracks(tracks: Iterable<Track>) {
-        wantArtists(tracks.flatMap { track -> track.artists.mapNotNull { it.id } })
+        wantArtists(tracks.flatMap { track -> (track.sourceArtists + track.artists).mapNotNull { it.id } })
     }
 
     /** Попросить данные об исполнителях: неизвестных ставим в очередь, не больше [PARALLEL] запросов сразу. */

@@ -47,7 +47,7 @@ class PlastinkaApp : Application() {
         ru.plastinka.ui.AccentState.load()
         tokenStore = TokenStore.get(this)
         api = YandexApi(http)
-        fckCensor = FckCensor.get(http)
+        fckCensor = FckCensor.get(http, cacheDir)
         slopless = ru.plastinka.data.Slopless.get(http, cacheDir)
         removeLegacyAudio()
         ru.plastinka.data.PlayLog.init(this)

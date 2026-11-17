@@ -521,7 +521,7 @@ class YandexApi(private val http: OkHttpClient) {
                 }
             AlbumCard(
                 id = id,
-                title = title,
+                sourceTitle = title,
                 version = album.str("version")?.takeIf { it.isNotBlank() },
                 year = obj.str("releaseDate")?.take(4)?.toIntOrNull(),
                 kind = when (album.str("albumType") ?: album.str("type")) {
@@ -529,8 +529,8 @@ class YandexApi(private val http: OkHttpClient) {
                     "compilation" -> AlbumKind.Compilation
                     else -> AlbumKind.Album
                 },
-                artists = artists,
-                coverUri = (album.str("cover", "uri") ?: album.str("coverUri"))?.takeIf { it.contains("%%") },
+                sourceArtists = artists,
+                sourceCoverUri = (album.str("cover", "uri") ?: album.str("coverUri"))?.takeIf { it.contains("%%") },
                 trackCount = 0,
             )
         }.distinctBy { it.id }
@@ -765,7 +765,7 @@ class YandexApi(private val http: OkHttpClient) {
         }
         return AlbumCard(
             id = id,
-            title = title,
+            sourceTitle = title,
             version = a.str("version")?.takeIf { it.isNotBlank() },
             year = a.str("year")?.toIntOrNull(),
             kind = when (a.str("type")) {
@@ -773,8 +773,8 @@ class YandexApi(private val http: OkHttpClient) {
                 "compilation" -> AlbumKind.Compilation
                 else -> AlbumKind.Album
             },
-            artists = artists,
-            coverUri = (a.str("coverUri") ?: a.str("ogImage"))?.takeIf { it.contains("%%") },
+            sourceArtists = artists,
+            sourceCoverUri = (a.str("coverUri") ?: a.str("ogImage"))?.takeIf { it.contains("%%") },
             trackCount = a.str("trackCount")?.toIntOrNull() ?: 0,
         )
     }
@@ -1026,13 +1026,13 @@ class YandexApi(private val http: OkHttpClient) {
         val album = t["albums"]?.jsonArray?.firstOrNull()?.jsonObject
         return Track(
             id = id,
-            title = t["title"]?.jsonPrimitive?.content ?: "",
-            artists = artists,
+            sourceTitle = t["title"]?.jsonPrimitive?.content ?: "",
+            sourceArtists = artists,
             albumId = album?.get("id")?.jsonPrimitive?.content,
             albumTitle = album?.get("title")?.jsonPrimitive?.content,
             durationMs = t["durationMs"]?.jsonPrimitive?.content?.toLongOrNull(),
             available = t["available"]?.jsonPrimitive?.content != "false",
-            coverUri = album?.get("coverUri")?.jsonPrimitive?.content
+            sourceCoverUri = album?.get("coverUri")?.jsonPrimitive?.content
                 ?: t["coverUri"]?.jsonPrimitive?.content,
             loudness = parseLoudness(t["r128"]),
             explicit = (t["contentWarning"] as? JsonPrimitive)?.content == "explicit",

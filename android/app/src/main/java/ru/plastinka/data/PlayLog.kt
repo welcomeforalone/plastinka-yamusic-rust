@@ -130,16 +130,16 @@ object PlayLog {
     private fun encode(p: LocalPlay): JsonObject = buildJsonObject {
         val t = p.track
         put("id", t.id)
-        put("title", t.title)
+        put("title", t.sourceTitle)
         t.albumId?.let { put("album", it) }
         t.albumTitle?.let { put("albumTitle", it) }
-        t.coverUri?.let { put("cover", it) }
+        t.sourceCoverUri?.let { put("cover", it) }
         t.durationMs?.let { put("ms", it) }
         put("available", t.available)
         put(
             "artists",
             buildJsonArray {
-                t.artists.forEach { a ->
+                t.sourceArtists.forEach { a ->
                     add(
                         buildJsonObject {
                             a.id?.let { put("id", it) }
@@ -163,13 +163,13 @@ object PlayLog {
         }
         val track = Track(
             id = id,
-            title = o.str("title") ?: "",
-            artists = artists,
+            sourceTitle = o.str("title") ?: "",
+            sourceArtists = artists,
             albumId = o.str("album"),
             albumTitle = o.str("albumTitle"),
             durationMs = o.str("ms")?.toLongOrNull(),
             available = o.str("available") != "false",
-            coverUri = o.str("cover"),
+            sourceCoverUri = o.str("cover"),
         )
         val date = try {
             LocalDate.parse(o.str("date") ?: return null)
