@@ -40,15 +40,33 @@
 Каждый файл релиза собирается в GitHub Actions с последнего коммита `main`
 на момент выпуска.
 
-| Система | Файл |
-|---|---|
-| Windows x64 | `plastinka-windows-x64.zip` |
-| macOS (Apple Silicon и Intel) | `plastinka-macos.zip` |
-| Linux x86_64 (любой дистрибутив) | `plastinka-linux-x86_64.tar.gz` |
-| Android 8.0+ | `plastinka-android.apk` |
+| Система | Файл | Внутри |
+|---|---|---|
+| Windows x64 | `plastinka-windows-x64.zip` | `Plastinka.exe` |
+| macOS (Apple Silicon и Intel) | `plastinka-macos.zip` | `Plastinka` |
+| Linux x86_64 (любой дистрибутив) | `plastinka-linux-x86_64.tar.gz` | папка `plastinka-linux-x86_64` с `Plastinka` и `install.sh` |
+| Android 8.0+ | `plastinka-android.apk` | |
+
+Имена архивов у всех версий одинаковые, а программа внутри называется с
+большой буквы: `Plastinka`.
 
 Релиз один на все платформы. Android-клиент отстаёт от десктопного — чего в
 нём пока нет, перечислено в разделе [Android](#android).
+
+### Windows
+
+Распакуйте `plastinka-windows-x64.zip` и запустите `Plastinka.exe`. Проверка
+архива: файл `.sha256` рядом с ним на странице релиза.
+
+### macOS
+
+Распакуйте `plastinka-macos.zip` и в терминале в той же папке:
+
+```sh
+chmod +x Plastinka
+xattr -d com.apple.quarantine Plastinka
+./Plastinka
+```
 
 ### Linux
 
@@ -58,23 +76,47 @@ Arch, CachyOS, Manjaro, Fedora 36+, openSUSE, Ubuntu 22.04+, Debian 12+ и др�
 систем уже стоит; через PipeWire и PulseAudio звук тоже идёт), остальное
 окно подгружает само: Wayland или X11, Vulkan или OpenGL.
 
+Установка и обновление одной последовательностью. Команды по одной в строке,
+работают и в bash, и в fish. Архив каждый раз скачивается по прямой ссылке
+на последний релиз в отдельный каталог и заменяет старый файл с тем же именем:
+
 ```sh
+mkdir -p ~/plastinka-install
+cd ~/plastinka-install
+rm -rf plastinka-linux-x86_64 plastinka-linux-x86_64.tar.gz
+curl -fLO https://github.com/welcomeforalone/yandex-music-rust/releases/latest/download/plastinka-linux-x86_64.tar.gz
 tar -xzf plastinka-linux-x86_64.tar.gz
 cd plastinka-linux-x86_64
-./plastinka            # запустить сразу
-./install.sh           # или установить в ~/.local: команда plastinka, ярлык и иконка в меню
+sh install.sh
 ```
 
-Удаление — `./install.sh --uninstall`. Проверить архив:
-`sha256sum -c plastinka-linux-x86_64.tar.gz.sha256`.
+`sh install.sh` — надёжный вариант, он не зависит от шебанга. Обычный
+запуск — `./install.sh`. Программа ставится в `~/.local/bin/Plastinka`;
+старую `~/.local/bin/plastinka` от прежних версий установка удаляет.
+Запустить без установки: `./Plastinka` в распакованной папке. Удаление —
+`sh install.sh --uninstall` (убирает оба имени).
+
+Какая версия стоит: `Plastinka --version` (или
+`~/.local/bin/Plastinka --version`, если `~/.local/bin` не в PATH).
+
+Проверить архив (файл `.sha256` тоже берём по прямой ссылке, в том же
+каталоге до распаковки):
+
+```sh
+curl -fLO https://github.com/welcomeforalone/yandex-music-rust/releases/latest/download/plastinka-linux-x86_64.tar.gz.sha256
+sha256sum -c plastinka-linux-x86_64.tar.gz.sha256
+```
 
 Если `./install.sh` не запускается с ошибкой про окончания строк Windows
-(`\r\n`, «bad interpreter»), значит, в скрипт попали символы CR. Их можно
-убрать прямо в распакованном архиве:
+(`\r\n`, «The file uses Windows line endings», «bad interpreter»), значит,
+распакован архив прежней версии: у всех релизов одно имя файла, а браузер
+сохраняет новый как `plastinka-linux-x86_64(1).tar.gz`, и `tar` берёт старый.
+Лучше скачать заново командами выше. Быстрое исправление в распакованной
+папке:
 
 ```sh
 sed -i 's/\r$//' install.sh plastinka.desktop
-# или: dos2unix install.sh plastinka.desktop
+sh install.sh
 ```
 
 Пакеты, если чего-то нет:
@@ -99,7 +141,7 @@ Secret Service) или KeePassXC. В KDE Plasma (CachyOS по умолчанию
 
 - `build-linux.yml` — контейнер Ubuntu 22.04, проверка запуска на Arch Linux;
 - `build-windows.yml` — Windows x64 (MSVC), иконка и свойства файла из
-  `build.rs`, в архиве только `plastinka.exe`, рядом `.sha256`;
+  `build.rs`, в архиве только `Plastinka.exe`, рядом `.sha256`;
 - `build-macos.yml` — универсальный бинарник (Apple Silicon и Intel).
 
 ```sh
@@ -109,6 +151,10 @@ gh workflow run build-macos.yml --ref main -f release_tag=v0.0.1
 ```
 
 Без `release_tag` архив остаётся артефактом запуска (30 дней).
+
+Имена архивов остаются прежними (в нижнем регистре), внутри программа —
+`Plastinka`. Пользователи скачивают архив по прямой ссылке
+`releases/latest/download/…`.
 
 Linux-архив в релиз кладём только из `build-linux.yml` (с `release_tag` или
 `gh run download`) и не пересобираем на Windows: там git с
@@ -691,7 +737,7 @@ stderr: `play-audio track-id=… played=… → HTTP 200: {"result":"ok"…}`.
 
 - **Подписка Плюс активна** — воспроизведение доступно в окне.
 - **Нужна подписка Плюс** — без неё музыка не играет. Подписку оформляют на
-  https://plus.yandex.ru, потом снова запускают `plastinka account`.
+  https://plus.yandex.ru, потом снова запускают `Plastinka account`.
 - **Сервис недоступен в регионе аккаунта** — воспроизведение невозможно даже
   с подпиской.
 - **Подписку подтвердить не удалось** — сервис не прислал понятных сведений.
@@ -716,21 +762,21 @@ stderr: `play-audio track-id=… played=… → HTTP 200: {"result":"ok"…}`.
 уходит в stderr, код выхода 0. Доступ тогда можно отозвать вручную на странице
 https://id.yandex.ru/personal/data-access.
 
-Сборка релиза: `cargo build --release`. Бинарник: `target\release\plastinka.exe`
-в Windows, `target/release/plastinka` в Linux.
+Сборка релиза: `cargo build --release`. Бинарник: `target\release\Plastinka.exe`
+в Windows, `target/release/Plastinka` в Linux и macOS.
 
 Релиз под Windows собран как оконное приложение: при запуске из проводника
-или ярлыка консоль не открывается. Команды из терминала (`plastinka login`,
+или ярлыка консоль не открывается. Команды из терминала (`Plastinka login`,
 `--help` и т. д.) подключаются к консоли терминала и пишут в неё; так как
 приложение оконное, `cmd` и PowerShell не ждут его завершения, и приглашение
 может появиться раньше вывода. Если это мешает, запускайте команды через
 `cargo run -- <команда>` (отладочная сборка консольная) или с перенаправлением:
-`plastinka account | more`. Если окно не открылось, релиз показывает ошибку
+`Plastinka account | more`. Если окно не открылось, релиз показывает ошибку
 в системном диалоге.
 
 Иконка приложения — `assets/app/plastinka.svg`. PNG и ICO из неё рисует
 `python assets/app/make_icon.py` (нужен Pillow). В Windows `build.rs`
-вшивает `plastinka.ico` и сведения о версии в `plastinka.exe` через
+вшивает `plastinka.ico` и сведения о версии в `Plastinka.exe` через
 `winresource` (нужен `rc.exe` из Windows SDK — он ставится вместе с
 компонентом C++ в Visual Studio). Окно берёт `plastinka.png` при запуске,
 в Linux её же ставит `install.sh` (имя `plastinka`, как у `.desktop`).
@@ -1128,7 +1174,7 @@ client_secret, как у всех неофициальных клиентов. �
 | `assets/fonts` | Шрифт Inter (SIL OFL 1.1), встроен в бинарник |
 | `assets/icons` | Иконки, которых нет в макете (в стиле Lucide) |
 | `assets/app` | Иконка приложения: исходник SVG, PNG для окна и Linux, ICO для exe, скрипт `make_icon.py` |
-| `build.rs` | Вшивает иконку и сведения о версии в `plastinka.exe` (Windows) |
+| `build.rs` | Вшивает иконку и сведения о версии в `Plastinka.exe` (Windows) |
 | `android` | Клиент для Android: данные и API (`data`), сервис воспроизведения, эквалайзер, нормализация и спектр (`playback`), экраны на Compose (`ui`) |
 | `design` | Бриф и материалы дизайна |
 | `packaging/linux` | Ярлык `.desktop` и `install.sh` для Linux-архива |

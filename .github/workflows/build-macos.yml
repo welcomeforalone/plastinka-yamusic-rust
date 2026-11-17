@@ -44,24 +44,24 @@ jobs:
       - name: Assemble artifact
         run: |
           mkdir out
-          if [ -f target/x86_64-apple-darwin/release/plastinka ]; then
-            lipo -create -output out/plastinka \
-              target/aarch64-apple-darwin/release/plastinka \
-              target/x86_64-apple-darwin/release/plastinka
+          if [ -f target/x86_64-apple-darwin/release/Plastinka ]; then
+            lipo -create -output out/Plastinka \
+              target/aarch64-apple-darwin/release/Plastinka \
+              target/x86_64-apple-darwin/release/Plastinka
             echo "universal=true" >> "$GITHUB_OUTPUT"
           else
-            cp target/aarch64-apple-darwin/release/plastinka out/plastinka
+            cp target/aarch64-apple-darwin/release/Plastinka out/Plastinka
             echo "universal=false" >> "$GITHUB_OUTPUT"
           fi
         id: assemble
 
       - name: Smoke test
-        run: out/plastinka --version
+        run: out/Plastinka --version
 
       - name: Zip
         run: |
-          chmod +x out/plastinka
-          cd out && zip ../plastinka-macos.zip plastinka
+          chmod +x out/Plastinka
+          cd out && zip ../plastinka-macos.zip Plastinka
 
       - uses: actions/upload-artifact@v4
         with:

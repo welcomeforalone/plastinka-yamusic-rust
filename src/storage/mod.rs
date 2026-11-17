@@ -35,10 +35,10 @@ pub enum StorageError {
     SecretStoreUnavailable(String),
     #[error("нет доступа к системному хранилищу паролей. Разблокируйте его и повторите")]
     SecretStoreLocked,
-    #[error("сохранённый токен повреждён. Войдите заново: plastinka login")]
+    #[error("сохранённый токен повреждён. Войдите заново: Plastinka login")]
     BadStoredToken,
     #[error(
-        "в хранилище паролей несколько записей Plastinka. Удалите их командой plastinka logout"
+        "в хранилище паролей несколько записей Plastinka. Удалите их командой Plastinka logout"
     )]
     SecretStoreDuplicates,
     #[error("ошибка системного хранилища паролей: {0}")]

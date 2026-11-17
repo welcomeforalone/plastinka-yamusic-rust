@@ -1,4 +1,4 @@
-//! Вшивает в plastinka.exe иконку и сведения о программе (свойства файла).
+//! Вшивает в Plastinka.exe иконку и сведения о программе (свойства файла).
 
 use std::env;
 use std::io::{self, Write};
@@ -23,6 +23,8 @@ fn windows_resources() -> ExitCode {
     res.set_icon("assets/app/plastinka.ico")
         .set("ProductName", "Plastinka")
         .set("FileDescription", "Plastinka")
+        .set("OriginalFilename", "Plastinka.exe")
+        .set("InternalName", "Plastinka.exe")
         .set(
             "LegalCopyright",
             "Неофициальный клиент, не связан с ООО «Яндекс»",

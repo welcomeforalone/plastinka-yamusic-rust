@@ -10,22 +10,24 @@ apps="$data/applications"
 icons="$data/icons/hicolor"
 
 if [ "${1:-}" = "--uninstall" ]; then
-    rm -f "$bin/plastinka" "$apps/plastinka.desktop" "$icons/256x256/apps/plastinka.png" "$icons/scalable/apps/plastinka.svg"
+    rm -f "$bin/Plastinka" "$bin/plastinka" "$apps/plastinka.desktop" "$icons/256x256/apps/plastinka.png" "$icons/scalable/apps/plastinka.svg"
     echo "Plastinka удалена. Настройки и кэш: ~/.config/plastinka, ~/.cache/plastinka"
     exit 0
 fi
 
 mkdir -p "$bin" "$apps" "$icons/256x256/apps" "$icons/scalable/apps"
-install -m 755 "$dir/plastinka" "$bin/plastinka"
+# Прежние версии ставили программу как plastinka: убираем, чтобы не осталось двух.
+rm -f "$bin/plastinka"
+install -m 755 "$dir/Plastinka" "$bin/Plastinka"
 install -m 644 "$dir/plastinka.png" "$icons/256x256/apps/plastinka.png"
 install -m 644 "$dir/plastinka.svg" "$icons/scalable/apps/plastinka.svg"
 # tr убирает CR, если ярлык в архиве попал с окончаниями строк Windows.
-tr -d '\r' < "$dir/plastinka.desktop" | sed "s|^Exec=.*|Exec=$bin/plastinka|" > "$apps/plastinka.desktop"
+tr -d '\r' < "$dir/plastinka.desktop" | sed "s|^Exec=.*|Exec=$bin/Plastinka|" > "$apps/plastinka.desktop"
 chmod 644 "$apps/plastinka.desktop"
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$apps" || true
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t "$icons" || true
 
-echo "Установлено: $bin/plastinka"
+echo "Установлено: $bin/Plastinka"
 case ":$PATH:" in
     *":$bin:"*) ;;
     *) echo "Каталог $bin не в PATH: запускайте из меню приложений или по полному пути." ;;

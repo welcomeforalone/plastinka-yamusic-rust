@@ -1,5 +1,5 @@
 // В релизе под Windows окно открывается без консоли. Команды из терминала
-// (`plastinka login` и т. п.) подключаются к консоли родителя, см. `attach_console`.
+// (`Plastinka login` и т. п.) подключаются к консоли родителя, см. `attach_console`.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::fmt::Display;
@@ -67,7 +67,7 @@ const PLUS_URL: &str = "https://plus.yandex.ru";
 #[derive(Debug, Parser)]
 #[command(
     name = APP_NAME,
-    bin_name = "plastinka",
+    bin_name = "Plastinka",
     version,
     disable_help_flag = true,
     disable_version_flag = true,
@@ -119,9 +119,9 @@ enum CliError {
     Api(#[from] ApiError),
     #[error(transparent)]
     Net(#[from] NetError),
-    #[error("вход не выполнен. Войдите командой: plastinka login")]
+    #[error("вход не выполнен. Войдите командой: Plastinka login")]
     NotLoggedIn,
-    #[error("токен больше не действует (отозван или истёк). Войдите заново: plastinka login")]
+    #[error("токен больше не действует (отозван или истёк). Войдите заново: Plastinka login")]
     TokenExpired,
     #[error("Яндекс выдал токен, но сервис музыки его не принимает. Токен не сохранён")]
     TokenRejected,
@@ -248,8 +248,8 @@ fn help_hint() -> String {
         .and_then(|arg| arg.into_string().ok())
         .filter(|arg| Cli::command().find_subcommand(arg).is_some())
         .map_or_else(
-            || "plastinka --help".to_owned(),
-            |command| format!("plastinka {command} --help"),
+            || "Plastinka --help".to_owned(),
+            |command| format!("Plastinka {command} --help"),
         )
 }
 
@@ -339,7 +339,7 @@ async fn login() -> Result<(), CliError> {
         }
         Err(err) => {
             warn(format_args!(
-                "не удалось проверить токен и подписку: {err}. Сохраняю токен, проверить можно командой plastinka account"
+                "не удалось проверить токен и подписку: {err}. Сохраняю токен, проверить можно командой Plastinka account"
             ));
             None
         }
@@ -581,7 +581,7 @@ fn subscription_text(subscription: &Subscription) -> String {
             };
             format!(
                 "Нужна подписка Плюс: без неё {APP_NAME} не воспроизводит музыку.{trial}\n\
-                 Оформите подписку на {PLUS_URL} и проверьте снова: plastinka account"
+                 Оформите подписку на {PLUS_URL} и проверьте снова: Plastinka account"
             )
         }
         Subscription::RegionUnavailable { region_code } => {
@@ -597,7 +597,7 @@ fn subscription_text(subscription: &Subscription) -> String {
         Subscription::Unconfirmed => "Подписку Плюс подтвердить не удалось: сервис не прислал \
                                       сведений о ней. Пока подписка не подтверждена, \
                                       воспроизведение недоступно. Повторите позже: \
-                                      plastinka account"
+                                      Plastinka account"
             .to_owned(),
     }
 }

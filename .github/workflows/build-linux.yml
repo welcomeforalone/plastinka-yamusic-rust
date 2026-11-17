@@ -52,16 +52,16 @@ jobs:
         run: cargo build --release --locked
 
       - name: Dynamic libraries
-        run: ldd target/release/plastinka
+        run: ldd target/release/Plastinka
 
       - name: Smoke test
-        run: target/release/plastinka --version
+        run: target/release/Plastinka --version
 
       - name: Package
         run: |
           name=plastinka-linux-x86_64
           mkdir -p "out/$name"
-          install -m 755 target/release/plastinka "out/$name/plastinka"
+          install -m 755 target/release/Plastinka "out/$name/Plastinka"
           install -m 644 packaging/linux/plastinka.desktop "out/$name/"
           install -m 644 assets/app/plastinka.png assets/app/plastinka.svg "out/$name/"
           install -m 755 packaging/linux/install.sh "out/$name/"
@@ -99,7 +99,7 @@ jobs:
           pacman -Sy --noconfirm alsa-lib
           sha256sum -c plastinka-linux-x86_64.tar.gz.sha256
           tar -xzf plastinka-linux-x86_64.tar.gz
-          plastinka-linux-x86_64/plastinka --version
+          plastinka-linux-x86_64/Plastinka --version
 
       # install.sh запускается так же, как у пользователя (./install.sh, через
       # shebang), во временный HOME. Ярлык на выходе — без CR и с полным путём.
@@ -109,14 +109,16 @@ jobs:
           cd plastinka-linux-x86_64
           ./install.sh
           desktop="$HOME/.local/share/applications/plastinka.desktop"
-          test -x "$HOME/.local/bin/plastinka"
-          grep -qx "Exec=$HOME/.local/bin/plastinka" "$desktop"
+          test -x "$HOME/.local/bin/Plastinka"
+          "$HOME/.local/bin/Plastinka" --version
+          grep -qx "Exec=$HOME/.local/bin/Plastinka" "$desktop"
           if grep -q "$(printf '\r')" "$desktop"; then
             echo "В ярлыке остались символы CR" >&2
             exit 1
           fi
           ./install.sh --uninstall
           test ! -e "$desktop"
+          test ! -e "$HOME/.local/bin/Plastinka"
 
   release:
     needs: [build, arch-check]

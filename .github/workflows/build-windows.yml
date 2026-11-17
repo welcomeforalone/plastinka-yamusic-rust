@@ -45,15 +45,15 @@ jobs:
       # поэтому ждём явно и смотрим код выхода.
       - name: Smoke test
         run: |
-          $p = Start-Process -FilePath target\release\plastinka.exe `
+          $p = Start-Process -FilePath target\release\Plastinka.exe `
             -ArgumentList '--version' -Wait -PassThru -NoNewWindow
-          if ($p.ExitCode -ne 0) { throw "plastinka --version: код $($p.ExitCode)" }
+          if ($p.ExitCode -ne 0) { throw "Plastinka --version: код $($p.ExitCode)" }
 
       - name: Package
         run: |
           $name = 'plastinka-windows-x64'
           New-Item -ItemType Directory -Force out | Out-Null
-          Copy-Item target\release\plastinka.exe out\
+          Copy-Item target\release\Plastinka.exe out\
           Compress-Archive -Path out\* -DestinationPath "$name.zip" -Force
           $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
           # Перевод строки LF: иначе `sha256sum -c` не находит файл из-за \r.
