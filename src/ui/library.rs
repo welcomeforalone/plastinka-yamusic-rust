@@ -31,6 +31,7 @@ use super::Message::Library as Lib;
 use super::anim;
 use super::covers::{Art, Avatar, Covers, Grade};
 use super::filter;
+use super::gate;
 use super::history;
 use super::history_store;
 use super::icons::{Icon, icon, spinner};
@@ -96,7 +97,7 @@ const CONTROLS: f32 = 440.0;
 const SPECTRUM_ALPHA: f32 = 0.22;
 /// Полноэкранный плеер: заголовок окна, строка с крестиком, плеер и
 /// подписи под обложкой по высоте; поля по бокам; пределы обложки.
-const FULLSCREEN_CHROME: f32 = 36.0 + 40.0 + 89.0 + 110.0;
+const FULLSCREEN_CHROME: f32 = gate::TITLE_BAR_HEIGHT + 40.0 + 89.0 + 110.0;
 const FULLSCREEN_SIDE: f32 = 64.0;
 const FULLSCREEN_COVER_MIN: f32 = 160.0;
 const FULLSCREEN_COVER_MAX: f32 = 560.0;

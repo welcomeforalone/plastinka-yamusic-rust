@@ -6,8 +6,7 @@ use std::time::Instant;
 
 use iced::task;
 use iced::widget::{
-    Space, button, center, column, container, hover, mouse_area, opaque, right, row, scrollable,
-    stack,
+    Space, center, column, container, mouse_area, opaque, right, row, scrollable, stack,
 };
 use iced::{Alignment, Border, Element, Length, Padding, Shadow};
 
@@ -159,7 +158,19 @@ impl Paywall {
 
 // ---------------------------------------------------------------- каркас
 
-/// Полоса заголовка 36 px: тянет окно, двойной клик разворачивает.
+/// Высота полосы заголовка. В macOS — высота системного заголовка, чтобы
+/// «светофоры» стояли по центру полосы.
+#[cfg(target_os = "macos")]
+pub const TITLE_BAR_HEIGHT: f32 = 28.0;
+#[cfg(not(target_os = "macos"))]
+pub const TITLE_BAR_HEIGHT: f32 = 36.0;
+
+/// Отступ слева под системные кнопки macOS.
+#[cfg(target_os = "macos")]
+const TRAFFIC_LIGHTS_INSET: f32 = 76.0;
+
+/// Полоса заголовка: тянет окно, двойной клик разворачивает. В macOS своих
+/// кнопок нет: слева системные, поэтому слева отступ.
 pub fn title_bar<'a>(with_brand: bool) -> Element<'a, Message> {
     let brand: Element<'a, Message> = if with_brand {
         row![
@@ -172,26 +183,38 @@ pub fn title_bar<'a>(with_brand: bool) -> Element<'a, Message> {
     } else {
         Space::new().into()
     };
+    #[cfg(target_os = "macos")]
+    let left = TRAFFIC_LIGHTS_INSET;
+    #[cfg(not(target_os = "macos"))]
+    let left = 16.0;
     let drag = mouse_area(
         container(brand)
-            .padding(Padding::default().left(16))
+            .padding(Padding::default().left(left))
             .width(Length::Fill)
             .height(Length::Fill)
             .center_y(Length::Fill),
     )
-    .on_press(Message::DragWindow)
-    .on_double_click(Message::ToggleMaximize);
-    row![
+    .on_press(Message::DragWindow);
+    // В macOS двойной клик по заголовку обрабатывает система (зум или
+    // полноэкранный режим по настройке пользователя): свой не добавляем,
+    // иначе окно переключится дважды.
+    #[cfg(not(target_os = "macos"))]
+    let drag = drag.on_double_click(Message::ToggleMaximize);
+    #[cfg(target_os = "macos")]
+    let bar = row![drag];
+    #[cfg(not(target_os = "macos"))]
+    let bar = row![
         drag,
         window_button(Icon::WindowMinimize, Message::Minimize, false),
         window_button(Icon::WindowMaximize, Message::ToggleMaximize, false),
         window_button(Icon::WindowClose, Message::CloseWindow, true),
-    ]
-    .height(36)
-    .into()
+    ];
+    bar.height(TITLE_BAR_HEIGHT).into()
 }
 
+#[cfg(not(target_os = "macos"))]
 fn window_button<'a>(name: Icon, on_press: Message, close: bool) -> Element<'a, Message> {
+    use iced::widget::button;
     let make = move |hovered: bool| -> Element<'a, Message> {
         let color = if hovered {
             theme::TEXT_PRIMARY
@@ -200,7 +223,7 @@ fn window_button<'a>(name: Icon, on_press: Message, close: bool) -> Element<'a, 
         };
         button(center(icon(name, 16.0, color)))
             .width(46)
-            .height(36)
+            .height(TITLE_BAR_HEIGHT)
             .padding(0)
             .style(move |_, status| button::Style {
                 background: match status {
@@ -216,7 +239,7 @@ fn window_button<'a>(name: Icon, on_press: Message, close: bool) -> Element<'a, 
             .on_press(on_press.clone())
             .into()
     };
-    hover(make(false), make(true))
+    iced::widget::hover(make(false), make(true))
 }
 
 /// Экран до главного окна: содержимое по центру, внизу обязательная строка.

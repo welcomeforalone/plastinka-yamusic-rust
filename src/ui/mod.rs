@@ -33,9 +33,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iced::animation::Animation;
-use iced::widget::{column, container, mouse_area, row, stack};
-use iced::window::{self, Direction};
-use iced::{Element, Length, Size, Subscription, Task, keyboard, mouse};
+use iced::widget::{column, container, row, stack};
+use iced::window;
+use iced::{Element, Length, Size, Subscription, Task, keyboard};
 
 use crate::APP_NAME;
 use crate::api::{self, AccountStatus, ApiError, AudioQuality, PlaybackPermit};
@@ -71,15 +71,32 @@ fn window_settings() -> window::Settings {
     window::Settings {
         size: Size::new(1280.0, 800.0),
         min_size: Some(Size::new(960.0, 600.0)),
-        // Свой заголовок окна: системная рамка не нужна.
-        decorations: false,
+        // Свой заголовок окна: системная рамка не нужна. В macOS наоборот:
+        // системная рамка нужна ради кнопок «светофора» (см. `main_platform_specific`).
+        decorations: cfg!(target_os = "macos"),
         // Углы в Linux скругляем сами: за ними должно быть видно рабочий стол.
         transparent: corners::ENABLED,
         // Закрытие обрабатываем сами: несохранённый токен надо отозвать.
         exit_on_close_request: false,
         icon: app_icon(),
-        platform_specific: platform_specific(),
+        platform_specific: main_platform_specific(),
         ..window::Settings::default()
+    }
+}
+
+/// Платформенные параметры главного окна. В macOS заголовок системный, но
+/// прозрачный и без текста, а содержимое лежит под ним: окно выглядит
+/// «без рамки», а слева сверху остаются настоящие кнопки macOS (закрыть,
+/// свернуть, полноэкранный режим). Сдвинуть их winit не умеет.
+fn main_platform_specific() -> window::settings::PlatformSpecific {
+    window::settings::PlatformSpecific {
+        #[cfg(target_os = "macos")]
+        title_hidden: true,
+        #[cfg(target_os = "macos")]
+        titlebar_transparent: true,
+        #[cfg(target_os = "macos")]
+        fullsize_content_view: true,
+        ..platform_specific()
     }
 }
 
@@ -377,10 +394,13 @@ pub enum Message {
     Maximized(bool),
     WindowMode(window::Mode),
     DragWindow,
+    #[cfg(not(target_os = "macos"))]
     ToggleMaximize,
+    #[cfg(not(target_os = "macos"))]
     Minimize,
     CloseWindow,
-    ResizeWindow(Direction),
+    #[cfg(not(target_os = "macos"))]
+    ResizeWindow(window::Direction),
     Tick(Instant),
     Frame(Instant),
     Key(keyboard::Event),
@@ -875,9 +895,12 @@ impl App {
                 drag_pulse::start();
                 return self.with_window(window::drag);
             }
+            #[cfg(not(target_os = "macos"))]
             Message::ToggleMaximize => return self.with_window(window::toggle_maximize),
+            #[cfg(not(target_os = "macos"))]
             Message::Minimize => return self.with_window(|id| window::minimize(id, true)),
             Message::CloseWindow => return self.close(),
+            #[cfg(not(target_os = "macos"))]
             Message::ResizeWindow(direction) => {
                 drag_pulse::start();
                 return self.with_window(|id| window::drag_resize(id, direction));
@@ -1986,6 +2009,8 @@ impl App {
             transitioning,
             Message::Frame,
         ));
+        // В macOS рамка системная и размер меняет сама система: своих полос нет.
+        #[cfg(not(target_os = "macos"))]
         let layers = layers.push(resize_edges());
         // Скругление углов — поверх всего, мышь не ловит.
         let scale = self.prefs.scale as f32 / 100.0;
@@ -2030,10 +2055,11 @@ pub fn appear<'a>(content: Element<'a, Message>, shown: f32) -> Element<'a, Mess
 }
 
 /// Невидимые полосы по краям окна: окно без рамки само размер не меняет.
+#[cfg(not(target_os = "macos"))]
 fn resize_edges<'a>() -> Element<'a, Message> {
     const EDGE: f32 = 5.0;
-    let edge = |width: Length, height: Length, direction: Direction, cursor| {
-        mouse_area(
+    let edge = |width: Length, height: Length, direction: window::Direction, cursor| {
+        iced::widget::mouse_area(
             container(iced::widget::Space::new())
                 .width(width)
                 .height(height),
@@ -2041,28 +2067,28 @@ fn resize_edges<'a>() -> Element<'a, Message> {
         .interaction(cursor)
         .on_press(Message::ResizeWindow(direction))
     };
-    use mouse::Interaction::{
+    use iced::mouse::Interaction::{
         ResizingDiagonallyDown as Down, ResizingDiagonallyUp as Up,
         ResizingHorizontally as Horizontal, ResizingVertically as Vertical,
     };
     let fixed = Length::Fixed(EDGE);
     let top = row![
-        edge(fixed, fixed, Direction::NorthWest, Down),
-        edge(Length::Fill, fixed, Direction::North, Vertical),
-        edge(fixed, fixed, Direction::NorthEast, Up),
+        edge(fixed, fixed, window::Direction::NorthWest, Down),
+        edge(Length::Fill, fixed, window::Direction::North, Vertical),
+        edge(fixed, fixed, window::Direction::NorthEast, Up),
     ];
     let middle = row![
-        edge(fixed, Length::Fill, Direction::West, Horizontal),
+        edge(fixed, Length::Fill, window::Direction::West, Horizontal),
         iced::widget::Space::new()
             .width(Length::Fill)
             .height(Length::Fill),
-        edge(fixed, Length::Fill, Direction::East, Horizontal),
+        edge(fixed, Length::Fill, window::Direction::East, Horizontal),
     ]
     .height(Length::Fill);
     let bottom = row![
-        edge(fixed, fixed, Direction::SouthWest, Up),
-        edge(Length::Fill, fixed, Direction::South, Vertical),
-        edge(fixed, fixed, Direction::SouthEast, Down),
+        edge(fixed, fixed, window::Direction::SouthWest, Up),
+        edge(Length::Fill, fixed, window::Direction::South, Vertical),
+        edge(fixed, fixed, window::Direction::SouthEast, Down),
     ];
     column![top, middle, bottom].into()
 }

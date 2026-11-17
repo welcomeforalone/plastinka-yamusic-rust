@@ -60,8 +60,10 @@ pub enum Icon {
     VolumeLow,
     VolumeMute,
     Wave,
+    #[cfg(not(target_os = "macos"))]
     WindowClose,
     WindowMaximize,
+    #[cfg(not(target_os = "macos"))]
     WindowMinimize,
 }
 
@@ -128,8 +130,10 @@ impl Icon {
             Self::VolumeLow => file!("volume-low"),
             Self::VolumeMute => file!("volume-mute"),
             Self::Wave => file!("wave"),
+            #[cfg(not(target_os = "macos"))]
             Self::WindowClose => file!("window-close"),
             Self::WindowMaximize => file!("window-maximize"),
+            #[cfg(not(target_os = "macos"))]
             Self::WindowMinimize => file!("window-minimize"),
         }
     }

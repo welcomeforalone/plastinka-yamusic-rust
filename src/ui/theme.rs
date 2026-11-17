@@ -41,6 +41,7 @@ pub const ERROR_HOVER: Color = rgba(0xFF6B6B, 0.24);
 pub const ERROR_PRESSED: Color = rgba(0xFF6B6B, 0.34);
 pub const SCRIM: Color = rgba(0x000000, 0.72);
 /// Кнопка «закрыть» в заголовке окна при наведении, как у системных окон.
+#[cfg(not(target_os = "macos"))]
 pub const CLOSE_HOVER: Color = rgb(0xC42B1C);
 
 // ---------------------------------------------------------------- акцент
