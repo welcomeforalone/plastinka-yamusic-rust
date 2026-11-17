@@ -122,7 +122,7 @@ Linux-архив в релиз кладём только из `build-linux.yml` 
 
 ```sh
 gh run download <номер запуска build-android> -n plastinka-android
-gh release upload v0.0.3 plastinka-android.apk
+gh release upload v0.0.4 plastinka-android.apk
 ```
 
 Версия у всех платформ одна: `version` в `Cargo.toml` и `versionName` в
@@ -897,7 +897,7 @@ Media3). Правила те же, что у десктопа: звук толь
 
 ### Чего на Android пока нет (отставание от десктопа)
 
-Состояние на версию 0.0.3. Список — что нужно сделать, чтобы Android
+Состояние на версию 0.0.4. Список — что нужно сделать, чтобы Android
 догнал десктоп:
 
 - **Discord RPC.** На телефоне нет локального приложения Discord с IPC, а
