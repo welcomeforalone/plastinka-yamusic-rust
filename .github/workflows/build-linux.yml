@@ -65,6 +65,14 @@ jobs:
           install -m 644 packaging/linux/plastinka.desktop "out/$name/"
           install -m 644 assets/app/plastinka.png assets/app/plastinka.svg "out/$name/"
           install -m 755 packaging/linux/install.sh "out/$name/"
+          # Unix-файлам нужен LF: с CRLF install.sh не запускается. Обычно
+          # это гарантирует .gitattributes, здесь — на случай, если CR всё
+          # же попал в файл: убираем его и проверяем, что не осталось.
+          sed -i 's/\r$//' "out/$name/install.sh" "out/$name/plastinka.desktop"
+          if grep -l "$(printf '\r')" "out/$name/install.sh" "out/$name/plastinka.desktop"; then
+            echo "В файлах выше остались символы CR" >&2
+            exit 1
+          fi
           tar -C out -czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
 
@@ -92,6 +100,23 @@ jobs:
           sha256sum -c plastinka-linux-x86_64.tar.gz.sha256
           tar -xzf plastinka-linux-x86_64.tar.gz
           plastinka-linux-x86_64/plastinka --version
+
+      # install.sh запускается так же, как у пользователя (./install.sh, через
+      # shebang), во временный HOME. Ярлык на выходе — без CR и с полным путём.
+      - name: Install script on Arch
+        run: |
+          export HOME="$(mktemp -d)"
+          cd plastinka-linux-x86_64
+          ./install.sh
+          desktop="$HOME/.local/share/applications/plastinka.desktop"
+          test -x "$HOME/.local/bin/plastinka"
+          grep -qx "Exec=$HOME/.local/bin/plastinka" "$desktop"
+          if grep -q "$(printf '\r')" "$desktop"; then
+            echo "В ярлыке остались символы CR" >&2
+            exit 1
+          fi
+          ./install.sh --uninstall
+          test ! -e "$desktop"
 
   release:
     needs: [build, arch-check]

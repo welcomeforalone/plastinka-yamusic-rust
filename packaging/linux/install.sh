@@ -19,7 +19,8 @@ mkdir -p "$bin" "$apps" "$icons/256x256/apps" "$icons/scalable/apps"
 install -m 755 "$dir/plastinka" "$bin/plastinka"
 install -m 644 "$dir/plastinka.png" "$icons/256x256/apps/plastinka.png"
 install -m 644 "$dir/plastinka.svg" "$icons/scalable/apps/plastinka.svg"
-sed "s|^Exec=.*|Exec=$bin/plastinka|" "$dir/plastinka.desktop" > "$apps/plastinka.desktop"
+# tr убирает CR, если ярлык в архиве попал с окончаниями строк Windows.
+tr -d '\r' < "$dir/plastinka.desktop" | sed "s|^Exec=.*|Exec=$bin/plastinka|" > "$apps/plastinka.desktop"
 chmod 644 "$apps/plastinka.desktop"
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$apps" || true
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t "$icons" || true

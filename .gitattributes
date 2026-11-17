@@ -1,0 +1,14 @@
+# Окончания строк. Разработка идёт на Windows с core.autocrlf=true, и без
+# этого файла git выдаёт в рабочую копию текстовые файлы с CRLF. В индексе
+# все текстовые файлы хранятся с LF.
+* text=auto
+
+# Unix-скрипты и ярлыки: всегда LF, на любой системе. С CRLF скрипт не
+# запускается («bad interpreter»), а ярлык читается с мусором в значениях.
+*.sh        text eol=lf
+*.desktop   text eol=lf
+android/gradlew text eol=lf
+
+# Скрипты Windows: всегда CRLF.
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
