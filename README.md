@@ -68,6 +68,15 @@ cd plastinka-linux-x86_64
 Удаление — `./install.sh --uninstall`. Проверить архив:
 `sha256sum -c plastinka-linux-x86_64.tar.gz.sha256`.
 
+Если `./install.sh` не запускается с ошибкой про окончания строк Windows
+(`\r\n`, «bad interpreter»), значит, в скрипт попали символы CR. Их можно
+убрать прямо в распакованном архиве:
+
+```sh
+sed -i 's/\r$//' install.sh plastinka.desktop
+# или: dos2unix install.sh plastinka.desktop
+```
+
 Пакеты, если чего-то нет:
 
 ```sh
@@ -100,6 +109,12 @@ gh workflow run build-macos.yml --ref main -f release_tag=v0.0.1
 ```
 
 Без `release_tag` архив остаётся артефактом запуска (30 дней).
+
+Linux-архив в релиз кладём только из `build-linux.yml` (с `release_tag` или
+`gh run download`) и не пересобираем на Windows: там git с
+`core.autocrlf=true`, и скрипты из рабочей копии могли попасть в архив с CRLF.
+Окончания строк закреплены в `.gitattributes`. Сборка в CI убирает CR при
+упаковке, а проверка на Arch запускает `./install.sh` так же, как пользователь.
 
 `build-android.yml` собирает подписанный `plastinka-android.apk` по push в
 `main` (каталог `android/`) и оставляет его артефактом. В релиз он
