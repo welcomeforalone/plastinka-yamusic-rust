@@ -23,6 +23,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -101,6 +102,14 @@ fun AppearanceScreen(onBack: () -> Unit) {
                 checked = Prefs.blurCover,
                 onChange = Prefs::changeBlurCover,
             )
+            if (Pip.isSupported(LocalContext.current)) {
+                ToggleRow(
+                    title = "Мини-плеер при сворачивании",
+                    subtitle = "Во время игры приложение уходит в «картинку в картинке»",
+                    checked = Prefs.pipAutoEnter,
+                    onChange = Prefs::changePipAutoEnter,
+                )
+            }
         }
         Spacer(Modifier.height(22.dp))
         SectionTitle("Предпросмотр")

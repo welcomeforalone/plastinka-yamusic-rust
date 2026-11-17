@@ -63,6 +63,10 @@ private val SETTINGS_INDEX: List<SettingsEntry> = listOf(
         "блюр размытие фон обложка полноэкранный",
     ),
     SettingsEntry(
+        SettingsPage.Appearance, "Мини-плеер при сворачивании", "Во время игры приложение уходит в «картинку в картинке»",
+        "мини-плеер pip картинка в картинке сворачивание автовход",
+    ),
+    SettingsEntry(
         SettingsPage.Sound, "Качество звука", "Превосходное, оптимальное, экономичное",
         "lossless flac mp3 aac битрейт поток трафик интернет",
     ),

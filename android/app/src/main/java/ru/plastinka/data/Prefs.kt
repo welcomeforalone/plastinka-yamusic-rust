@@ -65,6 +65,7 @@ object Prefs {
     private const val KEY_VISUALIZER = "visualizer"
     private const val KEY_VIBE = "vibe_colorizer"
     private const val KEY_BLUR = "blur_cover"
+    private const val KEY_PIP_AUTO = "pip_auto_enter"
     private const val KEY_QUALITY = "audio_quality"
     private const val KEY_NORMALIZE = "normalize"
     private const val KEY_LRCLIB = "lyrics_lrclib"
@@ -89,6 +90,10 @@ object Prefs {
     var vibeColorizer by mutableStateOf(false)
         private set
     var blurCover by mutableStateOf(true)
+        private set
+
+    /** Уходить в мини-плеер (PiP) при сворачивании приложения во время игры. */
+    var pipAutoEnter by mutableStateOf(false)
         private set
     var quality by mutableStateOf(AudioQuality.Normal)
         private set
@@ -143,6 +148,7 @@ object Prefs {
         visualizer = bool(KEY_VISUALIZER, true)
         vibeColorizer = bool(KEY_VIBE, false)
         blurCover = bool(KEY_BLUR, true)
+        pipAutoEnter = bool(KEY_PIP_AUTO, false)
         quality = AudioQuality.fromKey(all[KEY_QUALITY] as? String)
         normalize = bool(KEY_NORMALIZE, false)
         lyricsLrclib = bool(KEY_LRCLIB, true)
@@ -188,6 +194,11 @@ object Prefs {
     fun changeVibeColorizer(on: Boolean) {
         vibeColorizer = on
         store?.edit()?.putBoolean(KEY_VIBE, on)?.apply()
+    }
+
+    fun changePipAutoEnter(on: Boolean) {
+        pipAutoEnter = on
+        store?.edit()?.putBoolean(KEY_PIP_AUTO, on)?.apply()
     }
 
     fun changeBlurCover(on: Boolean) {
@@ -258,6 +269,7 @@ object Prefs {
         changeVisualizer(true)
         changeVibeColorizer(false)
         changeBlurCover(true)
+        changePipAutoEnter(false)
         changeQuality(AudioQuality.Normal)
         changeNormalize(false)
         changeLyricsLrclib(true)

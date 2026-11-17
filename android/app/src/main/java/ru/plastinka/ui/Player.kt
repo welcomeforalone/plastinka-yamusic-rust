@@ -79,6 +79,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -450,6 +452,22 @@ private fun GlassPill(label: String, @DrawableRes icon: Int, onClick: () -> Unit
     }
 }
 
+/** Круглая кнопка на стекле без подписи, 44 dp, как «таблетки» рядом. */
+@Composable
+private fun GlassIconButton(@DrawableRes icon: Int, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .size(44.dp)
+            .clip(CircleShape)
+            .background(Color.White.copy(alpha = 0.12f), CircleShape)
+            .semantics { contentDescription = "Мини-плеер" }
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        PlIcon(icon, 20.dp, Pl.text)
+    }
+}
+
 /** Значок качества потока, например «MP3 · 320»; нажатие открывает «Настройки звука». */
 @Composable
 private fun QualityBadge(label: String, onClick: () -> Unit) {
@@ -498,6 +516,8 @@ fun FullPlayer(
     onClose: () -> Unit,
     // Выключается на время анимации закрытия: уходящий плеер не перехватывает «назад».
     backEnabled: Boolean = true,
+    // Кнопка «Мини-плеер» (PiP); `null` — режим на устройстве не поддерживается.
+    onMiniPlayer: (() -> Unit)? = null,
 ) {
     val track = queue.currentTrack() ?: return
     BackHandler(enabled = backEnabled, onBack = onClose)
@@ -630,6 +650,8 @@ fun FullPlayer(
             ) {
                 GlassPill("Текст", R.drawable.ic_lyrics) { showLyrics = true }
                 GlassPill("Очередь", R.drawable.ic_queue) { showQueue = true }
+                // Три таблетки с подписями не влезают на узкий экран: «Мини-плеер» — круглая кнопка.
+                if (onMiniPlayer != null) GlassIconButton(R.drawable.ic_pip, onMiniPlayer)
             }
             // Под таблетками 25 dp и место под визуализатор спектра (рисуется выше, под колонкой).
             Spacer(Modifier.height(VISUALIZER_HEIGHT + 25.dp))

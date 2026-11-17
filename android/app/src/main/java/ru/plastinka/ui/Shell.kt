@@ -40,6 +40,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import ru.plastinka.R
+import ru.plastinka.data.Prefs
 import ru.plastinka.playback.QueueHolder
 import ru.plastinka.playback.currentTrack
 
@@ -55,6 +56,13 @@ fun RootScreen(
     avatarUrl: String?,
     model: AppViewModel,
 ) {
+    // Выход из аккаунта или пропавший Плюс закрывают окно PiP: показывать в нём нечего.
+    val context = LocalContext.current
+    val inPip by Pip.inPip.collectAsStateWithLifecycle()
+    val allowed = loggedIn && library.account?.hasPlus == true
+    LaunchedEffect(inPip, allowed) {
+        if (inPip && !allowed) (context as? android.app.Activity)?.let(Pip::close)
+    }
     if (!loggedIn) {
         LoginScreen(login, onLogin = model::startLogin)
         return
@@ -124,6 +132,33 @@ private fun MainScreen(library: LibraryUi, model: AppViewModel) {
     LaunchedEffect(hasTrack) { if (!hasTrack) showPlayer = false }
     var tab by rememberSaveable { mutableIntStateOf(0) }
     val liked by QueueHolder.likedIds.collectAsStateWithLifecycle()
+    val playing = player?.isPlaying?.collectAsStateWithLifecycle()?.value ?: false
+    val likedNow = queue.currentTrack()?.let { liked.contains(it.id) } ?: false
+
+    // Мини-плеер PiP: только с треком (а значит, после проверки Плюса).
+    val activity = context as? android.app.Activity
+    val pipSupported = activity != null && Pip.isSupported(context)
+    androidx.compose.runtime.DisposableEffect(hasTrack) {
+        Pip.ready = hasTrack
+        onDispose { Pip.ready = false }
+    }
+    // Кнопки окна идут в тот же плеер и те же действия, что и кнопки приложения;
+    // «Следующий» в волне — тот же пропуск, что в нижнем плеере.
+    androidx.compose.runtime.DisposableEffect(player) {
+        Pip.handler = { action ->
+            when (action) {
+                Pip.ACTION_PREVIOUS -> player?.previous()
+                Pip.ACTION_TOGGLE -> player?.toggle()
+                Pip.ACTION_NEXT -> player?.next()
+                Pip.ACTION_LIKE -> QueueHolder.state.value.currentTrack()?.let(model::toggleLike)
+            }
+        }
+        onDispose { Pip.handler = null }
+    }
+    // Кнопки окна и параметры обновляются при смене трека, паузе и лайке.
+    LaunchedEffect(queue.currentTrack()?.id, playing, likedNow, hasTrack, Prefs.pipAutoEnter) {
+        if (activity != null && hasTrack) Pip.update(activity, playing, likedNow)
+    }
 
     Box(Modifier.fillMaxSize().background(Pl.bg)) {
         Column(Modifier.fillMaxSize()) {
@@ -172,8 +207,17 @@ private fun MainScreen(library: LibraryUi, model: AppViewModel) {
                 model = model,
                 onClose = { showPlayer = false },
                 backEnabled = transition.targetState == EnterExitState.Visible,
+                onMiniPlayer = if (pipSupported) {
+                    { Pip.enter(activity, playing, likedNow) }
+                } else {
+                    null
+                },
             )
         }
+        // В режиме PiP вместо интерфейса — компактный мини-плеер. Основной экран под ним
+        // остаётся в композиции, чтобы выбранная вкладка и плеер сохранились до возврата.
+        val inPip by Pip.inPip.collectAsStateWithLifecycle()
+        if (inPip) queue.currentTrack()?.let { PipScreen(it, player) }
     }
 }
 

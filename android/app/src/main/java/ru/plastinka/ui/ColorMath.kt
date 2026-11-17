@@ -72,6 +72,15 @@ object ColorMath {
         return digits.toIntOrNull(16)
     }
 
+    /**
+     * Приглушённый фон по среднему цвету обложки (как у мини-плеера десктопа):
+     * оттенок прежний, насыщенность не больше 20 %, яркость 18 %. Серый остаётся серым.
+     */
+    fun muted(rgb: Int): Int {
+        val hsv = Hsv.fromRgb(rgb, 0f)
+        return Hsv(hsv.h, minOf(hsv.s, 0.2f), 0.18f).toRgb()
+    }
+
     /** Запись цвета `#RRGGBB` прописными. */
     fun formatHex(rgb: Int): String = "#%06X".format(rgb and 0xFFFFFF)
 
