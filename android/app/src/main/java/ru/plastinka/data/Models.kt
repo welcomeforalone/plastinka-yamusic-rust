@@ -53,19 +53,6 @@ data class VibeColors(
     val hue: Double?,
 )
 
-/** Персональная подборка с лендинга («Плейлист дня», «Дежавю», «Премьера»). */
-data class GeneratedPlaylist(
-    /** Владелец подборки (служебный аккаунт Яндекса). */
-    val uid: Long,
-    val kind: Long,
-    val title: String,
-    val coverUri: String?,
-    val trackCount: Int,
-) {
-    fun coverUrl(size: String = "300x300"): String? =
-        coverUri?.takeIf { it.contains("%%") }?.let { "https://${it.replace("%%", size)}" }
-}
-
 /** Плейлист пользователя: свой или понравившийся чужой. */
 data class PlaylistCard(
     /** Владелец плейлиста. */
@@ -76,6 +63,8 @@ data class PlaylistCard(
     val trackCount: Int,
     /** `true` — чужой, отмеченный «нравится». */
     val liked: Boolean = false,
+    /** Описание подборки «Собираем для вас» («Звучит по-вашему каждый день»); у обычных плейлистов нет. */
+    val note: String? = null,
 ) {
     fun coverUrl(size: String = "200x200"): String? =
         coverUri?.takeIf { it.contains("%%") }?.let { "https://${it.replace("%%", size)}" }
@@ -115,6 +104,16 @@ data class ArtistCard(
     fun coverUrl(size: String = "300x300"): String? =
         coverUri?.takeIf { it.contains("%%") }?.let { "https://${it.replace("%%", size)}" }
 }
+
+/**
+ * Страница «Все треки» исполнителя. `fetched` — сколько элементов пришло (до отсева
+ * нечитаемых): 0 значит, что страницы кончились, даже если `total` больше.
+ */
+data class ArtistTracksPage(
+    val tracks: List<Track>,
+    val total: Int,
+    val fetched: Int,
+)
 
 /** Как исполнитель сдвинулся в топе месяца. */
 enum class Trend { Up, Down, Same, New }

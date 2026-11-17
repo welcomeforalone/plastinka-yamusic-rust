@@ -17,9 +17,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -36,7 +33,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import ru.plastinka.R
@@ -63,6 +59,9 @@ sealed interface CollectionRoute {
     data class Playlist(val uid: Long, val kind: Long, val title: String, val cover: String?) : CollectionRoute
     data class Album(val id: String, val title: String, val cover: String?) : CollectionRoute
     data class Artist(val id: String, val name: String, val cover: String?) : CollectionRoute
+
+    /** «Все треки» исполнителя. */
+    data class ArtistTracks(val id: String, val name: String) : CollectionRoute
 }
 
 private const val SEP = "\u0001"
@@ -78,6 +77,7 @@ private fun CollectionRoute.encode(): String = when (this) {
     is CollectionRoute.Playlist -> listOf("p", uid, kind, title, cover.orEmpty()).joinToString(SEP)
     is CollectionRoute.Album -> listOf("a", id, title, cover.orEmpty()).joinToString(SEP)
     is CollectionRoute.Artist -> listOf("r", id, name, cover.orEmpty()).joinToString(SEP)
+    is CollectionRoute.ArtistTracks -> listOf("t", id, name).joinToString(SEP)
 }
 
 private fun decodeRoute(text: String): CollectionRoute? {
@@ -105,6 +105,10 @@ private fun decodeRoute(text: String): CollectionRoute? {
             p.getOrNull(1) ?: return null,
             p.getOrNull(2) ?: return null,
             p.getOrNull(3)?.takeIf { it.isNotEmpty() },
+        )
+        "t" -> CollectionRoute.ArtistTracks(
+            p.getOrNull(1) ?: return null,
+            p.getOrNull(2) ?: return null,
         )
         else -> null
     }
@@ -162,7 +166,8 @@ fun CollectionTab(
                 onBack = pop,
                 onOpen = { card -> push(CollectionRoute.Playlist(card.uid, card.kind, card.title, card.coverUri)) },
             )
-            is CollectionRoute.Playlist, is CollectionRoute.Album, is CollectionRoute.Artist ->
+            is CollectionRoute.Playlist, is CollectionRoute.Album, is CollectionRoute.Artist,
+            is CollectionRoute.ArtistTracks ->
                 DetailRouteScreen(top, model, player, onBack = pop, push = push)
             CollectionRoute.Albums -> AlbumsScreen(
                 model = model,
@@ -225,6 +230,14 @@ internal fun DetailRouteScreen(
             player = player,
             onBack = onBack,
             onOpenAlbum = { card -> push(CollectionRoute.Album(card.id, card.displayTitle, card.coverUri)) },
+            onOpenAllTracks = { push(CollectionRoute.ArtistTracks(route.id, route.name)) },
+        )
+        is CollectionRoute.ArtistTracks -> ArtistTracksScreen(
+            id = route.id,
+            name = route.name,
+            model = model,
+            player = player,
+            onBack = onBack,
         )
         else -> Unit
     }
@@ -378,53 +391,72 @@ private fun RecentGrid(items: List<RecentItem>, onOpen: (CollectionRoute) -> Uni
     }
 }
 
-/** Содержимое раздела: загрузка, ошибка с «Повторить», пусто или сам список. */
-@Composable
-private fun <T> SectionBody(
-    items: List<T>?,
-    error: String?,
-    emptyTitle: String,
-    emptyHint: String,
-    onRetry: () -> Unit,
-    content: @Composable (List<T>) -> Unit,
-) {
-    when {
-        items == null && error != null -> ErrorState(error, onRetry)
-        items == null -> LoadingBox()
-        items.isEmpty() -> Centered {
-            PlText(emptyTitle, PlType.bodyStrong, textAlign = TextAlign.Center)
-            PlText(emptyHint, PlType.secondary, Pl.text2, textAlign = TextAlign.Center)
-        }
-        else -> content(items)
-    }
-}
-
 @Composable
 private fun PlaylistsScreen(model: AppViewModel, onBack: () -> Unit, onOpen: (PlaylistCard) -> Unit) {
     val collection by model.collection.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { if (collection.playlists == null && !collection.loading) model.loadCollection() }
+    // Вкладка под полкой: свои («Вы собрали») или чужие («Вам понравились»).
+    var likedTab by rememberSaveable { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
         BackBar(onBack)
         PlText("Плейлисты", PlType.display, modifier = Modifier.padding(horizontal = 20.dp))
         Spacer(Modifier.height(18.dp))
-        SectionBody(
-            items = collection.playlists,
-            error = collection.playlistsError,
-            emptyTitle = "Плейлистов пока нет",
-            emptyHint = "Создайте плейлист или отметьте чужой — он появится здесь",
-            onRetry = model::loadCollection,
-        ) { playlists ->
-            LazyColumn(Modifier.fillMaxSize()) {
-                items(playlists.size, key = { index ->
-                    playlists.getOrNull(index)?.let { "${it.uid}:${it.kind}" } ?: index.toString()
-                }) { index ->
-                    playlists.getOrNull(index)?.let { card ->
-                        MediaRow(
-                            card.coverUrl("100x100"), "${card.uid}:${card.kind}", 8.dp,
-                            card.title, tracksCount(card.trackCount),
-                            onClick = { onOpen(card) },
-                        )
+        val all = collection.playlists
+        when {
+            all == null && collection.playlistsError != null ->
+                ErrorState(collection.playlistsError.orEmpty(), model::loadCollection)
+            all == null -> LoadingBox()
+            else -> {
+                val own = remember(all) { all.filter { !it.liked } }
+                val liked = remember(all) { all.filter { it.liked } }
+                val shown = if (likedTab) liked else own
+                LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
+                    // «Собираем для вас»: подборки сервиса с описаниями; нет данных — полки нет.
+                    item(key = "personal") {
+                        val personal = collection.personal.orEmpty()
+                        if (personal.isNotEmpty()) {
+                            CardShelf("Собираем для вас", personal, columns = 2, rows = 2) { card, modifier ->
+                                MediaTile(
+                                    card.coverUrl("300x300"), "${card.uid}:${card.kind}", card.title, card.note,
+                                    modifier, subtitleLines = 2, onClick = { onOpen(card) },
+                                )
+                            }
+                            Spacer(Modifier.height(20.dp))
+                        }
+                    }
+                    item(key = "tabs") {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Chip("Вы собрали · ${own.size}", selected = !likedTab, onClick = { likedTab = false })
+                            Chip("Вам понравились · ${liked.size}", selected = likedTab, onClick = { likedTab = true })
+                        }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    if (shown.isEmpty()) {
+                        item(key = "empty") {
+                            EmptyNote(
+                                if (likedTab) {
+                                    "Отмечайте чужие плейлисты сердцем — они появятся здесь."
+                                } else {
+                                    "Своих плейлистов пока нет — создайте их в приложении сервиса."
+                                },
+                            )
+                        }
+                    } else {
+                        items(shown.size, key = { index ->
+                            shown.getOrNull(index)?.let { "${it.uid}:${it.kind}" } ?: index.toString()
+                        }) { index ->
+                            shown.getOrNull(index)?.let { card ->
+                                MediaRow(
+                                    card.coverUrl("100x100"), "${card.uid}:${card.kind}", 8.dp,
+                                    card.title, tracksCount(card.trackCount),
+                                    onClick = { onOpen(card) },
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -441,30 +473,56 @@ private fun AlbumsScreen(model: AppViewModel, onBack: () -> Unit, onOpen: (Album
         BackBar(onBack)
         PlText("Альбомы", PlType.display, modifier = Modifier.padding(horizontal = 20.dp))
         Spacer(Modifier.height(18.dp))
-        SectionBody(
-            items = collection.albums,
-            error = collection.albumsError,
-            emptyTitle = "Альбомов пока нет",
-            emptyHint = "Отмечайте альбомы сердцем — они появятся здесь",
-            onRetry = model::loadCollection,
-        ) { albums ->
-            // Две колонки, как плитки «Недавнее» в макете: поля 16, зазор 12.
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(2),
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                items(albums, key = { it.id }) { card ->
-                    MediaTile(
-                        card.coverUrl("300x300"), card.id, card.displayTitle, albumSubtitle(card),
-                        onClick = { onOpen(card) },
-                    )
+        val liked = collection.albums
+        when {
+            liked == null && collection.albumsError != null ->
+                ErrorState(collection.albumsError.orEmpty(), model::loadCollection)
+            liked == null -> LoadingBox()
+            else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
+                // «Новые релизы»: на десктопе два ряда, здесь два ряда по две плитки.
+                item(key = "releases") {
+                    val releases = collection.releases.orEmpty()
+                    if (releases.isNotEmpty()) {
+                        CardShelf("Новые релизы", releases, columns = 2, rows = 2) { card, modifier ->
+                            MediaTile(
+                                card.coverUrl("300x300"), card.id, card.displayTitle, albumSubtitle(card),
+                                modifier, onClick = { onOpen(card) },
+                            )
+                        }
+                        Spacer(Modifier.height(20.dp))
+                    }
+                }
+                item(key = "title") {
+                    ListTitle("Вам понравились")
+                    Spacer(Modifier.height(12.dp))
+                }
+                if (liked.isEmpty()) {
+                    item(key = "empty") { EmptyNote("Отмечайте альбомы сердцем — они появятся здесь.") }
+                }
+                // Две колонки, как плитки «Недавнее» в макете: поля 16, зазор 12.
+                items(liked.chunked(2), key = { pair -> "a:${pair.firstOrNull()?.id}" }) { pair ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        for (card in pair) {
+                            MediaTile(
+                                card.coverUrl("300x300"), card.id, card.displayTitle, albumSubtitle(card),
+                                Modifier.weight(1f), onClick = { onOpen(card) },
+                            )
+                        }
+                        if (pair.size == 1) Spacer(Modifier.weight(1f))
+                    }
                 }
             }
         }
     }
+}
+
+/** Пояснение пустого списка под заголовком. */
+@Composable
+private fun EmptyNote(text: String) {
+    PlText(text, PlType.body, Pl.text2, Modifier.padding(horizontal = 20.dp, vertical = 12.dp))
 }
 
 /** Подпись плитки альбома: «Исполнитель · год». */
@@ -485,43 +543,35 @@ private fun ArtistsScreen(
         BackBar(onBack)
         PlText("Исполнители", PlType.display, modifier = Modifier.padding(horizontal = 20.dp))
         Spacer(Modifier.height(18.dp))
-        val topArtists = collection.top.orEmpty()
-        val liked = collection.artists
-        // Полка топа — первый элемент того же списка; понравившихся нет, а топ есть — полка видна.
-        if (liked != null && liked.isEmpty() && topArtists.isNotEmpty()) {
-            LazyColumn(Modifier.fillMaxSize()) {
-                item {
-                    TopMonthShelf(topArtists, onAll = onAllTop, onOpenArtist = { top ->
-                        onOpen(top.card)
-                    })
-                }
-                item {
-                    Centered {
-                        PlText("Исполнителей пока нет", PlType.bodyStrong, textAlign = TextAlign.Center)
-                        PlText(
-                            "Отмечайте исполнителей сердцем — они появятся здесь",
-                            PlType.secondary,
-                            Pl.text2,
-                            textAlign = TextAlign.Center,
-                        )
-                    }
-                }
-            }
-            return@Column
-        }
-        SectionBody(
-            items = collection.artists,
-            error = collection.artistsError,
-            emptyTitle = "Исполнителей пока нет",
-            emptyHint = "Отмечайте исполнителей сердцем — они появятся здесь",
-            onRetry = model::loadCollection,
-        ) { artists ->
-            LazyColumn(Modifier.fillMaxSize()) {
-                if (topArtists.isNotEmpty()) {
-                    item {
+        val artists = collection.artists
+        when {
+            artists == null && collection.artistsError != null ->
+                ErrorState(collection.artistsError.orEmpty(), model::loadCollection)
+            artists == null -> LoadingBox()
+            else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
+                // Полки сверху (топ, «Встречали в Моей волне») видны, даже если понравившихся нет.
+                item(key = "top") {
+                    val topArtists = collection.top.orEmpty()
+                    if (topArtists.isNotEmpty()) {
                         TopMonthShelf(topArtists, onAll = onAllTop, onOpenArtist = { top -> onOpen(top.card) })
-                        Spacer(Modifier.height(12.dp))
+                        Spacer(Modifier.height(20.dp))
                     }
+                }
+                item(key = "met") {
+                    val met = collection.met.orEmpty()
+                    if (met.isNotEmpty()) {
+                        CardShelf("Встречали в Моей волне", met, columns = 3, rows = 2) { card, modifier ->
+                            ArtistTile(card, modifier, onClick = { onOpen(card) })
+                        }
+                        Spacer(Modifier.height(20.dp))
+                    }
+                }
+                item(key = "title") {
+                    ListTitle("Вам понравились")
+                    Spacer(Modifier.height(4.dp))
+                }
+                if (artists.isEmpty()) {
+                    item(key = "empty") { EmptyNote("Отмечайте исполнителей сердцем — они появятся здесь.") }
                 }
                 items(artists.size, key = { index -> artists.getOrNull(index)?.id ?: index.toString() }) { index ->
                     artists.getOrNull(index)?.let { card ->

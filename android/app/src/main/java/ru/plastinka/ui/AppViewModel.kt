@@ -51,10 +51,35 @@ data class CollectionUi(
     val artists: List<ru.plastinka.data.ArtistCard>? = null,
     /** Исполнители топа месяца для полки; `null` — не загружены или сбой (полки нет). */
     val top: List<ru.plastinka.data.TopArtist>? = null,
+    /** Полки «Встречали в Моей волне», «Новые релизы», «Собираем для вас»: `null` — нет (полку не показываем). */
+    val met: List<ru.plastinka.data.ArtistCard>? = null,
+    val releases: List<ru.plastinka.data.AlbumCard>? = null,
+    val personal: List<ru.plastinka.data.PlaylistCard>? = null,
     val playlistsError: String? = null,
     val albumsError: String? = null,
     val artistsError: String? = null,
 )
+
+/**
+ * «Все треки» исполнителя: загруженные страницы по 100. `key` — исполнитель, чьи это
+ * треки (чужой ключ экран не показывает). Ошибка первой страницы — `error`, ошибка
+ * следующей — `moreFailed`: загруженное остаётся.
+ */
+data class ArtistTracksUi(
+    val key: String? = null,
+    val loading: Boolean = false,
+    val loadingMore: Boolean = false,
+    val loaded: Boolean = false,
+    val items: List<ru.plastinka.data.Track> = emptyList(),
+    val total: Int = 0,
+    val nextPage: Int = 0,
+    /** Сервис прислал пустую страницу: дальше грузить нечего. */
+    val exhausted: Boolean = false,
+    val error: String? = null,
+    val moreFailed: Boolean = false,
+) {
+    val hasNext: Boolean get() = loaded && !exhausted && items.size < total
+}
 
 /** Страница «Топ месяца». `data == null` — ещё не получена; ошибка хранится, только если показать нечего. */
 data class MonthTopUi(
@@ -398,30 +423,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         ru.plastinka.playback.TrackActions.dislikeCurrent(plastinka, viewModelScope, player?.controller)
     }
 
-    private val _generated = MutableStateFlow<List<ru.plastinka.data.GeneratedPlaylist>>(emptyList())
-    val generated: StateFlow<List<ru.plastinka.data.GeneratedPlaylist>> = _generated
-
-    private var generatedJob: Job? = null
-
-    /**
-     * Подборки лендинга: «Плейлист дня» и прочие. Не спрашивает заново, пока
-     * список есть или запрос идёт; после сбоя повторяется при следующем вызове
-     * (показ экрана волны).
-     */
-    fun loadGenerated() {
-        if (_generated.value.isNotEmpty() || generatedJob?.isActive == true) return
-        val token = plastinka.tokenStore.load() ?: return
-        generatedJob = viewModelScope.launch {
-            try {
-                _generated.value = plastinka.api.personalPlaylists(token)
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                android.util.Log.w("AppViewModel", "подборки не загружены: ${e.message}")
-            }
-        }
-    }
-
     /** Кнопка Play у лучшего результата: трек — сам трек, остальное — его треки (у исполнителя популярные). */
     fun playSearchBest(player: PlayerController?, best: ru.plastinka.data.SearchBest) {
         val token = plastinka.tokenStore.load() ?: return
@@ -456,18 +457,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Запустить подборку как очередь. */
-    fun playPlaylist(player: PlayerController?, playlist: ru.plastinka.data.GeneratedPlaylist) {
-        val token = plastinka.tokenStore.load() ?: return
-        viewModelScope.launch {
-            try {
-                val tracks = plastinka.api.playlistTracks(token, playlist.uid, playlist.kind)
-                if (tracks.isNotEmpty()) player?.playQueue(tracks, 0, playlist.title)
-            } catch (_: Exception) {
-            }
-        }
-    }
-
     private val _collection = MutableStateFlow(CollectionUi())
     val collection: StateFlow<CollectionUi> = _collection
     private var collectionJob: Job? = null
@@ -488,8 +477,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val artists = async { attempt { api.likedArtists(token, uid) } }
             // Полка топа необязательна: сбой её не показывает, остальное работает.
             val top = async { attempt { api.topArtists(token) } }
+            // Остальные полки тоже необязательны.
+            val met = async { attempt { api.metArtists(token) } }
+            val releases = async { attempt { api.newReleases(token) } }
+            val personal = async { attempt { api.personalShelf(token) } }
             val (pl, al, ar) = Triple(playlists.await(), albums.await(), artists.await())
             val tp = top.await()
+            val (mt, rl, ps) = Triple(met.await(), releases.await(), personal.await())
             val old = _collection.value
             _collection.value = CollectionUi(
                 loading = false,
@@ -497,6 +491,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 albums = al ?: old.albums,
                 artists = ar ?: old.artists,
                 top = tp ?: old.top,
+                met = mt ?: old.met,
+                releases = rl ?: old.releases,
+                personal = ps ?: old.personal,
                 playlistsError = if (pl == null && old.playlists == null) "Не удалось загрузить плейлисты. Проверьте соединение." else null,
                 albumsError = if (al == null && old.albums == null) "Не удалось загрузить альбомы. Проверьте соединение." else null,
                 artistsError = if (ar == null && old.artists == null) "Не удалось загрузить исполнителей. Проверьте соединение." else null,
@@ -587,6 +584,82 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         artist.load(id, force) { plastinka.api.artistBrief(token, id) }
     }
 
+    private val _artistTracks = MutableStateFlow(ArtistTracksUi())
+    val artistTracks: StateFlow<ArtistTracksUi> = _artistTracks
+    private var artistTracksJob: Job? = null
+
+    /** Номер загрузки списка: ответ с прежним номером (исполнитель сменился) отбрасывается. */
+    private var artistTracksGen = 0
+
+    /** Первая страница «Всех треков». Тот же исполнитель, уже загруженный или грузящийся, не перезапрашивается. */
+    fun loadArtistTracks(id: String, force: Boolean = false) {
+        val token = plastinka.tokenStore.load() ?: return
+        val cur = _artistTracks.value
+        if (!force && cur.key == id && (cur.loaded || cur.loading)) return
+        artistTracksJob?.cancel()
+        val gen = ++artistTracksGen
+        _artistTracks.value = ArtistTracksUi(key = id, loading = true)
+        artistTracksJob = viewModelScope.launch {
+            try {
+                val page = plastinka.api.artistTracks(token, id, 0)
+                if (gen != artistTracksGen) return@launch
+                _artistTracks.value = ArtistTracksUi(
+                    key = id,
+                    loaded = true,
+                    items = page.tracks,
+                    total = page.total,
+                    nextPage = 1,
+                    exhausted = page.fetched == 0,
+                )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (gen != artistTracksGen) return@launch
+                _artistTracks.value = ArtistTracksUi(
+                    key = id,
+                    error = if (e is ru.plastinka.data.NotFoundException) {
+                        "Не найдено"
+                    } else {
+                        "Не удалось загрузить треки. Проверьте соединение."
+                    },
+                )
+            }
+        }
+    }
+
+    /**
+     * Следующая страница: вызывается при прокрутке к концу и по «Повторить». Страница уже
+     * грузится, список другого исполнителя или конец — ничего не делает.
+     */
+    fun loadMoreArtistTracks(id: String) {
+        val token = plastinka.tokenStore.load() ?: return
+        val cur = _artistTracks.value
+        if (cur.key != id || !cur.hasNext || cur.loading || cur.loadingMore) return
+        val gen = artistTracksGen
+        val page = cur.nextPage
+        _artistTracks.value = cur.copy(loadingMore = true, moreFailed = false)
+        artistTracksJob = viewModelScope.launch {
+            try {
+                val next = plastinka.api.artistTracks(token, id, page)
+                if (gen != artistTracksGen) return@launch
+                val old = _artistTracks.value
+                val known = old.items.mapTo(HashSet()) { it.id }
+                _artistTracks.value = old.copy(
+                    loadingMore = false,
+                    items = old.items + next.tracks.filter { known.add(it.id) },
+                    total = maxOf(old.total, next.total),
+                    nextPage = page + 1,
+                    exhausted = next.fetched == 0,
+                )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                if (gen != artistTracksGen) return@launch
+                _artistTracks.value = _artistTracks.value.copy(loadingMore = false, moreFailed = true)
+            }
+        }
+    }
+
     private var libraryJob: Job? = null
 
     fun loadLibrary() {
@@ -636,6 +709,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         playlist.reset()
         album.reset()
         artist.reset()
+        artistTracksJob?.cancel()
+        artistTracksGen++
+        _artistTracks.value = ArtistTracksUi()
         _collection.value = CollectionUi()
         _waveStations.value = WaveStations.Idle
         _login.value = LoginUi()

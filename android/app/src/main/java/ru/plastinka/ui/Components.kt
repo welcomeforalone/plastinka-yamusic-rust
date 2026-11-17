@@ -352,7 +352,7 @@ fun MediaRow(
 
 /**
  * Плитка: квадратная обложка с радиусом 16 на всю ширину `modifier`, под ней
- * название (`secondaryStrong`) и подпись (`caption`).
+ * название (`secondaryStrong`) и подпись (`caption`, по умолчанию в одну строку).
  */
 @Composable
 fun MediaTile(
@@ -361,6 +361,7 @@ fun MediaTile(
     title: String,
     subtitle: String?,
     modifier: Modifier = Modifier,
+    subtitleLines: Int = 1,
     onClick: () -> Unit,
 ) {
     val shape = RoundedCornerShape(16.dp)
@@ -379,7 +380,7 @@ fun MediaTile(
         }
         Spacer(Modifier.height(6.dp))
         PlText(title, PlType.secondaryStrong, maxLines = 1)
-        if (!subtitle.isNullOrEmpty()) PlText(subtitle, PlType.caption, Pl.text3, maxLines = 1)
+        if (!subtitle.isNullOrEmpty()) PlText(subtitle, PlType.caption, Pl.text3, maxLines = subtitleLines)
     }
 }
 

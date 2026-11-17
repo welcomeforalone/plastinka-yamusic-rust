@@ -399,7 +399,7 @@ class YandexApi(private val http: OkHttpClient) {
         playedSeconds: Double? = null,
     ) = withContext(Dispatchers.IO) {
         try {
-            val stamp = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
+            val stamp = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US)
                 .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
                 .format(java.util.Date())
             val body = kotlinx.serialization.json.buildJsonObject {
@@ -425,44 +425,73 @@ class YandexApi(private val http: OkHttpClient) {
     fun waveTrackId(track: Track): String =
         if (track.albumId != null) "${track.id}:${track.albumId}" else track.id
 
-    // ------------------------------------------------------- подборки лендинга
+    // ------------------------------------------------- полки коллекции
 
-    /**
-     * «Плейлист дня», «Дежавю», «Премьера»: `GET /landing-blocks/personal-playlists`.
-     * Новый адрес отвечает без обёртки `result` (как на десктопе).
-     */
-    suspend fun personalPlaylists(token: String): List<ru.plastinka.data.GeneratedPlaylist> =
-        withContext(Dispatchers.IO) {
-            val obj = get(token, "$API_BASE/landing-blocks/personal-playlists?count=10")
-            parsePersonalPlaylists(obj)
-        }
+    /** «Встречали в Моей волне»: `GET /landing-blocks/artists` (ответ без обёртки `result`). */
+    suspend fun metArtists(token: String): List<ArtistCard> = withContext(Dispatchers.IO) {
+        parseMetArtists(get(token, "$API_BASE/landing-blocks/artists?count=$MET_ARTISTS"))
+    }
 
-    /**
-     * Разбор `{"items":[{"data":{"playlist":…,"description":…}}]}`; на случай
-     * обёртки `result` смотрим и в неё. Элементы без `uid`, `kind` или названия
-     * пропускаются, остальное разбираем терпимо.
-     */
-    internal fun parsePersonalPlaylists(root: JsonObject): List<ru.plastinka.data.GeneratedPlaylist> {
+    /** Новые релизы для пользователя: `GET /landing-blocks/new-releases`. */
+    suspend fun newReleases(token: String): List<AlbumCard> = withContext(Dispatchers.IO) {
+        parseNewReleases(get(token, "$API_BASE/landing-blocks/new-releases?count=$NEW_RELEASES"))
+    }
+
+    /** «Собираем для вас» с описаниями: `GET /landing-blocks/personal-playlists`. */
+    suspend fun personalShelf(token: String): List<PlaylistCard> = withContext(Dispatchers.IO) {
+        parsePersonalShelf(get(token, "$API_BASE/landing-blocks/personal-playlists?count=10"))
+    }
+
+    /** Разбор `{"items":[{"data":{"artist":…}}]}`; повтор исполнителя пропускается (ключи списка). */
+    internal fun parseMetArtists(root: JsonObject): List<ArtistCard> {
         val body = root["result"] as? JsonObject ?: root
         return (body["items"] as? JsonArray).orEmpty().mapNotNull { item ->
-            val pl = ((item as? JsonObject)?.get("data") as? JsonObject)?.get("playlist") as? JsonObject
-                ?: return@mapNotNull null
-            fun text(key: String) = (pl[key] as? JsonPrimitive)?.content
-            // Владелец бывает и в `owner.uid`, обложка-мозаика — в `cover.itemsUri` (как на десктопе).
-            val ownerUid = ((pl["owner"] as? JsonObject)?.get("uid") as? JsonPrimitive)?.content
-            val cover = pl["cover"] as? JsonObject
-            val mosaic = (cover?.get("itemsUri") as? JsonArray)
-                ?.firstNotNullOfOrNull { (it as? JsonPrimitive)?.content?.takeIf { uri -> uri.contains("%%") } }
-            ru.plastinka.data.GeneratedPlaylist(
-                uid = (text("uid") ?: ownerUid)?.toLongOrNull() ?: return@mapNotNull null,
-                kind = text("kind")?.toLongOrNull() ?: return@mapNotNull null,
-                title = text("title") ?: return@mapNotNull null,
-                coverUri = (cover?.get("uri") as? JsonPrimitive)?.content?.takeIf { it.contains("%%") }
-                    ?: mosaic
-                    ?: text("ogImage"),
-                trackCount = text("trackCount")?.toIntOrNull() ?: 0,
+            val data = (item as? JsonObject)?.get("data") as? JsonObject ?: return@mapNotNull null
+            data["artist"]?.let(::parseArtistCard)
+        }.distinctBy { it.id }
+    }
+
+    /**
+     * Разбор `{"newReleases":[{"album":{…"albumType","cover":{"uri"}},"artists":[…],"releaseDate":…}]}`:
+     * у альбома `albumType` вместо `type`, обложка в `cover.uri`, исполнители рядом с ним.
+     */
+    internal fun parseNewReleases(root: JsonObject): List<AlbumCard> {
+        val body = root["result"] as? JsonObject ?: root
+        return (body["newReleases"] as? JsonArray).orEmpty().mapNotNull { item ->
+            val obj = item as? JsonObject ?: return@mapNotNull null
+            val album = obj["album"] as? JsonObject ?: return@mapNotNull null
+            val id = album.str("id")?.takeIf(::isNumericId) ?: return@mapNotNull null
+            val title = album.str("title")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val artists = ((obj["artists"] as? JsonArray) ?: (album["artists"] as? JsonArray)).orEmpty()
+                .mapNotNull { r ->
+                    val o = r as? JsonObject ?: return@mapNotNull null
+                    ArtistRef(o.str("id"), o.str("name") ?: return@mapNotNull null)
+                }
+            AlbumCard(
+                id = id,
+                title = title,
+                version = album.str("version")?.takeIf { it.isNotBlank() },
+                year = obj.str("releaseDate")?.take(4)?.toIntOrNull(),
+                kind = when (album.str("albumType") ?: album.str("type")) {
+                    "single" -> AlbumKind.Single
+                    "compilation" -> AlbumKind.Compilation
+                    else -> AlbumKind.Album
+                },
+                artists = artists,
+                coverUri = (album.str("cover", "uri") ?: album.str("coverUri"))?.takeIf { it.contains("%%") },
+                trackCount = 0,
             )
-        }
+        }.distinctBy { it.id }
+    }
+
+    /** Разбор `{"items":[{"data":{"playlist":…,"description":…}}]}`: карточка плейлиста и его описание. */
+    internal fun parsePersonalShelf(root: JsonObject): List<PlaylistCard> {
+        val body = root["result"] as? JsonObject ?: root
+        return (body["items"] as? JsonArray).orEmpty().mapNotNull { item ->
+            val data = (item as? JsonObject)?.get("data") as? JsonObject ?: return@mapNotNull null
+            val card = data["playlist"]?.let { parsePlaylistCard(it, liked = false) } ?: return@mapNotNull null
+            card.copy(note = data.str("description")?.takeIf { it.isNotBlank() })
+        }.distinctBy { it.uid to it.kind }
     }
 
     // ------------------------------------------------------------ топ месяца
@@ -561,7 +590,8 @@ class YandexApi(private val http: OkHttpClient) {
             val liked = runCatching {
                 val arr = get(token, "$API_BASE/users/$uid/likes/playlists")["result"]?.jsonArray
                     ?: throw IllegalStateException("нет result у понравившихся плейлистов")
-                arr.mapNotNull { parsePlaylistCard(it, liked = true) }
+                // Недавно отмеченные первыми, как на десктопе.
+                recentFirst(arr, "playlist").mapNotNull { parsePlaylistCard(it, liked = true) }
             }
             // Ошибка авторизации важнее частичного результата.
             (own.exceptionOrNull() as? UnauthorizedException)?.let { throw it }
@@ -621,6 +651,26 @@ class YandexApi(private val http: OkHttpClient) {
             }
         }
         ArtistDetails(card, popular, albums)
+    }
+
+    /**
+     * Страница «Все треки» исполнителя: `GET /artists/{id}/tracks?page=N&page-size=100`,
+     * `page` с нуля. Ответ `{"result":{"pager":{"total":N},"tracks":[Track]}}`; элемент
+     * без годных данных пропускается, остальное терпимо.
+     */
+    suspend fun artistTracks(token: String, id: String, page: Int): ArtistTracksPage =
+        withContext(Dispatchers.IO) {
+            if (!isNumericId(id)) throw NotFoundException()
+            val result = get(token, "$API_BASE/artists/$id/tracks?page=$page&page-size=$ARTIST_TRACKS_PAGE")["result"]
+                as? JsonObject ?: throw IllegalStateException("нет result у треков исполнителя")
+            parseArtistTracks(result)
+        }
+
+    internal fun parseArtistTracks(result: JsonObject): ArtistTracksPage {
+        val raw = (result["tracks"] as? JsonArray).orEmpty()
+        val tracks = raw.mapNotNull { parseTrackSafe(it) }
+        val total = (result.str("pager", "total") ?: result.str("total"))?.toIntOrNull() ?: 0
+        return ArtistTracksPage(tracks, maxOf(total, tracks.size), raw.size)
     }
 
     /** Все альбомы исполнителя страницами по 100, не больше 10 страниц. */
@@ -962,6 +1012,11 @@ class YandexApi(private val http: OkHttpClient) {
 
         /** Сколько альбомов отдаёт `brief-info` и сколько страниц `direct-albums` читаем. */
         private const val BRIEF_ALBUMS = 9
+        /** Треков на страницу «Все треки» (как на десктопе). */
+        const val ARTIST_TRACKS_PAGE = 100
+        /** Сколько просить у полок коллекции (как на десктопе). */
+        private const val MET_ARTISTS = 16
+        private const val NEW_RELEASES = 30
         private const val MAX_ALBUM_PAGES = 10
 
         /** Последняя страница поиска: на больших номерах сервер отвечает 400. */

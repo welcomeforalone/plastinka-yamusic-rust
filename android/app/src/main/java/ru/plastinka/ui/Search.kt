@@ -281,7 +281,7 @@ private fun TypedResults(
  * новых элементов (все оказались повторами).
  */
 @Composable
-private fun LoadMoreEffect(state: LazyListState, page: Int, onMore: () -> Unit) {
+internal fun LoadMoreEffect(state: LazyListState, page: Int, onMore: () -> Unit) {
     val callback by rememberUpdatedState(onMore)
     LaunchedEffect(state, page) {
         snapshotFlow {
@@ -297,7 +297,13 @@ private fun LoadMoreEffect(state: LazyListState, page: Int, onMore: () -> Unit) 
  * `top`/`bottom` — это зазоры макета минус 4 dp.
  */
 @Composable
-private fun SectionHeader(title: String, top: Dp = 18.dp, bottom: Dp = 0.dp, onAll: () -> Unit) {
+internal fun SectionHeader(
+    title: String,
+    top: Dp = 18.dp,
+    bottom: Dp = 0.dp,
+    link: String = "Все",
+    onAll: () -> Unit,
+) {
     Row(
         Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = top, bottom = bottom),
         verticalAlignment = Alignment.CenterVertically,
@@ -307,7 +313,7 @@ private fun SectionHeader(title: String, top: Dp = 18.dp, bottom: Dp = 0.dp, onA
             Modifier.height(36.dp).clip(CircleShape).clickable(onClick = onAll).padding(horizontal = 12.dp),
             contentAlignment = Alignment.Center,
         ) {
-            PlText("Все", PlType.secondaryStrong, Pl.accent)
+            PlText(link, PlType.secondaryStrong, Pl.accent)
         }
     }
 }

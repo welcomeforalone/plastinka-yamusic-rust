@@ -44,6 +44,7 @@ fun ArtistScreen(
     player: PlayerController?,
     onBack: () -> Unit,
     onOpenAlbum: (AlbumCard) -> Unit,
+    onOpenAllTracks: () -> Unit,
 ) {
     val loaded by model.artist.state.collectAsStateWithLifecycle()
     val playing = rememberPlayingState(player)
@@ -86,7 +87,9 @@ fun ArtistScreen(
                             }
                         }
                         if (popular.isNotEmpty()) {
-                            item { SectionHeader("Популярные треки") }
+                            item {
+                                SectionHeader("Популярные треки", bottom = 4.dp, link = "Все треки", onAll = onOpenAllTracks)
+                            }
                             trackItems(popular, playing, player, model, shownName, source)
                         }
                         if (albums.isNotEmpty()) {
