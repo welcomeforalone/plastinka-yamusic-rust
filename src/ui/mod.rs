@@ -353,6 +353,9 @@ pub enum Message {
     WindowOpened(Option<window::Id>),
     /// Размер любого окна (главного или мини-плеера).
     AnyResized(window::Id, Size),
+    /// Масштаб экрана ОС (DPI) главного окна: узнали или изменился.
+    Dpi(f32),
+    DpiChanged(window::Id, f32),
     /// Просьба закрыть любое окно (крестик, Alt + F4).
     CloseRequested(window::Id),
     /// Мини-плеер: открыть из нижнего плеера; закрепить поверх окон;
@@ -444,6 +447,8 @@ pub struct App {
     size: Size,
     /// Окно свёрнуто: перерисовки стоят (см. `pause`).
     minimized: bool,
+    /// Масштаб экрана ОС (DPI) главного окна.
+    dpi: f32,
     /// Окно развёрнуто или на весь экран: углы прямые (см. `corners`).
     maximized: bool,
     fullscreen: bool,
@@ -517,6 +522,7 @@ impl App {
             window: Some(main_window),
             size: window_settings().size,
             minimized: false,
+            dpi: 1.0,
             maximized: false,
             fullscreen: false,
             http: net::http_client().map_err(|err| err.to_string()),
@@ -604,6 +610,16 @@ impl App {
         }
         // Проценты — от 75 до 200: потерь при переводе нет.
         self.prefs.scale as f32 / 100.0
+    }
+
+    fn set_dpi(&mut self, dpi: f32) -> Task<Message> {
+        if dpi.is_finite() && dpi > 0.0 {
+            self.dpi = dpi;
+            if let Screen::Main(library) = &mut self.screen {
+                library.set_dpi(dpi);
+            }
+        }
+        Task::none()
     }
 
     fn compact(&self) -> bool {
@@ -776,8 +792,15 @@ impl App {
                     Task::batch([
                         window::size(id).map(Message::WindowResized),
                         window::run(id, native_handle).map(Message::NativeHandle),
+                        window::scale_factor(id).map(Message::Dpi),
                     ])
                 });
+            }
+            Message::Dpi(dpi) => return self.set_dpi(dpi),
+            Message::DpiChanged(id, dpi) => {
+                if self.window == Some(id) {
+                    return self.set_dpi(dpi);
+                }
             }
             Message::AnyResized(id, size) => {
                 // Размер мини-плеера главному окну не нужен.
@@ -1723,6 +1746,7 @@ impl App {
             &self.plugins,
         );
         let mut library = library;
+        library.set_dpi(self.dpi);
         library.set_sound(self.prefs.quality, self.prefs.normalize);
         library.set_lyrics_lrclib(self.prefs.lyrics_lrclib);
         // Параметры эквалайзера уходят плееру вместе с громкостью и качеством.
@@ -1775,6 +1799,12 @@ impl App {
                 _ => None,
             }),
             window::close_requests().map(Message::CloseRequested),
+            iced::event::listen_with(|event, _, id| match event {
+                iced::Event::Window(window::Event::Rescaled(dpi)) => {
+                    Some(Message::DpiChanged(id, dpi))
+                }
+                _ => None,
+            }),
         ];
         // Положение мини-плеера запоминаем, только пока оно открыто.
         if self.mini.is_some() {

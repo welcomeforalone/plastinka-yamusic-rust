@@ -29,7 +29,7 @@ use iced::{Alignment, Border, Color, Element, Length, Padding, Point, Subscripti
 use super::Message as App;
 use super::Message::Library as Lib;
 use super::anim;
-use super::covers::{Art, Covers, Grade};
+use super::covers::{Art, Avatar, Covers, Grade};
 use super::filter;
 use super::history;
 use super::history_store;
@@ -108,10 +108,17 @@ const PLAYER_CHROME: f32 = 20.0 * 2.0 + 16.0 * 2.0 + 1.0;
 /// Поля раздела: сверху и по бокам.
 pub(super) const PAGE_TOP: f32 = 32.0;
 pub(super) const PAGE_SIDE: f32 = 40.0;
-/// Сколько нужно правому краю плеера с полным значком качества
-/// («MP3 · 320») и с коротким («320»).
-const EXTRAS_WITH_QUALITY: f32 = 230.0;
-const EXTRAS_WITH_SHORT_QUALITY: f32 = 184.0;
+/// Правый край плеера: промежуток между его элементами, ширина кнопки и
+/// отступ после значка качества (`Space` в `player_bar`).
+const EXTRAS_GAP: f32 = 4.0;
+const EXTRAS_BUTTON: f32 = 32.0;
+const EXTRAS_BADGE_SPACE: f32 = 8.0;
+/// Оценка ширины значка качества: CaptionStrong 12 px полужирным, берём с
+/// запасом на символ; поля кнопки 8 по бокам и рамка 1 с каждой стороны.
+const BADGE_CHAR: f32 = 7.5;
+const BADGE_FRAME: f32 = 8.0 * 2.0 + 2.0;
+/// Ширина середины плеера в узком окне.
+const CONTROLS_COMPACT: f32 = 300.0;
 /// Панель «Настройки звука»: ширина карточки и отступ от краёв окна.
 const SOUND_PANEL_WIDTH: f32 = 520.0;
 const SOUND_PANEL_MARGIN: f32 = 16.0;
@@ -132,11 +139,85 @@ const VOLUME_CLOSE_DELAY: Duration = Duration::from_millis(250);
 const VOLUME_PANEL_FADE: Duration = Duration::from_millis(160);
 
 /// Какой значок качества помещается в плеер.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Quality {
+    #[default]
     Hidden,
     Short,
     Full,
+}
+
+/// Что из правого края плеера (кроме значка громкости, он есть всегда)
+/// помещается по ширине.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExtrasFit {
+    more: bool,
+    lyrics: bool,
+    queue: bool,
+    equalizer: bool,
+    mini: bool,
+    quality: Quality,
+}
+
+/// Ширина правого края плеера шириной `bar_width`: то, что остаётся после
+/// полей и середины, делится между названием трека и краем в долях
+/// `FillPortion` (1:1, а в узком окне 3:2).
+fn extras_room(bar_width: f32, compact: bool) -> f32 {
+    let controls = if compact { CONTROLS_COMPACT } else { CONTROLS };
+    let free = (bar_width - PLAYER_CHROME - controls).max(0.0);
+    if compact {
+        free * 2.0 / 5.0
+    } else {
+        free / 2.0
+    }
+}
+
+/// Ширина значка качества по тексту (оценка, не измерение).
+fn badge_width(info: StreamInfo, full: bool) -> f32 {
+    quality_text(info, full).chars().count() as f32 * BADGE_CHAR + BADGE_FRAME
+}
+
+/// Что помещается в правый край шириной `room`. Громкость есть всегда; к ней
+/// по приоритету добавляются меню трека, текст песни, очередь, эквалайзер (не
+/// в полноэкранном плеере), мини-плеер, короткий значок качества и полный.
+/// Приоритет строгий: если очередной элемент не влез, следующие не берутся.
+fn extras_fit(room: f32, fullscreen: bool, badge: Option<StreamInfo>) -> ExtrasFit {
+    let mut left = room - EXTRAS_BUTTON;
+    let mut open = true;
+    let mut take = |width: f32| {
+        let fits = open && left >= width;
+        if fits {
+            left -= width;
+        }
+        open = fits;
+        fits
+    };
+    let step = EXTRAS_BUTTON + EXTRAS_GAP;
+    let more = take(step);
+    let lyrics = take(step);
+    let queue = take(step);
+    let equalizer = !fullscreen && take(step);
+    let mini = take(step);
+    let mut fit = ExtrasFit {
+        more,
+        lyrics,
+        queue,
+        equalizer,
+        mini,
+        quality: Quality::Hidden,
+    };
+    // Значок, пустое место после него и два промежутка.
+    let tail = EXTRAS_BADGE_SPACE + 2.0 * EXTRAS_GAP;
+    if let Some(info) = badge.filter(|_| mini) {
+        let short = badge_width(info, false) + tail;
+        let full = badge_width(info, true) + tail;
+        if left >= full {
+            fit.quality = Quality::Full;
+        } else if left >= short {
+            fit.quality = Quality::Short;
+        }
+    }
+    fit
 }
 
 /// Где на экране плеер: отступы слева и справа при ширине меню `sidebar`.
@@ -293,6 +374,8 @@ pub enum Message {
     PlayHistoryItem(usize, usize, usize),
     /// Прослушивания прошлых запусков прочитаны с диска.
     LocalPlaysLoaded(Vec<history::LocalPlay>),
+    /// Аватар аккаунта из Яндекс ID (`None` — нет или не загрузился).
+    AvatarLoaded(Option<Arc<Avatar>>),
     /// Играть с трека очереди (панель «Очередь»).
     PlayQueueAt(usize),
     /// Играть трек из «Недавно играли» (номер в истории).
@@ -419,6 +502,12 @@ pub struct Library {
     shown: Option<Vec<usize>>,
     /// Соединение для запросов, которые окно запускает само (плагины).
     http: Option<reqwest::Client>,
+    /// Аватар аккаунта из Яндекс ID; только в памяти. Библиотека живёт до
+    /// выхода из аккаунта, так что при выходе он исчезает вместе с ней.
+    avatar: Option<Arc<Avatar>>,
+    /// Масштаб экрана ОС (DPI окна); с масштабом приложения даёт размер
+    /// кружков в физических пикселях.
+    dpi: f32,
     plugins: PluginSettings,
     /// Настройки звука: качество (уходит плееру) и нормализация громкости.
     quality: AudioQuality,
@@ -672,6 +761,8 @@ impl Library {
             haystacks: Vec::new(),
             shown: None,
             http: http.cloned(),
+            avatar: None,
+            dpi: 1.0,
             plugins: PluginSettings::default(),
             quality: AudioQuality::default(),
             normalize: false,
@@ -710,10 +801,43 @@ impl Library {
         // Занятия для меню «Моей волны» — заранее: иначе первое открытие
         // меню показывает его без раздела «Занятие», и оно вырастает.
         let stations = library.wave_load_stations();
+        // Аватар из Яндекс ID грузится отдельно и экран не задерживает.
+        let avatar = library.avatar_load(http);
         (
             library,
-            Task::batch([task, plugins, history, restored, stations]),
+            Task::batch([task, plugins, history, restored, stations, avatar]),
         )
+    }
+
+    /// Аватар аккаунта: адрес из Паспорта, затем картинка без токена. Любая
+    /// ошибка даёт `None`, остаётся буква.
+    fn avatar_load(&self, http: Option<&reqwest::Client>) -> Task<Message> {
+        let Some(http) = http.cloned() else {
+            return Task::none();
+        };
+        let token = self.token.access_token.clone();
+        Task::perform(
+            async move {
+                let url = api::fetch_avatar_url(&http, &token).await?;
+                super::covers::load_avatar(&http, &url).await
+            },
+            Message::AvatarLoaded,
+        )
+    }
+
+    pub fn avatar(&self) -> Option<&Avatar> {
+        self.avatar.as_deref()
+    }
+
+    pub fn set_dpi(&mut self, dpi: f32) {
+        if dpi.is_finite() && dpi > 0.0 {
+            self.dpi = dpi;
+        }
+    }
+
+    /// Физических пикселей в логическом: масштаб приложения × DPI окна.
+    pub fn pixel_scale(&self, prefs: &Prefs) -> f32 {
+        prefs.scale as f32 / 100.0 * self.dpi
     }
 
     /// Статус аккаунта и подписки (для «Настройки → Аккаунт»).
@@ -1124,6 +1248,10 @@ impl Library {
             Message::HistoryReload => return (self.history_load(http), None),
             Message::LocalPlaysLoaded(plays) => {
                 self.local_plays_loaded(plays);
+                None
+            }
+            Message::AvatarLoaded(handle) => {
+                self.avatar = handle;
                 None
             }
             Message::PlayHistoryItem(day, item, index) => self.play_history_item(day, item, index),
@@ -1875,6 +2003,7 @@ impl Library {
                     eq,
                     eq_name: &settings_state.eq_name,
                     width,
+                    pixel_scale: self.pixel_scale(prefs),
                 },
                 settings_state,
                 // Размер окна уже в единицах раскладки (см. `App::refresh_size`).
@@ -1892,14 +2021,11 @@ impl Library {
             .clip(true);
         // Меню во всю высоту слева, справа раздел и под ним плеер. Фон везде
         // чёрный, части разделены тонкими линиями.
-        // Значок качества — полный, если правый край плеера вмещает его;
-        // иначе короткий при узкой громкости.
         let sidebar = if collapsed {
             SIDEBAR_COLLAPSED
         } else {
             SIDEBAR
         };
-        let quality = quality_for(width - sidebar, compact);
         let page: Element<'a, App> = match self.lyrics_panel(covers, moment.now, turn) {
             Some(lyrics) => row![panel, lyrics].height(Length::Fill).into(),
             None => panel.into(),
@@ -1910,7 +2036,7 @@ impl Library {
             self.player_bar(
                 covers,
                 compact,
-                quality,
+                width - sidebar,
                 turn,
                 moment.now,
                 prefs.visualizer,
@@ -1919,7 +2045,7 @@ impl Library {
         ]
         .width(Length::Fill);
         row![
-            self.sidebar(moment.sidebar),
+            self.sidebar(moment.sidebar, self.pixel_scale(prefs)),
             widgets::vertical_divider(),
             right
         ]
@@ -2051,7 +2177,7 @@ impl Library {
         let player = self.player_bar(
             covers,
             compact,
-            quality_for(window.width, compact),
+            window.width,
             turn,
             now,
             prefs.visualizer,
@@ -2078,7 +2204,7 @@ impl Library {
     }
 
     /// Меню шириной `width`: узкое — только иконки.
-    fn sidebar(&self, width: f32) -> Element<'_, App> {
+    fn sidebar(&self, width: f32, pixel_scale: f32) -> Element<'_, App> {
         let compact = width < SIDEBAR_ICONS_BELOW;
         let item = |section: Section| nav_item(section, self.section == section, compact);
         // Кнопка сворачивания появляется, когда мышь над шапкой меню. Её место
@@ -2145,7 +2271,7 @@ impl Library {
             Space::new().height(Length::Fill),
             item(Section::Settings),
             Space::new().height(8),
-            self.account_card(compact),
+            self.account_card(compact, pixel_scale),
         ]
         .spacing(2)
         .width(width)
@@ -2168,7 +2294,7 @@ impl Library {
             || self.wave_tint_running(now)
     }
 
-    fn account_card(&self, compact: bool) -> Element<'_, App> {
+    fn account_card(&self, compact: bool, pixel_scale: f32) -> Element<'_, App> {
         let account = self.status.account();
         let name = account
             .display_name
@@ -2180,7 +2306,7 @@ impl Library {
             .next()
             .map(|ch| ch.to_uppercase().to_string())
             .unwrap_or_default();
-        let avatar = avatar(initial, 36.0);
+        let avatar = avatar(initial, 36.0, self.avatar(), pixel_scale);
         let open = Lib(Message::Nav(Section::Settings));
         if compact {
             return widgets::with_tooltip(
@@ -2328,13 +2454,14 @@ impl Library {
         })
     }
 
-    /// `quality` — показать значок качества потока.
+    /// `bar_width` — ширина плеера: от неё зависит, сколько кнопок и значок
+    /// качества потока помещаются справа.
     #[allow(clippy::too_many_arguments)]
     fn player_bar<'a>(
         &'a self,
         covers: &'a Covers,
         compact: bool,
-        quality: Quality,
+        bar_width: f32,
         turn: f32,
         now: Instant,
         visualizer: bool,
@@ -2563,7 +2690,7 @@ impl Library {
         let controls = column![buttons, seek]
             .spacing(4)
             .align_x(Alignment::Center)
-            .width(if compact { 300.0 } else { CONTROLS });
+            .width(if compact { CONTROLS_COMPACT } else { CONTROLS });
 
         let volume = if player.muted { 0.0 } else { player.volume };
         let volume_icon = match volume {
@@ -2571,17 +2698,16 @@ impl Library {
             v if v < 0.5 => Icon::VolumeLow,
             _ => Icon::Volume,
         };
-        let mut extras = row![].spacing(4).align_y(Alignment::Center);
-        let shown = player
-            .stream
-            .filter(|_| has_track && quality != Quality::Hidden);
-        if let Some(info) = shown {
+        let shown = player.stream.filter(|_| has_track);
+        let fit = extras_fit(extras_room(bar_width, compact), fullscreen, shown);
+        let mut extras = row![].spacing(EXTRAS_GAP).align_y(Alignment::Center);
+        if let Some(info) = shown.filter(|_| fit.quality != Quality::Hidden) {
             extras = extras
-                .push(quality_badge(info, quality == Quality::Full))
-                .push(Space::new().width(8));
+                .push(quality_badge(info, fit.quality == Quality::Full))
+                .push(Space::new().width(EXTRAS_BADGE_SPACE));
         }
-        extras = extras
-            .push(widgets::with_tooltip(
+        if fit.more {
+            extras = extras.push(widgets::with_tooltip(
                 widgets::icon_button(
                     Icon::More,
                     Size::S,
@@ -2590,8 +2716,10 @@ impl Library {
                 ),
                 "Меню трека",
                 tooltip::Position::Top,
-            ))
-            .push(widgets::with_tooltip(
+            ));
+        }
+        if fit.lyrics {
+            extras = extras.push(widgets::with_tooltip(
                 widgets::icon_button(
                     Icon::Lyrics,
                     Size::S,
@@ -2606,56 +2734,69 @@ impl Library {
                 "Текст песни",
                 tooltip::Position::Top,
             ));
-        if !compact {
-            // В полноэкранном плеере эквалайзера нет: он в настройках.
-            if !fullscreen {
-                extras = extras.push(widgets::with_tooltip(
-                    widgets::icon_button(
-                        Icon::Equalizer,
-                        Size::S,
-                        self.eq_enabled,
-                        Some(App::OpenEqualizer),
-                    ),
-                    "Эквалайзер",
-                    tooltip::Position::Top,
-                ));
-            }
-            extras = extras
-                .push(widgets::with_tooltip(
-                    widgets::icon_button(
-                        Icon::Queue,
-                        Size::S,
-                        self.queue_open(),
-                        if fullscreen {
-                            None
-                        } else {
-                            on(Message::Lyrics(lyrics::Msg::ToggleQueue))
-                        },
-                    ),
-                    "Очередь",
-                    tooltip::Position::Top,
-                ))
-                .push(widgets::with_tooltip(
-                    widgets::icon_button(Icon::MiniPlayer, Size::S, false, Some(App::MiniOpen)),
-                    "Мини-плеер",
-                    tooltip::Position::Top,
-                ));
         }
-        let extras = container(
-            extras
-                // Над значком всплывает панель громкости (`volume_panel`).
-                .push(
-                    mouse_area(widgets::icon_button(
-                        volume_icon,
-                        Size::S,
-                        false,
-                        Some(Lib(Message::ToggleMute)),
-                    ))
-                    .on_enter(Lib(Message::VolumeHover(true)))
-                    .on_exit(Lib(Message::VolumeHover(false))),
+        if fit.queue {
+            extras = extras.push(widgets::with_tooltip(
+                widgets::icon_button(
+                    Icon::Queue,
+                    Size::S,
+                    self.queue_open(),
+                    if fullscreen {
+                        None
+                    } else {
+                        on(Message::Lyrics(lyrics::Msg::ToggleQueue))
+                    },
                 ),
+                "Очередь",
+                tooltip::Position::Top,
+            ));
+        }
+        // В полноэкранном плеере эквалайзера нет: он в настройках.
+        if fit.equalizer && !fullscreen {
+            extras = extras.push(widgets::with_tooltip(
+                widgets::icon_button(
+                    Icon::Equalizer,
+                    Size::S,
+                    self.eq_enabled,
+                    Some(App::OpenEqualizer),
+                ),
+                "Эквалайзер",
+                tooltip::Position::Top,
+            ));
+        }
+        if fit.mini {
+            extras = extras.push(widgets::with_tooltip(
+                widgets::icon_button(Icon::MiniPlayer, Size::S, false, Some(App::MiniOpen)),
+                "Мини-плеер",
+                tooltip::Position::Top,
+            ));
+        }
+        // Громкость — фиксированной ширины: iced раскладывает такие элементы
+        // раньше `Fill`, так что ей место достаётся первой, а остальное
+        // прижато вправо и обрезается, если оценка ширины ошиблась (масштаб).
+        // Над значком всплывает панель громкости (`volume_panel`).
+        let volume_button = container(
+            mouse_area(widgets::icon_button(
+                volume_icon,
+                Size::S,
+                false,
+                Some(Lib(Message::ToggleMute)),
+            ))
+            .on_enter(Lib(Message::VolumeHover(true)))
+            .on_exit(Lib(Message::VolumeHover(false))),
         )
-        .align_x(Alignment::End)
+        .width(VOLUME_ICON_SIDE);
+        let extras = container(
+            row![
+                container(extras)
+                    .width(Length::Fill)
+                    .align_x(Alignment::End)
+                    .clip(true),
+                volume_button
+            ]
+            .spacing(EXTRAS_GAP)
+            .align_y(Alignment::Center),
+        )
         .width(Length::FillPortion(if compact { 2 } else { 1 }));
 
         let bar = container(
@@ -2876,7 +3017,24 @@ fn surface_2(radius: f32) -> container::Style {
     }
 }
 
-pub(super) fn avatar<'a>(initial: String, size: f32) -> Element<'a, App> {
+/// Аватар: картинка из Яндекс ID, если загружена, иначе буква на градиенте.
+pub(super) fn avatar<'a>(
+    initial: String,
+    size: f32,
+    picture: Option<&Avatar>,
+    pixel_scale: f32,
+) -> Element<'a, App> {
+    // Уровень не мельче кружка в физических пикселях: так iced почти не
+    // уменьшает картинку и «лесенок» нет.
+    if let Some(handle) = picture.and_then(|avatar| avatar.pick(size * pixel_scale)) {
+        return iced::widget::image(handle.clone())
+            .width(size)
+            .height(size)
+            .filter_method(iced::widget::image::FilterMethod::Linear)
+            .content_fit(iced::ContentFit::Cover)
+            .border_radius(size / 2.0)
+            .into();
+    }
     container(theme::line(initial, Style::BodyStrong, theme::TEXT_PRIMARY))
         .center(size)
         .style(|_| container::Style {
@@ -2898,18 +3056,6 @@ fn scroll_list(offset: f32) -> Task<Message> {
             y: Some(offset),
         },
     )
-}
-
-/// Какой значок качества влезает в плеер шириной `bar_width`: полный, если
-/// правый край вмещает его, иначе короткий при узкой громкости.
-fn quality_for(bar_width: f32, compact: bool) -> Quality {
-    let edge = (bar_width - PLAYER_CHROME - CONTROLS) / 2.0;
-    match edge {
-        _ if compact => Quality::Hidden,
-        edge if edge >= EXTRAS_WITH_QUALITY => Quality::Full,
-        edge if edge >= EXTRAS_WITH_SHORT_QUALITY => Quality::Short,
-        _ => Quality::Hidden,
-    }
 }
 
 /// Слой во всю ширину и высоту со стилем `style`.
@@ -3680,6 +3826,106 @@ mod tests {
         assert_eq!(quality_text(info(Codec::Aac, None), true), "AAC");
         assert_eq!(quality_text(info(Codec::Mp3, Some(320)), true), "MP3 · 320");
         assert_eq!(quality_text(info(Codec::Mp3, Some(320)), false), "320");
+    }
+
+    fn mp3() -> Option<StreamInfo> {
+        Some(StreamInfo {
+            codec: Codec::Mp3,
+            kbps: Some(320),
+        })
+    }
+
+    /// Сколько элементов показано (значок качества: короткий — один, полный — два).
+    fn fit_rank(fit: &ExtrasFit) -> usize {
+        [fit.more, fit.lyrics, fit.queue, fit.equalizer, fit.mini]
+            .into_iter()
+            .filter(|shown| *shown)
+            .count()
+            + match fit.quality {
+                Quality::Hidden => 0,
+                Quality::Short => 1,
+                Quality::Full => 2,
+            }
+    }
+
+    #[test]
+    fn extras_room_splits_free_space() {
+        // Не компактное: свободное делится пополам.
+        assert_eq!(
+            extras_room(1100.0 - SIDEBAR, false),
+            (1100.0 - SIDEBAR - PLAYER_CHROME - CONTROLS) / 2.0
+        );
+        // Компактное: середина уже, краю две пятых.
+        assert_eq!(
+            extras_room(728.0, true),
+            (728.0 - PLAYER_CHROME - CONTROLS_COMPACT) * 0.4
+        );
+        // Тесное окно не даёт отрицательной ширины.
+        assert_eq!(extras_room(100.0, false), 0.0);
+    }
+
+    #[test]
+    fn extras_fit_keeps_priority_at_1100() {
+        // Окно 1100 с меню: край ~177 px: четыре кнопки и громкость, мини-плеер и значок не влезают.
+        let room = extras_room(1100.0 - SIDEBAR, false);
+        let fit = extras_fit(room, false, mp3());
+        assert!(fit.more && fit.lyrics && fit.queue && fit.equalizer);
+        assert!(!fit.mini);
+        assert_eq!(fit.quality, Quality::Hidden);
+    }
+
+    #[test]
+    fn extras_fit_shows_everything_when_wide() {
+        let room = extras_room(1920.0 - SIDEBAR, false);
+        let fit = extras_fit(room, false, mp3());
+        assert!(fit.more && fit.lyrics && fit.queue && fit.equalizer && fit.mini);
+        assert_eq!(fit.quality, Quality::Full);
+        // Без потока значка нет.
+        assert_eq!(extras_fit(room, false, None).quality, Quality::Hidden);
+    }
+
+    #[test]
+    fn extras_fit_in_minimum_compact_window() {
+        // 960 с меню 232: в узком окне кнопки тоже решает место.
+        let room = extras_room(960.0 - SIDEBAR, true);
+        let fit = extras_fit(room, false, mp3());
+        assert!(fit.more && fit.lyrics);
+        assert_eq!(fit.quality, Quality::Hidden);
+        // Совсем нет места: остаётся одна громкость.
+        assert_eq!(
+            extras_fit(0.0, false, mp3()),
+            ExtrasFit {
+                more: false,
+                lyrics: false,
+                queue: false,
+                equalizer: false,
+                mini: false,
+                quality: Quality::Hidden,
+            }
+        );
+    }
+
+    #[test]
+    fn extras_fit_fullscreen_has_no_equalizer() {
+        let fit = extras_fit(1000.0, true, mp3());
+        assert!(!fit.equalizer);
+        assert!(fit.more && fit.lyrics && fit.queue && fit.mini);
+        assert_eq!(fit.quality, Quality::Full);
+        // Без эквалайзера мини-плеер появляется на кнопку раньше.
+        let room = 4.0 * (EXTRAS_BUTTON + EXTRAS_GAP) + EXTRAS_BUTTON;
+        assert!(extras_fit(room, true, None).mini);
+        assert!(!extras_fit(room, false, None).mini);
+    }
+
+    #[test]
+    fn extras_fit_is_monotonic() {
+        let mut last = 0;
+        for room in 0..600 {
+            let rank = fit_rank(&extras_fit(room as f32, false, mp3()));
+            assert!(rank >= last, "room {room}: {rank} < {last}");
+            last = rank;
+        }
+        assert_eq!(last, 7);
     }
 
     #[test]

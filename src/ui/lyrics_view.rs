@@ -401,13 +401,24 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LyricsView<'_, Message>
         let bounds = layout.bounds();
         match event {
             Event::Mouse(mouse::Event::WheelScrolled { delta }) if cursor.is_over(bounds) => {
-                let dy = match delta {
-                    mouse::ScrollDelta::Lines { y, .. } => y * WHEEL_STEP,
-                    mouse::ScrollDelta::Pixels { y, .. } => *y,
-                };
                 let max = (state.content - state.viewport).max(0.0);
-                let at = (state.scroll.value(state.now) - dy).clamp(0.0, max);
-                state.scroll = Scroll::rest(at, state.now);
+                match delta {
+                    // Колесо: плавно к цели, щелчки складываются.
+                    mouse::ScrollDelta::Lines { y, .. } => {
+                        let base = if state.scroll.done(state.now) {
+                            state.scroll.value(state.now)
+                        } else {
+                            state.scroll.target()
+                        };
+                        let target = (base - y * WHEEL_STEP).clamp(0.0, max);
+                        state.scroll.retarget(state.now, target);
+                    }
+                    // Тачпад и так плавный: двигаем сразу.
+                    mouse::ScrollDelta::Pixels { y, .. } => {
+                        let at = (state.scroll.value(state.now) - y).clamp(0.0, max);
+                        state.scroll = Scroll::rest(at, state.now);
+                    }
+                }
                 state.manual = true;
                 shell.capture_event();
                 shell.request_redraw();

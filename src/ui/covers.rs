@@ -349,10 +349,17 @@ fn cover_url(template: &str, size: &str) -> Option<Url> {
         return None;
     }
     let url = Url::parse(&format!("https://{}", template.replace("%%", size))).ok()?;
-    let trusted = url
-        .host_str()
-        .is_some_and(|host| ALLOWED_HOSTS.contains(&host));
-    (trusted && url.username().is_empty() && url.password().is_none()).then_some(url)
+    is_trusted(&url).then_some(url)
+}
+
+/// Разрешённый хост, https, без логина и пароля в адресе.
+fn is_trusted(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url
+            .host_str()
+            .is_some_and(|host| ALLOWED_HOSTS.contains(&host))
+        && url.username().is_empty()
+        && url.password().is_none()
 }
 
 /// Имя файла в кэше: шаблон, где всё кроме букв, цифр и дефиса заменено на `_`.
@@ -418,6 +425,121 @@ async fn load(
 async fn download(http: &reqwest::Client, template: &str, size: &str) -> Result<Vec<u8>, NetError> {
     let url =
         cover_url(template, size).ok_or(NetError::Other("неверный адрес обложки".to_owned()))?;
+    download_url(http, url).await
+}
+
+/// Аватар аккаунта по готовому адресу (без токена), только в памяти: на диск
+/// не пишется. Хост проверяется так же, как у обложек.
+pub async fn load_avatar(http: &reqwest::Client, url: &str) -> Option<Arc<Avatar>> {
+    let url = Url::parse(url).ok().filter(is_trusted)?;
+    let bytes = download_url(http, url).await.ok()?;
+    if !looks_like_image(&bytes) {
+        return None;
+    }
+    // Уровни считает процессор: не в async-потоке.
+    tokio::task::spawn_blocking(move || Avatar::build(bytes))
+        .await
+        .ok()
+        .flatten()
+        .map(Arc::new)
+}
+
+/// Самый крупный уровень аватара и самый мелкий, который ещё делаем.
+const AVATAR_MAX: u32 = 256;
+const AVATAR_MIN: f32 = 24.0;
+/// Шаг между уровнями: корень из двух.
+const AVATAR_STEP: f32 = std::f32::consts::SQRT_2;
+
+/// Аватар в нескольких размерах. iced уменьшает картинку билинейно и без
+/// mip-уровней: при уменьшении больше чем вдвое появляются «лесенки». Поэтому
+/// заранее готовим уровни с шагом √2 и берём ближайший не мельче нужного.
+#[derive(Debug)]
+pub struct Avatar {
+    /// По возрастанию стороны; квадраты.
+    levels: Vec<(u32, image::Handle)>,
+}
+
+impl Avatar {
+    /// Из байтов картинки: обрезка по центру до квадрата, затем уровни
+    /// `Lanczos3` из исходника (а не друг из друга). `None` — не картинка или
+    /// слишком большая.
+    fn build(bytes: Vec<u8>) -> Option<Self> {
+        let mut limits = ::image::Limits::default();
+        limits.max_image_width = Some(BIG_MAX_SIDE);
+        limits.max_image_height = Some(BIG_MAX_SIDE);
+        limits.max_alloc = Some(BIG_MAX_ALLOC);
+        let mut reader = ::image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .ok()?;
+        reader.limits(limits);
+        let picture = reader.decode().ok()?;
+        Self::from_picture(&picture)
+    }
+
+    fn from_picture(picture: &::image::DynamicImage) -> Option<Self> {
+        let side = picture.width().min(picture.height());
+        if side == 0 {
+            return None;
+        }
+        let square = picture.crop_imm(
+            (picture.width() - side) / 2,
+            (picture.height() - side) / 2,
+            side,
+            side,
+        );
+        let mut levels: Vec<(u32, image::Handle)> = Vec::new();
+        for size in Self::sizes(side) {
+            let level = if size == side {
+                square.to_rgba8()
+            } else {
+                square
+                    .resize_exact(size, size, ::image::imageops::FilterType::Lanczos3)
+                    .to_rgba8()
+            };
+            levels.push((size, image::Handle::from_rgba(size, size, level.into_raw())));
+        }
+        levels.reverse();
+        Some(Self { levels })
+    }
+
+    /// Стороны уровней для исходника со стороной `side`, от крупного.
+    fn sizes(side: u32) -> Vec<u32> {
+        let top = side.min(AVATAR_MAX);
+        let mut sizes = vec![top];
+        let mut exact = top as f32;
+        loop {
+            exact /= AVATAR_STEP;
+            if exact < AVATAR_MIN {
+                break;
+            }
+            let size = exact.round() as u32;
+            if sizes.last() != Some(&size) {
+                sizes.push(size);
+            }
+        }
+        sizes
+    }
+
+    /// Самый мелкий уровень, не меньше `physical_px`; если таких нет (или
+    /// размер не число) — самый крупный.
+    pub fn pick(&self, physical_px: f32) -> Option<&image::Handle> {
+        if !physical_px.is_finite() {
+            return self.levels.last().map(|(_, handle)| handle);
+        }
+        self.levels
+            .iter()
+            .find(|(side, _)| *side as f32 >= physical_px)
+            .or_else(|| self.levels.last())
+            .map(|(_, handle)| handle)
+    }
+
+    #[cfg(test)]
+    fn sides(&self) -> Vec<u32> {
+        self.levels.iter().map(|(side, _)| *side).collect()
+    }
+}
+
+async fn download_url(http: &reqwest::Client, url: Url) -> Result<Vec<u8>, NetError> {
     let mut response = http.get(url).send().await?;
     if !response.status().is_success() {
         return Err(NetError::Other(format!(
@@ -450,6 +572,89 @@ fn write_atomically(path: &Path, data: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn side_of(handle: Option<&image::Handle>) -> Option<u32> {
+        match handle {
+            Some(image::Handle::Rgba { width, .. }) => Some(*width),
+            _ => None,
+        }
+    }
+
+    fn solid(width: u32, height: u32) -> ::image::DynamicImage {
+        ::image::DynamicImage::ImageRgba8(::image::RgbaImage::from_pixel(
+            width,
+            height,
+            ::image::Rgba([10, 20, 30, 255]),
+        ))
+    }
+
+    #[test]
+    fn avatar_levels_step_by_sqrt_two() {
+        let avatar = Avatar::from_picture(&solid(200, 200)).unwrap();
+        assert_eq!(avatar.sides(), vec![25, 35, 50, 71, 100, 141, 200]);
+        // Все уровни квадратные, и пиксели не пустые.
+        for (side, handle) in &avatar.levels {
+            let image::Handle::Rgba {
+                width,
+                height,
+                pixels,
+                ..
+            } = handle
+            else {
+                panic!("уровень не RGBA");
+            };
+            assert_eq!((*width, *height), (*side, *side));
+            assert_eq!(pixels.len(), (side * side * 4) as usize);
+        }
+    }
+
+    #[test]
+    fn avatar_is_cropped_to_a_square_and_capped() {
+        // Широкая картинка: обрезка по центру до меньшей стороны.
+        let avatar = Avatar::from_picture(&solid(300, 120)).unwrap();
+        assert_eq!(avatar.sides().last(), Some(&120));
+        assert!(avatar.levels.iter().all(|(side, _)| *side <= 120));
+        // Высокая тоже.
+        let avatar = Avatar::from_picture(&solid(90, 400)).unwrap();
+        assert_eq!(avatar.sides().last(), Some(&90));
+        // Огромная ужимается до предела.
+        let avatar = Avatar::from_picture(&solid(600, 600)).unwrap();
+        assert_eq!(avatar.sides().last(), Some(&AVATAR_MAX));
+        // Крошечная: один уровень.
+        let avatar = Avatar::from_picture(&solid(10, 10)).unwrap();
+        assert_eq!(avatar.sides(), vec![10]);
+    }
+
+    #[test]
+    fn avatar_pick_takes_smallest_level_that_is_not_smaller() {
+        let avatar = Avatar::from_picture(&solid(200, 200)).unwrap();
+        // Точное попадание.
+        assert_eq!(side_of(avatar.pick(100.0)), Some(100));
+        // Между уровнями: ближайший сверху.
+        assert_eq!(side_of(avatar.pick(72.0)), Some(100));
+        assert_eq!(side_of(avatar.pick(70.5)), Some(71));
+        // Больше самого крупного: самый крупный.
+        assert_eq!(side_of(avatar.pick(500.0)), Some(200));
+        // Ноль и мелочь: самый мелкий; не число: самый крупный.
+        assert_eq!(side_of(avatar.pick(0.0)), Some(25));
+        assert_eq!(side_of(avatar.pick(-3.0)), Some(25));
+        assert_eq!(side_of(avatar.pick(f32::NAN)), Some(200));
+        assert_eq!(side_of(avatar.pick(f32::INFINITY)), Some(200));
+    }
+
+    #[test]
+    fn avatar_from_bytes_refuses_garbage() {
+        assert!(Avatar::build(b"not an image".to_vec()).is_none());
+        let mut png = Vec::new();
+        solid(50, 50)
+            .write_to(
+                &mut std::io::Cursor::new(&mut png),
+                ::image::ImageFormat::Png,
+            )
+            .unwrap();
+        let avatar = Avatar::build(png).unwrap();
+        assert_eq!(avatar.sides(), vec![25, 35, 50]);
+    }
 
     #[test]
     fn cover_url_is_built_only_for_yandex_hosts() {

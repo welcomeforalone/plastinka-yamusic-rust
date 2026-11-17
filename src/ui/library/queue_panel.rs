@@ -12,6 +12,7 @@ use iced::{Alignment, Border, Color, Element, Length, Padding, Task};
 use super::super::covers::Covers;
 use super::super::icons::Icon;
 use super::super::queue::{ListKey, Queue};
+use super::super::scroll;
 use super::super::theme::{self, Style};
 use super::super::widgets;
 use super::lyrics::note;
@@ -152,11 +153,12 @@ impl Library {
                 );
             }
         }
-        scrollable(list.padding(Padding::default().left(PAD).right(PAD)))
-            .id(QUEUE_ID)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        scroll::smooth(
+            scrollable(list.padding(Padding::default().left(PAD).right(PAD)))
+                .id(QUEUE_ID)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
     }
 
     /// Строка истории: приглушённая, щелчок играет этот трек.

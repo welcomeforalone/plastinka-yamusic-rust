@@ -16,6 +16,7 @@ use super::super::history::{self, LocalPlay};
 use super::super::history_store;
 use super::super::icons::{Icon, icon, spinner};
 use super::super::queue::{ListKey, Queue};
+use super::super::scroll;
 use super::super::theme::{self, Style};
 use super::super::widgets::{self, Kind};
 use super::pages::{Page, Target, no_network};
@@ -354,15 +355,16 @@ impl Library {
                 }
             }
         }
-        scrollable(list.max_width(760).padding(Padding {
-            top: PAGE_TOP,
-            right: PAGE_SIDE,
-            bottom: PAGE_TOP,
-            left: PAGE_SIDE,
-        }))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+        scroll::smooth(
+            scrollable(list.max_width(760).padding(Padding {
+                top: PAGE_TOP,
+                right: PAGE_SIDE,
+                bottom: PAGE_TOP,
+                left: PAGE_SIDE,
+            }))
+            .width(Length::Fill)
+            .height(Length::Fill),
+        )
     }
 
     /// Подпись контекста: обложка первого трека и название; щелчок — страница

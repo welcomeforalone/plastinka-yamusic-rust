@@ -4,6 +4,7 @@
 //! ошибки возвращаются как значения и не роняют приложение.
 
 mod account;
+mod avatar;
 mod catalog;
 mod history;
 mod lyrics;
@@ -23,6 +24,7 @@ pub(crate) use account::sample_plus_status;
 pub use account::{
     Account, AccountStatus, Date, PlaybackPermit, PlusDetails, Subscription, fetch_status,
 };
+pub use avatar::fetch_avatar_url;
 pub use catalog::{
     ARTIST_TRACKS_PAGE, Album, AlbumCard, AlbumKind, Artist, ArtistCard, Found, MonthTop, MyAlbums,
     MyArtists, MyPlaylists, Page, Playlist, PlaylistCard, SEARCH_LAST_PAGE, SearchKind,

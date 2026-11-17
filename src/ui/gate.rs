@@ -12,6 +12,7 @@ use iced::widget::{
 use iced::{Alignment, Border, Element, Length, Padding, Shadow};
 
 use super::anim;
+use super::scroll;
 
 use super::icons::{Icon, icon, spinner};
 use super::theme::{self, Style};
@@ -221,7 +222,10 @@ fn window_button<'a>(name: Icon, on_press: Message, close: bool) -> Element<'a, 
 /// Экран до главного окна: содержимое по центру, внизу обязательная строка.
 pub fn frame<'a>(body: Element<'a, Message>) -> Element<'a, Message> {
     column![
-        center(scrollable(center(body).padding(24)).height(Length::Shrink)).height(Length::Fill),
+        center(scroll::smooth(
+            scrollable(center(body).padding(24)).height(Length::Shrink)
+        ))
+        .height(Length::Fill),
         container(theme::line(
             DISCLAIMER,
             Style::Caption,

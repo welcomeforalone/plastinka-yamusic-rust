@@ -506,7 +506,7 @@ fn account<'a>(ctx: &Ctx<'a>) -> Vec<Entry<'a>> {
         _ => "Подписка Плюс не подтверждена".to_owned(),
     };
     let view = row![
-        avatar(initial, 44.0),
+        avatar(initial, 44.0, ctx.library.avatar(), ctx.pixel_scale),
         column![
             theme::line(name.clone(), Style::BodyStrong, theme::TEXT_PRIMARY),
             theme::line(plus.clone(), Style::Secondary, theme::accent()),

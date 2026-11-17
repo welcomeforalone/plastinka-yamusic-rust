@@ -20,6 +20,7 @@ use super::super::covers::Covers;
 use super::super::icons::{Icon, icon, spinner};
 use super::super::marquee::marquee;
 use super::super::queue::{ListKey, Queue};
+use super::super::scroll;
 use super::super::theme::{self, Style};
 use super::super::visualizer;
 use super::super::widgets::{self, Kind, Size};
@@ -1632,7 +1633,7 @@ impl Library {
         .align_y(Alignment::Center);
         let (top, bottom) = (TITLE_BAR + WAVE_MENU_MARGIN, PLAYER_BAR + WAVE_MENU_MARGIN);
         let available = menu_height(window.height, top, bottom);
-        let groups = iced::widget::scrollable(groups).width(Length::Fill);
+        let groups = scroll::smooth(iced::widget::scrollable(groups).width(Length::Fill));
         // Появление: карточка проступает из прозрачности, опускаясь на
         // несколько пикселей и чуть вырастая, за ней — содержимое.
         let content = anim::motion(column![header, groups, footer].spacing(18))

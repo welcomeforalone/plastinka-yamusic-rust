@@ -16,6 +16,7 @@ use super::Message as App;
 use super::icons::{Icon, icon};
 use super::library::{Library, PAGE_SIDE, PAGE_TOP};
 use super::palette;
+use super::scroll;
 use super::theme::{self, Style};
 use super::widgets;
 use super::{Dialog, Prefs};
@@ -265,6 +266,8 @@ pub struct Ctx<'a> {
     pub eq: &'a EqState,
     pub eq_name: &'a eq_page::NameField,
     pub width: f32,
+    /// Физических пикселей в логическом (для аватара).
+    pub pixel_scale: f32,
 }
 
 // ------------------------------------------------------------------ поиск
@@ -326,20 +329,22 @@ pub fn view<'a>(ctx: Ctx<'a>, state: &'a State, width: f32) -> Element<'a, App> 
     } else {
         NAV_WIDTH
     };
-    let page = scrollable(
-        container(body)
-            .width(Length::Fill)
-            .max_width(PAGE_MAX)
-            .padding(Padding {
-                top: PAGE_TOP,
-                right: PAGE_SIDE,
-                bottom: PAGE_TOP,
-                left: 0.0,
-            }),
-    )
-    .id(PAGE_ID)
-    .width(Length::Fill)
-    .height(Length::Fill);
+    let page = scroll::smooth(
+        scrollable(
+            container(body)
+                .width(Length::Fill)
+                .max_width(PAGE_MAX)
+                .padding(Padding {
+                    top: PAGE_TOP,
+                    right: PAGE_SIDE,
+                    bottom: PAGE_TOP,
+                    left: 0.0,
+                }),
+        )
+        .id(PAGE_ID)
+        .width(Length::Fill)
+        .height(Length::Fill),
+    );
     row![navigation(state, nav_width), page]
         .spacing(NAV_GAP)
         .height(Length::Fill)
@@ -361,20 +366,22 @@ fn ribbon_layout<'a>(body: Element<'a, App>, state: &'a State) -> Element<'a, Ap
         bottom: 0.0,
         left: RIBBON_SIDE,
     });
-    let page = scrollable(
-        container(column![body, Space::new().height(24), reset_button()])
-            .width(Length::Fill)
-            .max_width(PAGE_MAX)
-            .padding(Padding {
-                top: 12.0,
-                right: RIBBON_SIDE,
-                bottom: PAGE_TOP,
-                left: RIBBON_SIDE,
-            }),
-    )
-    .id(PAGE_ID)
-    .width(Length::Fill)
-    .height(Length::Fill);
+    let page = scroll::smooth(
+        scrollable(
+            container(column![body, Space::new().height(24), reset_button()])
+                .width(Length::Fill)
+                .max_width(PAGE_MAX)
+                .padding(Padding {
+                    top: 12.0,
+                    right: RIBBON_SIDE,
+                    bottom: PAGE_TOP,
+                    left: RIBBON_SIDE,
+                }),
+        )
+        .id(PAGE_ID)
+        .width(Length::Fill)
+        .height(Length::Fill),
+    );
     column![top, page].height(Length::Fill).into()
 }
 
@@ -412,7 +419,7 @@ fn navigation<'a>(state: &'a State, width: f32) -> Element<'a, App> {
         theme::line("Настройки", Style::Display, theme::TEXT_PRIMARY),
         Space::new().height(16),
         search_field(state),
-        scrollable(groups).height(Length::Fill),
+        scroll::smooth(scrollable(groups).height(Length::Fill)),
         footer,
     ]
     .width(width)
