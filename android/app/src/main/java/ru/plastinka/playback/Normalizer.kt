@@ -4,7 +4,7 @@ import androidx.media3.common.C
 import androidx.media3.common.audio.AudioProcessor.AudioFormat
 import androidx.media3.common.audio.BaseAudioProcessor
 import java.nio.ByteBuffer
-import ru.plastinka.data.Track
+import ru.plastinka.data.Loudness
 
 /**
  * Нормализация громкости: множитель играющего трека (из `r128`) и флаг
@@ -21,11 +21,12 @@ object Normalizer {
     private var trackGain = 1f
 
     /**
-     * Текущий трек сменился. [replaced] — звук не поток Яндекса (замена
-     * FckCensor): громкость оригинала к нему не относится, множитель 1.
+     * Текущий трек сменился или решение о его звуке уточнилось. [loudness] — громкость того,
+     * что реально играет (у замены FckCensor — громкость трека замены, у прямой ссылки и
+     * пока неизвестно — `null`): множитель 1.
      */
-    fun onTrack(track: Track?, replaced: Boolean) {
-        trackGain = if (replaced) 1f else track?.loudness?.gainFactor() ?: 1f
+    fun onTrack(loudness: Loudness?) {
+        trackGain = loudness?.gainFactor() ?: 1f
     }
 
     /** Множитель сейчас: 1, если нормализация выключена. */

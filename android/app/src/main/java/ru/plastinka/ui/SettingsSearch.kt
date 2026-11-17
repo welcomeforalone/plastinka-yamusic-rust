@@ -99,7 +99,12 @@ private val SETTINGS_INDEX: List<SettingsEntry> = listOf(
     SettingsEntry(
         SettingsPage.Plugins, "FckCensor",
         "Названия, исполнители, обложки и звук без цензуры из списка FckCensorData для треков, которые в нём есть",
-        "цензура explicit замена трека название обложка плагин",
+        "цензура explicit замена трека название обложка плагин свой файл заменить на",
+    ),
+    SettingsEntry(
+        SettingsPage.Plugins, "Искать версию без цензуры",
+        "Если на Яндексе есть explicit-версия трека, играет она. В поиск Яндекса уходят исполнитель и название трека",
+        "fckcensor explicit цензура мат поиск версия плагин",
     ),
     SettingsEntry(
         SettingsPage.Plugins, "Slopless", "Метки ИИ-исполнителей и ИИ-треков по базе slopless.art",

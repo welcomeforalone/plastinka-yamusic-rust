@@ -78,8 +78,8 @@ class PlayerController(val controller: MediaController) {
         if (tracks.getOrNull(startIndex) == null) return
         // Недоступные треки в очередь не попадают; индекс пересчитывается:
         // стартуем с нажатого трека или с ближайшего доступного после него.
-        val target = tracks.drop(startIndex).firstOrNull { it.available } ?: return
-        val playable = tracks.filter { it.available }
+        val target = tracks.drop(startIndex).firstOrNull { it.playable } ?: return
+        val playable = tracks.filter { it.playable }
         val index = playable.indexOfFirst { it === target }
         if (index < 0) return
         val wasWave = QueueHolder.state.value.isWave

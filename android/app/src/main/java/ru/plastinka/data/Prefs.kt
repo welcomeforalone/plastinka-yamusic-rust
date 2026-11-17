@@ -70,6 +70,7 @@ object Prefs {
     private const val KEY_LRCLIB = "lyrics_lrclib"
     private const val KEY_EQ = "equalizer"
     private const val KEY_FCKCENSOR = "plugin_fckcensor"
+    private const val KEY_FCK_EXPLICIT = "plugin_fckcensor_explicit"
     private const val KEY_SLOPLESS = "plugin_slopless"
     private const val KEY_SLOP_AUTOSKIP = "plugin_slopless_autoskip"
     private const val KEY_SLOP_DISLIKE = "plugin_slopless_dislike"
@@ -98,6 +99,10 @@ object Prefs {
 
     // Плагины: все выключены по умолчанию (автопропуск Slopless включён вместе с плагином, как на десктопе).
     var fckCensor by mutableStateOf(false)
+        private set
+
+    /** FckCensor: искать на Яндексе explicit-версию цензурного трека (включено по умолчанию, как на десктопе). */
+    var fckExplicit by mutableStateOf(true)
         private set
     var slopless by mutableStateOf(false)
         private set
@@ -143,6 +148,7 @@ object Prefs {
         lyricsLrclib = bool(KEY_LRCLIB, true)
         eq = EqState.fromJson(all[KEY_EQ] as? String)
         fckCensor = bool(KEY_FCKCENSOR, false)
+        fckExplicit = bool(KEY_FCK_EXPLICIT, true)
         slopless = bool(KEY_SLOPLESS, false)
         slopAutoskip = bool(KEY_SLOP_AUTOSKIP, true)
         slopDislike = bool(KEY_SLOP_DISLIKE, false)
@@ -156,6 +162,7 @@ object Prefs {
             all[KEY_WAVE_LANGUAGE] as? String,
         )
         FckCensor.enabled = fckCensor
+        FckCensor.explicitSearch = fckExplicit
         SpectrumHub.enabled = visualizer
         Normalizer.enabled = normalize
         EqControl.settings = eq.settings.sanitized()
@@ -256,6 +263,7 @@ object Prefs {
         changeLyricsLrclib(true)
         changeEq(EqState(custom = eq.custom), save = true)
         if (fckCensor) changeFckCensor(false)
+        if (!fckExplicit) changeFckExplicit(true)
         if (slopless) changeSlopless(false)
         if (!slopAutoskip) changeSlopAutoskip(true)
         changeSlopDislike(false)
@@ -274,6 +282,13 @@ object Prefs {
         store?.edit()?.putBoolean(KEY_FCKCENSOR, on)?.apply()
         // Включили — список подгружается сразу, замены действуют со следующего трека.
         FckCensor.current?.onToggle()
+    }
+
+    /** Действует со следующего трека, которому понадобится поиск; играющий доиграет как есть. */
+    fun changeFckExplicit(on: Boolean) {
+        fckExplicit = on
+        FckCensor.explicitSearch = on
+        store?.edit()?.putBoolean(KEY_FCK_EXPLICIT, on)?.apply()
     }
 
     fun changeSlopless(on: Boolean) {

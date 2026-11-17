@@ -14,8 +14,8 @@ data class TrackPatch(
     /** Шаблон обложки без схемы, с `%%` (хост из [COVER_HOSTS]). */
     val coverUri: String?,
     /**
-     * `__fckCensor.audioSourceId`: трек Яндекса, у которого брать звук. Разбирается для
-     * этапа 4 («замена на трек Яндекса из списка»), пока нигде не используется.
+     * `__fckCensor.audioSourceId`: трек Яндекса, у которого брать звук (обычным потоком
+     * Яндекса). Второй в порядке решения о звуке, см. [FckCensor.resolveSound].
      */
     val audioSourceId: String?,
 ) {
@@ -29,11 +29,11 @@ data class AlbumPatch(
     val artists: List<ArtistRef>?,
     val coverUri: String?,
     /**
-     * Состав альбома: номера треков Яндекса по порядку (диски подряд). Разбирается, но
-     * пока не используется: альбом открывается с составом Яндекса.
+     * Состав альбома: номера треков Яндекса по порядку (диски подряд). Если не пуст, страница
+     * альбома показывает эти треки вместо состава Яндекса ([FckCensor.withAlbumVolumes]).
      */
     val volumes: List<String>,
-    /** `__fckCensor.replaceArtistsInAlbumVolumes`: исполнители треков альбома = исполнители альбома. Пока не используется. */
+    /** `__fckCensor.replaceArtistsInAlbumVolumes`: исполнители треков альбома = исполнители альбома. */
     val replaceArtists: Boolean,
 )
 
@@ -47,13 +47,21 @@ class CensorList(
     /** Прямые ссылки на звук без цензуры из `tracksStorages`: номер трека → https-адрес. */
     val urls: Map<String, String>,
     /**
-     * Номера треков из хранилищ звука: у них на Яндексе цензурная версия. Нужны автопоиску
-     * explicit-версии (этап 4), пока не используются.
+     * Номера треков из хранилищ звука: у них на Яндексе цензурная версия. Вместе с треками из
+     * [tracks] и пометкой `clean` решают, искать ли explicit-версию ([censored]).
      */
     val censoredIds: Set<String> = emptySet(),
 ) {
     /** Сколько треков список меняет: названием, исполнителями, обложкой или звуком. */
     val count: Int = (urls.keys + tracks.filterValues { it.changesDisplay }.keys).size
+
+    /**
+     * Нужна ли треку версия без цензуры (как `censored` на десктопе): explicit-треку не нужна;
+     * остальным — если Яндекс сам пометил его `clean`, он есть в хранилищах звука или в
+     * подменах списка.
+     */
+    fun censored(track: Track): Boolean =
+        !track.explicit && (track.clean || track.id in censoredIds || track.id in tracks)
 
     companion object {
         val EMPTY = CensorList(emptyMap(), emptyMap(), emptyMap())

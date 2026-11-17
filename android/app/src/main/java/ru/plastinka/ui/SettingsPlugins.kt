@@ -105,12 +105,40 @@ private fun FckCensorCard() {
                     "Повторить",
                 ) { app?.fckCensor?.retry() }
             }
+            ToggleRow(
+                title = "Искать версию без цензуры",
+                subtitle = "Если на Яндексе есть explicit-версия трека, играет она. " +
+                    "В поиск Яндекса уходят исполнитель и название трека",
+                checked = Prefs.fckExplicit,
+                onChange = Prefs::changeFckExplicit,
+            )
+            val replaced = app?.fckCensor?.replacementCount() ?: 0
+            StatusRow(
+                "Ручные замены",
+                "$replaced ${replacementsWord(replaced)}. Меню трека «…» → «Заменить на…» или «Свой файл…»",
+            )
         }
     }
-    SettingsNote("Названия и обложки меняются сразу. Звук заменяется со следующего трека, играющий доиграет как есть.")
+    SettingsNote(
+        "Названия и обложки меняются сразу. Ручные замены действуют сразу, в том числе в очереди; " +
+            "явно выбранный файл только читается и нигде не копируется. Звук из списка и explicit-версия " +
+            "заменяются со следующего трека, играющий доиграет как есть.",
+    )
 }
 
 // ----------------------------------------------------------------- Slopless
+
+/** «1 замена / 2 замены / 5 замен» (без числа). */
+private fun replacementsWord(n: Int): String {
+    val mod100 = n % 100
+    val mod10 = n % 10
+    return when {
+        mod100 in 11..14 -> "замен"
+        mod10 == 1 -> "замена"
+        mod10 in 2..4 -> "замены"
+        else -> "замен"
+    }
+}
 
 /** «1 исполнитель / 2 исполнителя / 5 исполнителей». */
 private fun artistsCount(n: Int): String {

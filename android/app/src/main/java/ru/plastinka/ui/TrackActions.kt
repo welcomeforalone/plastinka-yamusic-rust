@@ -38,14 +38,24 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import ru.plastinka.PlastinkaApp
 import ru.plastinka.R
 import ru.plastinka.data.CopyName
+import ru.plastinka.data.FckCensor
+import ru.plastinka.data.ReplaceOutcome
 import ru.plastinka.data.Prefs
 import ru.plastinka.data.Track
+
+/** Что действие меню может сделать: контекст, открыть лист замены, выбор файла, убрать замену. */
+class TrackActionHost(
+    val context: Context,
+    val openReplace: () -> Unit,
+    val pickFile: () -> Unit,
+    val clearReplacement: () -> Unit,
+)
 
 /** Одно действие меню трека. */
 class TrackAction(
     @DrawableRes val icon: Int,
     val title: String,
-    val run: (Context) -> Unit,
+    val run: (TrackActionHost) -> Unit,
 )
 
 /**
@@ -56,7 +66,15 @@ class TrackAction(
  */
 fun trackActions(track: Track): List<TrackAction> = buildList {
     if (Prefs.copyName) {
-        add(TrackAction(R.drawable.ic_copy, "Скопировать название") { context -> copyTrackName(context, track) })
+        add(TrackAction(R.drawable.ic_copy, "Скопировать название") { host -> copyTrackName(host.context, track) })
+    }
+    // FckCensor: ручные замены звука (как в меню трека на десктопе).
+    if (Prefs.fckCensor) {
+        add(TrackAction(R.drawable.ic_search, "Заменить на…") { host -> host.openReplace() })
+        add(TrackAction(R.drawable.ic_plus, "Свой файл…") { host -> host.pickFile() })
+        FckCensor.current?.replacementLabel(track.id)?.let { label ->
+            add(TrackAction(R.drawable.ic_close, "Убрать замену ($label)") { host -> host.clearReplacement() })
+        }
     }
 }
 
@@ -90,6 +108,22 @@ fun TrackMoreButton(
     val actions = trackActions(track)
     if (actions.isEmpty()) return
     var open by remember { mutableStateOf(false) }
+    var replacing by remember { mutableStateOf(false) }
+    var picking by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val host = remember(track.id, context) {
+        TrackActionHost(
+            context = context,
+            openReplace = { replacing = true },
+            pickFile = { picking = true },
+            clearReplacement = {
+                val fck = (context.applicationContext as? PlastinkaApp)?.fckCensor
+                fck?.replaceAsync({ fck.clearReplacement(track.id) }) { outcome: ReplaceOutcome ->
+                    Toast.makeText(context.applicationContext, outcome.message, Toast.LENGTH_LONG).show()
+                }
+            },
+        )
+    }
     Box(
         modifier
             .size(40.dp)
@@ -100,14 +134,15 @@ fun TrackMoreButton(
         PlIcon(R.drawable.ic_more, iconSize, tint)
     }
     if (open) {
-        TrackMenuSheet(track, actions, onDismiss = { open = false })
+        TrackMenuSheet(track, actions, host, onDismiss = { open = false })
     }
+    if (replacing) ReplaceSheet(track, onDismiss = { replacing = false })
+    if (picking) FilePickHost(track.id, onFinished = { picking = false })
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TrackMenuSheet(track: Track, actions: List<TrackAction>, onDismiss: () -> Unit) {
-    val context = LocalContext.current
+private fun TrackMenuSheet(track: Track, actions: List<TrackAction>, host: TrackActionHost, onDismiss: () -> Unit) {
     PlBottomSheet(onDismiss) {
         Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(bottom = 8.dp)) {
             Column(
@@ -123,7 +158,7 @@ private fun TrackMenuSheet(track: Track, actions: List<TrackAction>, onDismiss: 
                         .fillMaxWidth()
                         .height(56.dp)
                         .clickable {
-                            action.run(context)
+                            action.run(host)
                             onDismiss()
                         }
                         .padding(horizontal = 20.dp),

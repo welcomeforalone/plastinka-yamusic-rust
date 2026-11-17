@@ -6,6 +6,7 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 
 import androidx.media3.datasource.okhttp.OkHttpDataSource
@@ -32,6 +33,7 @@ import kotlinx.coroutines.sync.withLock
 import ru.plastinka.PlastinkaApp
 import ru.plastinka.R
 import ru.plastinka.data.FckCensor
+import ru.plastinka.data.FckSound
 import ru.plastinka.data.Prefs
 import ru.plastinka.data.StreamResult
 import ru.plastinka.data.Track
@@ -40,7 +42,8 @@ import ru.plastinka.data.TrackUris
 /**
  * Фоновое воспроизведение: Media3-сессия с уведомлением, наушники, блокировка.
  * Адрес `plastinka://track/<id>` превращается в реальный URL при открытии:
- * сначала замена FckCensor, потом поток Яндекса — как на десктопе.
+ * сначала решает FckCensor (замена, найденная explicit-версия), потом поток Яндекса —
+ * как на десктопе.
  * Для очереди-волны шлёт события rotor и догружает порции треков.
  */
 class PlaybackService : MediaSessionService() {
@@ -76,9 +79,10 @@ class PlaybackService : MediaSessionService() {
         super.onCreate()
 
         // Источник данных: plastinka://track/<id> решается в сетевой адрес —
-        // сначала FckCensor, потом поток Яндекса. Звук только потоком.
+        // сначала FckCensor, потом поток Яндекса. Звук только потоком; единственное
+        // исключение — свой файл из ручной замены FckCensor (чтение, без копирования).
         val source = androidx.media3.datasource.DataSource.Factory {
-            PlastinkaDataSource(app.http) { uri -> resolveUri(uri) }
+            PlastinkaDataSource(this, app.http, app.fckCensor::isReplacementFile) { uri -> resolveUri(uri) }
         }
 
         val player = ExoPlayer.Builder(this, PlastinkaRenderersFactory(this))
@@ -128,6 +132,10 @@ class PlaybackService : MediaSessionService() {
                 state.currentTrack()?.let { ru.plastinka.data.PlayLog.record(it, state.context) }
             }
 
+            override fun onPlayerError(error: PlaybackException) {
+                skipBrokenFile(player)
+            }
+
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 // Прежний трек зазвучал и сменился другим: запоминаем для «Недавно играли».
                 rememberSounded()
@@ -145,9 +153,7 @@ class PlaybackService : MediaSessionService() {
                 QueueHolder.setCurrent(index)
                 // Slopless: проверить трек после того, как переход закончит обрабатываться.
                 mainHandler.post { slopCheck(player) }
-                QueueHolder.currentTrack().let { now ->
-                    Normalizer.onTrack(now, replaced = now != null && app.fckCensor.replacementUrl(now.id) != null)
-                }
+                applyNormalization()
                 reportBegin()
                 if (player.isPlaying) {
                     logPlay()
@@ -206,6 +212,17 @@ class PlaybackService : MediaSessionService() {
         Prefs.onSlopChanged = { mainHandler.post { slopCheck(player) } }
         scope.launch {
             app.slopless.version.collect { mainHandler.post { slopCheck(player) } }
+        }
+
+        // FckCensor: решение о звуке принято (замена, explicit-версия) — громкость считается по тому,
+        // что реально играет.
+        scope.launch {
+            FckCensor.playingVersion.collect { mainHandler.post { applyNormalization() } }
+        }
+
+        // FckCensor: замену трека поставили или убрали — играющий (и следующий) трек открывается заново.
+        scope.launch {
+            FckCensor.replaced.collect { id -> mainHandler.post { restartForReplacement(player, id) } }
         }
 
         // FckCensor: список пришёл или плагин переключили — названия, исполнители и обложка
@@ -309,6 +326,12 @@ class PlaybackService : MediaSessionService() {
             .build(),
     )
 
+    /** Нормализация громкости по тому, что реально играет у текущего трека (замена FckCensor или он сам). */
+    private fun applyNormalization() {
+        val track = QueueHolder.currentTrack()
+        Normalizer.onTrack(track?.let(app.fckCensor::loudnessOf))
+    }
+
     // ------------------------------------------------------ качество
 
     /**
@@ -327,9 +350,9 @@ class PlaybackService : MediaSessionService() {
         val state = player.playbackState
         if (state == Player.STATE_IDLE || state == Player.STATE_ENDED) return
         val track = QueueHolder.currentTrack()
-        // Замена FckCensor — не поток Яндекса, качество её не касается; но следующий
+        // Прямая ссылка FckCensor — не поток Яндекса, качество её не касается; но следующий
         // трек могли уже подготовить, поэтому перезапускаем, если до конца недалеко.
-        if (track != null && app.fckCensor.replacementUrl(track.id) != null) {
+        if (track != null && app.fckCensor.playsOutsideYandex(track)) {
             val left = player.duration - player.currentPosition
             if (player.duration != C.TIME_UNSET && left > NEXT_PREPARED_WITHIN_MS) return
         }
@@ -338,6 +361,80 @@ class PlaybackService : MediaSessionService() {
         player.stop()
         player.seekTo(index, position)
         player.prepare()
+    }
+
+    /**
+     * Замену звука трека [trackId] поставили или убрали. Играющий трек начинается заново с
+     * нуля, уже с новым звуком (как на десктопе); если это следующий трек, который плеер мог
+     * успеть открыть со старым звуком, открываем заново, позиция играющего не меняется. Прочие
+     * треки откроются с новым звуком сами. Только на главном потоке.
+     */
+    private fun restartForReplacement(player: Player, trackId: String) {
+        if (player.mediaItemCount == 0) return
+        val state = player.playbackState
+        if (state == Player.STATE_IDLE || state == Player.STATE_ENDED) return
+        val index = player.currentMediaItemIndex
+        val nextId = if (index + 1 < player.mediaItemCount) player.getMediaItemAt(index + 1).mediaId else null
+        when (trackId) {
+            player.currentMediaItem?.mediaId -> {
+                // Новый звук — новое прослушивание для Яндекса: прежнее закрываем, новое начинаем.
+                reportFinish(ended = false)
+                reportBegin()
+                player.stop()
+                player.seekTo(index, 0)
+                player.prepare()
+            }
+            nextId -> {
+                val position = player.currentPosition.coerceAtLeast(0)
+                player.stop()
+                player.seekTo(index, position)
+                player.prepare()
+            }
+        }
+    }
+
+    // ------------------------------------------------------ свой файл замены
+
+    /** Сообщения о файлах замены, которые не открылись: номер трека → текст (пишет загрузчик плеера). */
+    private val fileProblems = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * Ошибка плеера: если это файл замены (удалён, доступ потерян), говорим об этом по-русски и
+     * переходим к следующему треку. Другие ошибки не трогаем. Ошибка следующего трека может
+     * прийти, пока играет текущий: тогда пропускаем сломанный трек заранее. Только на главном потоке.
+     */
+    private fun skipBrokenFile(player: Player) {
+        val index = player.currentMediaItemIndex
+        val currentId = player.currentMediaItem?.mediaId
+        val nextId = if (index + 1 < player.mediaItemCount) player.getMediaItemAt(index + 1).mediaId else null
+        // Сначала играющий трек, потом следующий; снимаем только то сообщение, которое показываем.
+        val failedIndex: Int
+        val failedId: String
+        val problem: String
+        val currentProblem = currentId?.let { fileProblems.remove(it) }
+        if (currentProblem != null) {
+            failedIndex = index
+            failedId = currentId.orEmpty()
+            problem = currentProblem
+        } else {
+            val nextProblem = nextId?.let { fileProblems.remove(it) } ?: return
+            failedIndex = index + 1
+            failedId = nextId.orEmpty()
+            problem = nextProblem
+        }
+        val title = QueueHolder.state.value.tracks.firstOrNull { it.id == failedId }?.title.orEmpty()
+        val subject = if (title.isBlank()) "Трек" else "«$title»"
+        android.widget.Toast.makeText(app, "$subject: $problem", android.widget.Toast.LENGTH_LONG).show()
+        val target = failedIndex + 1
+        if (target < player.mediaItemCount) {
+            player.seekTo(target, C.TIME_UNSET)
+            player.prepare()
+            player.play()
+        } else if (failedIndex != index) {
+            // Сломан последний трек, а текущий ещё играет: доигрываем его.
+            player.seekTo(index, player.currentPosition.coerceAtLeast(0))
+            player.prepare()
+        }
     }
 
     /**
@@ -435,11 +532,15 @@ class PlaybackService : MediaSessionService() {
     /**
      * Трек, о котором сообщаем Яндексу (как `Tracker` на десктопе): сообщение о
      * начале (сыграно 0, один раз за трек) и о конце (сколько сыграно). Не
-     * шлём о треках, которые не зазвучали, и о заменах FckCensor.
+     * шлём о треках, которые не зазвучали, и о звуке не с Яндекса (прямая ссылка
+     * FckCensor). Если вместо трека играет другой трек Яндекса (замена, explicit-версия),
+     * отчёт про него, без альбома оригинала: так делает десктоп. Что играет, становится
+     * известно, когда пошёл звук, поэтому [trackId] и [albumId] уточняются в [reportSounded].
      */
     private class PlayReport(
-        val trackId: String,
-        val albumId: String?,
+        val track: Track,
+        var trackId: String,
+        var albumId: String?,
         val lengthSeconds: Int?,
         val playId: String,
         val startedMs: Long,
@@ -453,9 +554,9 @@ class PlaybackService : MediaSessionService() {
 
     private fun reportBegin() {
         val track = QueueHolder.currentTrack()
-        // Замена FckCensor — не поток Яндекса: о ней не сообщаем.
-        report = track?.takeIf { app.fckCensor.replacementUrl(it.id) == null }?.let {
+        report = track?.let {
             PlayReport(
+                track = it,
                 trackId = it.id,
                 albumId = it.albumId,
                 lengthSeconds = it.durationMs?.let { ms -> (ms / 1000).toInt() },
@@ -468,6 +569,17 @@ class PlaybackService : MediaSessionService() {
     /** Звук пошёл: сообщение о начале (один раз за трек), дальше копится время игры. */
     private fun reportSounded() {
         val r = report ?: return
+        if (!r.startedSent) {
+            // Звук пошёл, решение о нём принято: звук не с Яндекса — не сообщаем.
+            val id = app.fckCensor.reportedId(r.track)
+            if (id == null) {
+                report = null
+                return
+            }
+            r.trackId = id
+            // У замены другой трек: альбом оригинала к нему не относится.
+            if (id != r.track.id) r.albumId = null
+        }
         if (r.resumedAt == null) r.resumedAt = System.currentTimeMillis()
         if (!r.startedSent) {
             r.startedSent = true
@@ -581,14 +693,35 @@ class PlaybackService : MediaSessionService() {
         return resolve(trackId)
     }
 
-    /** FckCensor-замена → поток Яндекса. */
+    /**
+     * Звук трека очереди: решает FckCensor (прямая ссылка, другой трек Яндекса, найденная
+     * explicit-версия — поиск ждёт не дольше 10 с), иначе поток самого трека. Значок качества
+     * относится к треку очереди, но показывает кодек и битрейт того потока, который играет.
+     */
     private fun resolve(trackId: String): String? {
         val token = app.tokenStore.load() ?: return null
-        app.fckCensor.replacementUrl(trackId)?.let {
-            QualityHolder.clear(trackId)
-            return it
+        val queued = QueueHolder.state.value.tracks.firstOrNull { it.id == trackId }
+        return when (val sound = app.fckCensor.resolveSound(app.api, token, trackId, queued)) {
+            is FckSound.Direct -> {
+                QualityHolder.clear(trackId)
+                sound.url
+            }
+            is FckSound.File -> {
+                // Свой файл: значка качества нет; если он недоступен, плеер получит ошибку и
+                // [skipBrokenFile] скажет пользователю, что случилось.
+                QualityHolder.clear(trackId)
+                val problem = app.fckCensor.checkFile(sound.uri)
+                if (problem != null) fileProblems[trackId] = problem else fileProblems.remove(trackId)
+                if (problem == null) sound.uri else null
+            }
+            is FckSound.Yandex -> streamOf(token, trackId, sound.id)
+            FckSound.Pending -> streamOf(token, trackId, trackId)
         }
-        return when (val result = app.api.streamUrlBlocking(token, trackId)) {
+    }
+
+    /** Поток трека Яндекса [streamId] для трека очереди [trackId]. */
+    private fun streamOf(token: String, trackId: String, streamId: String): String? =
+        when (val result = app.api.streamUrlBlocking(token, streamId)) {
             is StreamResult.Url -> {
                 QualityHolder.put(trackId, result.codec, result.kbps)
                 result.url
@@ -596,11 +729,10 @@ class PlaybackService : MediaSessionService() {
             else -> {
                 QualityHolder.clear(trackId)
                 // В лог — только тип результата: у Url внутри ссылка на поток.
-                Log.w(TAG, "поток трека $trackId не получен: ${(result as? StreamResult.Error)?.message ?: result::class.simpleName}")
+                Log.w(TAG, "поток трека $streamId не получен: ${(result as? StreamResult.Error)?.message ?: result::class.simpleName}")
                 null
             }
         }
-    }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? =
         mediaSession
@@ -677,11 +809,16 @@ class PlaybackService : MediaSessionService() {
 }
 
 /**
- * Источник данных плеера: `plastinka://track/<id>` решается в реальный адрес
- * (только сеть), дальше читает OkHttp-источник. Локальные файлы не читаются.
+ * Источник данных плеера: `plastinka://track/<id>` решается в реальный адрес. Звук идёт из сети
+ * (OkHttp-источник). Единственное локальное чтение — свой файл из ручной замены FckCensor по
+ * `content://`, и только адрес, который есть в сохранённых заменах ([isReplacementFile]); файл
+ * читается системным `ContentDataSource` как есть, без копирования и записи.
  */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class PlastinkaDataSource(
+    private val context: android.content.Context,
     private val http: okhttp3.OkHttpClient,
+    private val isReplacementFile: (String) -> Boolean,
     private val resolve: (String) -> String?,
 ) : androidx.media3.datasource.DataSource {
 
@@ -693,13 +830,17 @@ class PlastinkaDataSource(
                 ?: throw java.io.IOException("звук трека недоступен")
             else -> dataSpec.uri.toString()
         }
-        // Звук только потоком из сети: ни file://, ни другие схемы не принимаются.
-        if (!target.startsWith("http://") && !target.startsWith("https://")) {
-            throw java.io.IOException("звук трека недоступен")
+        // Звук только потоком из сети. Исключение — файл замены из сохранённого списка
+        // (`content://`); file:// и любые другие схемы не принимаются.
+        val source: androidx.media3.datasource.DataSource = when {
+            target.startsWith("http://") || target.startsWith("https://") ->
+                OkHttpDataSource.Factory(http)
+                    .setUserAgent("Plastinka/0.1 Android")
+                    .createDataSource()
+            target.startsWith("content://") && isReplacementFile(target) ->
+                androidx.media3.datasource.ContentDataSource(context)
+            else -> throw java.io.IOException("звук трека недоступен")
         }
-        val source = OkHttpDataSource.Factory(http)
-            .setUserAgent("Plastinka/0.1 Android")
-            .createDataSource()
         inner = source
         return source.open(dataSpec.buildUpon().setUri(android.net.Uri.parse(target)).build())
     }

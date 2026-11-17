@@ -1036,6 +1036,7 @@ class YandexApi(private val http: OkHttpClient) {
                 ?: t["coverUri"]?.jsonPrimitive?.content,
             loudness = parseLoudness(t["r128"]),
             explicit = (t["contentWarning"] as? JsonPrimitive)?.content == "explicit",
+            clean = (t["contentWarning"] as? JsonPrimitive)?.content == "clean",
         )
     }
 

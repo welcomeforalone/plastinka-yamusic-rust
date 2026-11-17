@@ -90,6 +90,7 @@ import androidx.media3.common.Player
 import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
 import ru.plastinka.R
+import ru.plastinka.data.FckCensor
 import ru.plastinka.data.Prefs
 import ru.plastinka.data.Track
 import ru.plastinka.playback.QualityHolder
@@ -614,6 +615,7 @@ fun FullPlayer(
                 ) {
                     qualities[track.id]?.label?.let { QualityBadge(it) { showSound = true } }
                     if (rememberIsAi(track)) AiTag(color = Pl.text)
+                    if (FckCensor.hasReplacement(track.id)) ReplacedTag()
                 }
                 // Зона перемотки начинается на 8 dp выше дорожки: 18 по макету минус 8.
                 Spacer(Modifier.height(10.dp))
@@ -886,7 +888,7 @@ private fun QueueSheet(
                                     item,
                                     current = false,
                                     soundOn = false,
-                                    enabled = item.available,
+                                    enabled = item.playable,
                                     onClick = {
                                         // Есть в текущей очереди — играем с него, иначе очередь из одного трека.
                                         val index = queue.tracks.indexOfFirst { it.id == item.id }
@@ -989,6 +991,7 @@ private fun QueueRow(
             )
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (track.explicit) ExplicitBadge()
+                if (FckCensor.hasReplacement(track.id)) ReplacedTag()
                 PlText(
                     track.artistNames,
                     PlType.secondary,

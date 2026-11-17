@@ -37,6 +37,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import ru.plastinka.R
+import ru.plastinka.data.FckCensor
 import ru.plastinka.data.Track
 
 /** Длительность `м:сс`. */
@@ -100,7 +101,7 @@ fun TrackRow(
     /** Номер места слева от обложки (топ месяца); `null` — без номера. */
     number: Int? = null,
 ) {
-    val available = track.available
+    val available = track.playable
     val ai = rememberIsAi(track)
     Row(
         modifier
@@ -152,6 +153,7 @@ fun TrackRow(
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (track.explicit) ExplicitBadge()
                 if (ai) AiTag()
+                if (FckCensor.hasReplacement(track.id)) ReplacedTag()
                 PlText(
                     if (available) track.artistNames else "Недоступен в вашем регионе",
                     PlType.secondary,

@@ -26,7 +26,15 @@ data class Track(
     val loudness: Loudness? = null,
     /** Пометка `contentWarning: explicit` (ненормативная лексика): значок «E». */
     val explicit: Boolean = false,
+    /** Пометка `contentWarning: clean`: цензурная версия трека (для автопоиска explicit-версии FckCensor). */
+    val clean: Boolean = false,
 ) {
+    /**
+     * Трек можно включить: он доступен или FckCensor даёт ему звук из списка. Как `playable` на
+     * десктопе; чтение идёт через снимок состояния Compose, строки перерисовываются сразу.
+     */
+    val playable: Boolean get() = available || FckCensor.hasSound(id)
+
     /** Название для показа: без цензуры, если плагин включён и трек есть в списке. */
     val title: String get() = FckCensor.trackPatch(id)?.title ?: sourceTitle
 

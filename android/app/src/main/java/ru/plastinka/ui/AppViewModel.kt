@@ -437,7 +437,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 when (best) {
                     is ru.plastinka.data.SearchBest.TrackHit -> player?.playQueue(listOf(best.track), 0, "Поиск")
                     is ru.plastinka.data.SearchBest.AlbumHit -> {
-                        val tracks = api.albumWithTracks(token, best.card.id).tracks
+                        val tracks = albumDetails(token, best.card.id).tracks
                         val ctx = ru.plastinka.data.HistoryContext.Album(best.card.id, best.card.displayTitle)
                         player?.playQueue(tracks, 0, best.card.displayTitle, source = ctx)
                     }
@@ -581,8 +581,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun loadAlbum(id: String, force: Boolean = false) {
         val token = plastinka.tokenStore.load() ?: return
-        album.load(id, force) { plastinka.api.albumWithTracks(token, id) }
+        album.load(id, force) { albumDetails(token, id) }
     }
+
+    /** Альбом Яндекса; если FckCensor знает его состав (`volumes`), то с составом из списка. */
+    private suspend fun albumDetails(token: String, id: String): ru.plastinka.data.AlbumDetails =
+        plastinka.fckCensor.withAlbumVolumes(plastinka.api, token, plastinka.api.albumWithTracks(token, id))
 
     fun loadArtist(id: String, force: Boolean = false) {
         val token = plastinka.tokenStore.load() ?: return
