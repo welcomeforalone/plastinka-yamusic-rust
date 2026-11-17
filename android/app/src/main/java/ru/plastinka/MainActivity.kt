@@ -23,11 +23,13 @@ class MainActivity : ComponentActivity() {
             PlastinkaTheme {
                 val login by model.login.collectAsStateWithLifecycle()
                 val library by model.library.collectAsStateWithLifecycle()
+                val avatarUrl by model.avatarUrl.collectAsStateWithLifecycle()
                 val loggedIn by model.loggedInState.collectAsStateWithLifecycle()
                 RootScreen(
                     loggedIn = loggedIn,
                     login = login,
                     library = library,
+                    avatarUrl = avatarUrl,
                     model = model,
                 )
             }

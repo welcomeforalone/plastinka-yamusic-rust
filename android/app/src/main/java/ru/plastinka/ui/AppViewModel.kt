@@ -174,6 +174,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val _library = MutableStateFlow(LibraryUi())
     val library: StateFlow<LibraryUi> = _library
 
+    /** Адрес аватара из Яндекс ID: только в памяти, на диск не пишется. `null` — аватара нет. */
+    private val _avatarUrl = MutableStateFlow<String?>(null)
+    val avatarUrl: StateFlow<String?> = _avatarUrl
+    private var avatarJob: Job? = null
+
     private val _query = MutableStateFlow("")
     val query: StateFlow<String> = _query
 
@@ -672,6 +677,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 // Сообщения о прослушивании разрешены только при подтверждённом Плюсе.
                 if (status.hasPlus) {
                     ru.plastinka.playback.AccountHolder.allow(status.uid)
+                    loadAvatar(token)
                 } else {
                     ru.plastinka.playback.AccountHolder.clear()
                 }
@@ -693,7 +699,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { plastinka.fckCensor.refresh() }
     }
 
+    /** Один запрос после подтверждения входа и Плюса; уже полученный адрес не перезапрашивается. */
+    private fun loadAvatar(token: String) {
+        if (_avatarUrl.value != null || avatarJob?.isActive == true) return
+        avatarJob = viewModelScope.launch { _avatarUrl.value = plastinka.api.avatarUrl(token) }
+    }
+
     fun logout() {
+        avatarJob?.cancel()
+        _avatarUrl.value = null
         plastinka.tokenStore.clear()
         ru.plastinka.playback.AccountHolder.clear() // отложенные play-audio отменяются
         _loggedIn.value = false

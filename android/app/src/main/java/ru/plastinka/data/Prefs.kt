@@ -239,6 +239,30 @@ object Prefs {
             ?.apply()
     }
 
+    /**
+     * «Сбросить всё»: звук, оформление (акцент возвращает `AccentState`, см. экран настроек), текст
+     * песни, эквалайзер и плагины возвращаются к значениям по умолчанию. Остаются
+     * свои пресеты эквалайзера и настройки «Моей волны» (как на десктопе). Согласие на
+     * «Не нравится» Slopless сбрасывается вместе с плагином. Каждое значение меняется
+     * тем же методом, что при ручной смене, поэтому плеер, спектр, нормализатор и
+     * плагины сразу получают новое; качество перезапускает трек, только если менялось.
+     */
+    fun resetAll() {
+        changeVisualizer(true)
+        changeVibeColorizer(false)
+        changeBlurCover(true)
+        changeQuality(AudioQuality.Normal)
+        changeNormalize(false)
+        changeLyricsLrclib(true)
+        changeEq(EqState(custom = eq.custom), save = true)
+        if (fckCensor) changeFckCensor(false)
+        if (slopless) changeSlopless(false)
+        if (!slopAutoskip) changeSlopAutoskip(true)
+        changeSlopDislike(false)
+        changeCopyName(false)
+        changeCopyFormat(CopyName.DEFAULT_FORMAT)
+    }
+
     private fun SharedPreferences.Editor.putOrRemove(key: String, value: String?): SharedPreferences.Editor =
         if (value == null) remove(key) else putString(key, value)
 

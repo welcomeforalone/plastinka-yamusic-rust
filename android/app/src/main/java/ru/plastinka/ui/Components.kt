@@ -194,9 +194,20 @@ fun PlayButton(
     }
 }
 
-/** Аватар: серый градиент и иконка пользователя. */
+/** Аккаунт для аватара: адрес картинки (может не быть) и буква-запас. */
+data class AvatarInfo(val url: String?, val letter: String)
+
+/** Аватар аккаунта; вне основного интерфейса (вход, подписка) — без картинки и буквы. */
+val LocalAvatar = androidx.compose.runtime.staticCompositionLocalOf { AvatarInfo(null, "") }
+
+/**
+ * Аватар: серый градиент, под ним буква имени (или иконка без имени), поверх —
+ * картинка Яндекс ID. Нет картинки или сбой загрузки — остаётся буква.
+ * Картинка только в памяти: дисковый кэш Coil выключен.
+ */
 @Composable
 fun Avatar(size: Dp, modifier: Modifier = Modifier) {
+    val info = LocalAvatar.current
     Box(
         modifier
             .size(size)
@@ -210,7 +221,27 @@ fun Avatar(size: Dp, modifier: Modifier = Modifier) {
             ),
         contentAlignment = Alignment.Center,
     ) {
-        PlIcon(R.drawable.ic_user, size * 0.5f, Pl.text)
+        if (info.letter.isEmpty()) {
+            PlIcon(R.drawable.ic_user, size * 0.5f, Pl.text)
+        } else {
+            PlText(info.letter, PlType.bodyStrong)
+        }
+        val url = info.url
+        if (url != null) {
+            val context = androidx.compose.ui.platform.LocalContext.current
+            val request = androidx.compose.runtime.remember(url) {
+                coil.request.ImageRequest.Builder(context)
+                    .data(url)
+                    .diskCachePolicy(coil.request.CachePolicy.DISABLED)
+                    .build()
+            }
+            AsyncImage(
+                model = request,
+                contentDescription = null,
+                modifier = Modifier.size(size),
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+            )
+        }
     }
 }
 

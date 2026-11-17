@@ -24,6 +24,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.clickable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -33,8 +34,6 @@ import ru.plastinka.R
 import ru.plastinka.data.Prefs
 
 private const val UNOFFICIAL = "Неофициальный клиент, не связан с ООО «Яндекс»"
-
-private enum class SettingsPage { Main, Appearance, Sound, Equalizer, Lyrics, Plugins, About }
 
 /** Раздел «Настройки»: главная и подэкраны. Системное «назад» с подэкрана — на главную. */
 @Composable
@@ -76,9 +75,20 @@ private fun SettingsMain(
     onOpen: (SettingsPage) -> Unit,
 ) {
     var confirmLogout by remember { mutableStateOf(false) }
+    var confirmReset by remember { mutableStateOf(false) }
+    var query by rememberSaveable { mutableStateOf("") }
+    val searching = isSearching(query)
+    // «Назад» при непустом запросе сначала сбрасывает его.
+    BackHandler(enabled = query.isNotEmpty()) { query = "" }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 12.dp, bottom = 16.dp)) {
         PlText("Настройки", PlType.display, modifier = Modifier.padding(horizontal = 20.dp))
         Spacer(Modifier.height(14.dp))
+        SearchField(query, { query = it }, placeholder = "Найти настройку")
+        Spacer(Modifier.height(12.dp))
+        if (searching) {
+            SettingsSearchResults(query, onOpen)
+            return@Column
+        }
         GroupCard {
             Row(
                 Modifier.fillMaxWidth().padding(14.dp, 12.dp),
@@ -125,6 +135,14 @@ private fun SettingsMain(
             }
         }
         Spacer(Modifier.height(16.dp))
+        Pill(
+            "Сбросить всё",
+            Modifier.padding(horizontal = 16.dp),
+            kind = PillKind.Danger,
+            fillWidth = true,
+            onClick = { confirmReset = true },
+        )
+        Spacer(Modifier.height(16.dp))
         Column(
             Modifier.fillMaxWidth().padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -133,6 +151,33 @@ private fun SettingsMain(
             PlText("Plastinka ${appVersion()}", PlType.captionStrong, Pl.text3, textAlign = TextAlign.Center)
             PlText(UNOFFICIAL, PlType.caption, Pl.text3, textAlign = TextAlign.Center)
         }
+    }
+
+    if (confirmReset) {
+        AlertDialog(
+            onDismissRequest = { confirmReset = false },
+            containerColor = Pl.surface2,
+            title = { PlText("Сбросить все настройки?", PlType.headline) },
+            text = {
+                PlText(
+                    "Оформление, звук, эквалайзер, текст песни и плагины вернутся к значениям по умолчанию. " +
+                        "Аккаунт, свои пресеты эквалайзера и настройки «Моей волны» останутся.",
+                    PlType.secondary,
+                    Pl.text2,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmReset = false
+                    resetAllSettings()
+                }) { PlText("Сбросить", PlType.secondaryStrong, Pl.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmReset = false }) {
+                    PlText("Отмена", PlType.secondaryStrong, Pl.text2)
+                }
+            },
+        )
     }
 
     if (confirmLogout) {
@@ -153,6 +198,59 @@ private fun SettingsMain(
             },
         )
     }
+}
+
+/** Результаты поиска: найденные настройки по разделам, название раздела открывает его. */
+@Composable
+private fun SettingsSearchResults(query: String, onOpen: (SettingsPage) -> Unit) {
+    val found = remember(query) { searchSettings(query) }
+    if (found.isEmpty()) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 40.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            PlText("Ничего не нашлось", PlType.bodyStrong, textAlign = TextAlign.Center)
+            PlText(
+                "Проверьте запрос или попробуйте другое слово",
+                PlType.secondary,
+                Pl.text2,
+                textAlign = TextAlign.Center,
+            )
+        }
+        return
+    }
+    for ((page, entries) in found.groupBy { it.page }) {
+        PlText(
+            page.title,
+            PlType.headline,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onOpen(page) }
+                .padding(horizontal = 20.dp, vertical = 10.dp),
+        )
+        GroupCard {
+            for (entry in entries) {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { onOpen(page) }
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    PlText(entry.title, PlType.bodyStrong)
+                    PlText(entry.hint, PlType.caption, Pl.text3)
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+/** «Сбросить всё»: акцент и настройки возвращаются к значениям по умолчанию. */
+private fun resetAllSettings() {
+    AccentState.selectPreset(Accent.Red)
+    Prefs.resetAll()
 }
 
 @Composable

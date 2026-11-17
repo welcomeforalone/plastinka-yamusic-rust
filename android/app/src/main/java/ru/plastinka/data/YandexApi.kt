@@ -100,6 +100,58 @@ class YandexApi(private val http: OkHttpClient) {
         )
     }
 
+    // ------------------------------------------------------------- аватар
+
+    /**
+     * Адрес аватара из Яндекс ID (`login.yandex.ru/info`) или `null`: аватара нет,
+     * сеть или ответ не годятся. Как на десктопе, любой сбой не мешает входу;
+     * токен уходит только в заголовок и в ошибки не попадает.
+     */
+    suspend fun avatarUrl(token: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val response = http.newCall(
+                Request.Builder()
+                    .url(AVATAR_INFO_URL)
+                    .header("Authorization", "OAuth $token")
+                    .get().build()
+            ).execute()
+            response.use { resp ->
+                if (!resp.isSuccessful) return@withContext null
+                val source = resp.body?.source() ?: return@withContext null
+                // Ответ Паспорта крошечный; больше лимита — это не он.
+                source.request(AVATAR_MAX_BODY + 1)
+                if (source.buffer.size > AVATAR_MAX_BODY) return@withContext null
+                parseAvatarUrl(source.buffer.readUtf8())
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Адрес аватара из ответа Паспорта. Идентификатор проверяется до подстановки
+     * в адрес: только латиница, цифры, `/`, `_` и `-`, без `..`; хост всегда
+     * `avatars.yandex.net`.
+     */
+    internal fun parseAvatarUrl(body: String): String? {
+        val obj = try {
+            json.parseToJsonElement(body) as? JsonObject
+        } catch (_: Exception) {
+            null
+        } ?: return null
+        val empty = (obj["is_avatar_empty"] as? kotlinx.serialization.json.JsonPrimitive)
+            ?.takeIf { !it.isString }?.content
+        if (empty == "true") return null
+        val id = (obj["default_avatar_id"] as? kotlinx.serialization.json.JsonPrimitive)
+            ?.takeIf { it.isString }?.content ?: return null
+        val valid = id.isNotEmpty() && id.length <= AVATAR_MAX_ID &&
+            !id.contains("..") &&
+            id.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it == '/' || it == '_' || it == '-' }
+        return if (valid) "https://avatars.yandex.net/get-yapic/$id/islands-200" else null
+    }
+
     // -------------------------------------------------------------- лайки
 
     /** ID треков из «Мне нравится». */
@@ -998,6 +1050,9 @@ class YandexApi(private val http: OkHttpClient) {
     companion object {
         const val API_BASE = "https://api.music.yandex.net"
         const val OAUTH_BASE = "https://oauth.yandex.ru"
+        const val AVATAR_INFO_URL = "https://login.yandex.ru/info?format=json"
+        private const val AVATAR_MAX_BODY = 64L * 1024
+        private const val AVATAR_MAX_ID = 128
         const val MUSIC_CLIENT = "YandexMusicAndroid/24023621"
         const val CLIENT_ID = "23cabbbdc6cd418abb4b39c32c41195d"
         const val CLIENT_SECRET = "53bc75238f0c4d08a118e51fe9203300"

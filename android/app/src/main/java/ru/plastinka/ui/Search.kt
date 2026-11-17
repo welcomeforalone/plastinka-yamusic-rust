@@ -409,7 +409,11 @@ private fun Message(title: String, hint: String?) {
 }
 
 @Composable
-private fun SearchField(query: String, onChange: (String) -> Unit) {
+fun SearchField(
+    query: String,
+    onChange: (String) -> Unit,
+    placeholder: String = "Трек или исполнитель",
+) {
     val focus = LocalFocusManager.current
     Row(
         Modifier
@@ -436,7 +440,7 @@ private fun SearchField(query: String, onChange: (String) -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
                 decorationBox = { inner ->
                     Box(contentAlignment = Alignment.CenterStart) {
-                        if (query.isEmpty()) PlText("Трек или исполнитель", PlType.body, Pl.text3)
+                        if (query.isEmpty()) PlText(placeholder, PlType.body, Pl.text3)
                         inner()
                     }
                 },

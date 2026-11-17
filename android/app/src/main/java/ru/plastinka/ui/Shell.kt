@@ -52,6 +52,7 @@ fun RootScreen(
     loggedIn: Boolean,
     login: LoginUi,
     library: LibraryUi,
+    avatarUrl: String?,
     model: AppViewModel,
 ) {
     if (!loggedIn) {
@@ -61,7 +62,13 @@ fun RootScreen(
 
     val account = library.account
     when {
-        account != null && account.hasPlus -> MainScreen(library, model)
+        account != null && account.hasPlus -> {
+            // Аватар и буква-запас во всех местах основного интерфейса.
+            val letter = account.displayName.firstOrNull()?.uppercase().orEmpty()
+            androidx.compose.runtime.CompositionLocalProvider(
+                LocalAvatar provides AvatarInfo(avatarUrl, letter),
+            ) { MainScreen(library, model) }
+        }
         account != null -> SubscriptionRequiredScreen(
             account = account,
             checking = library.loading,
