@@ -306,8 +306,14 @@ private fun MainScreen(library: LibraryUi, model: AppViewModel) {
                     } else {
                         null
                     },
+                    onOpenSyncSettings = {
+                        showPlayer = false
+                        selectTab(3)
+                    },
                 )
             }
+            // Код сопряжения показывается поверх любого экрана, и для входящего подключения тоже.
+            SyncPairingDialog()
             // В режиме PiP вместо интерфейса — компактный мини-плеер. Основной экран под ним
             // остаётся в композиции, чтобы выбранная вкладка и плеер сохранились до возврата.
             val inPip by Pip.inPip.collectAsStateWithLifecycle()

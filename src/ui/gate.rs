@@ -708,6 +708,10 @@ const LICENSES: &[(&str, &str)] = &[
     ("rfd — окно выбора файла", "MIT"),
     ("rodio, cpal — вывод звука", "MIT или Apache-2.0"),
     ("md-5 — подпись ссылок", "MIT или Apache-2.0"),
+    (
+        "mdns-sd, if-addrs — поиск устройств в сети",
+        "Apache-2.0 или MIT",
+    ),
 ];
 
 fn licenses<'a>() -> Element<'a, Message> {

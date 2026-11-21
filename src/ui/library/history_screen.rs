@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use iced::widget::{Space, button, column, container, row, scrollable};
+use iced::widget::{Space, button, column, container, row};
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Task};
 
 use super::super::covers::Covers;
@@ -16,13 +16,13 @@ use super::super::history::{self, LocalPlay};
 use super::super::history_store;
 use super::super::icons::{Icon, icon, spinner};
 use super::super::queue::{ListKey, Queue};
-use super::super::scroll;
 use super::super::theme::{self, Style};
 use super::super::widgets::{self, Kind};
+use super::browse::Body;
 use super::copies::Link;
 use super::pages::{Page, Target, no_network};
 use super::{
-    App, Effect, Failure, FailureKind, Lib, Library, Message, PAGE_SIDE, PAGE_TOP, Section,
+    App, Effect, Failure, FailureKind, LIST_TOP, Lib, Library, Message, PAGE_TOP, Section,
     cover_art, state_block,
 };
 use crate::api::{self, HistoryContext, HistoryDay, Track};
@@ -31,6 +31,45 @@ use crate::api::{self, HistoryContext, HistoryDay, Track};
 pub const MAX_ROWS: usize = 200;
 /// Сторона обложки в строке.
 const COVER: f32 = 40.0;
+/// Высота любой строки списка (день, контекст, трек) вместе с отступом до
+/// следующей: строка трека 52 и зазор 6, как было в колонке.
+const HISTORY_ROW: f32 = 58.0;
+/// Высота заголовка «История» над строками (с отступом сверху).
+const HISTORY_TOP: f32 = PAGE_TOP - LIST_TOP + 48.0;
+/// Зазор под заголовком дня.
+const DAY_GAP: f32 = 6.0;
+/// Наибольшая ширина строк.
+const HISTORY_WIDTH: f32 = 760.0;
+
+/// Строка списка истории: заголовок дня, подпись контекста или трек
+/// (номера дня, группы и трека в [`HistoryDay`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryRow {
+    Day(usize),
+    Context(usize, usize),
+    Track(usize, usize, usize),
+}
+
+/// Строки истории подряд, как они идут на экране: не больше [`MAX_ROWS`]
+/// треков.
+fn history_rows(days: &[HistoryDay]) -> Vec<HistoryRow> {
+    let mut rows = Vec::new();
+    let mut tracks = 0;
+    'days: for (day_index, day) in days.iter().enumerate() {
+        rows.push(HistoryRow::Day(day_index));
+        for (item_index, item) in day.items.iter().enumerate() {
+            rows.push(HistoryRow::Context(day_index, item_index));
+            for index in 0..item.tracks.len() {
+                if tracks >= MAX_ROWS {
+                    break 'days;
+                }
+                tracks += 1;
+                rows.push(HistoryRow::Track(day_index, item_index, index));
+            }
+        }
+    }
+    rows
+}
 
 /// Контекст очереди из «Мне нравится» (и по умолчанию).
 pub(super) fn liked_context() -> HistoryContext {
@@ -162,7 +201,9 @@ impl Library {
     /// плейлиста или исполнителя берётся из стопки, пока она там есть.
     pub(super) fn remember_context(&mut self, key: &ListKey) {
         self.play_context = match key {
-            ListKey::Liked | ListKey::LikedFound(_) | ListKey::Detached => liked_context(),
+            ListKey::Liked | ListKey::LikedFound(_) | ListKey::Detached | ListKey::Remote => {
+                liked_context()
+            }
             ListKey::Wave => HistoryContext::Wave,
             ListKey::TopTracks(_) => HistoryContext::Other("Топ месяца".to_owned()),
             ListKey::SearchTracks(_) => HistoryContext::Other("Поиск".to_owned()),
@@ -330,42 +371,54 @@ impl Library {
         }
     }
 
+    /// Размеры списка истории для общего прокручиваемого списка: строки
+    /// одной высоты, сверху заголовок «История».
+    pub(super) fn history_body(&self) -> Body {
+        let rows = match &self.server_history {
+            HistoryLoad::Ready(_) => history_rows(&self.history_shown).len(),
+            _ => 0,
+        };
+        Body {
+            top: HISTORY_TOP,
+            rows,
+            row: HISTORY_ROW,
+        }
+    }
+
+    /// Список истории. Строится только видимая часть (как «Мне нравится»):
+    /// иначе все строки собирались и раскладывались бы на каждом кадре
+    /// анимации, и переход на вкладку подтормаживал.
     fn history_list<'a>(&'a self, covers: &'a Covers, days: &'a [HistoryDay]) -> Element<'a, App> {
         let today = api::today_utc();
-        let mut list =
-            column![theme::line("История", Style::Display, theme::TEXT_PRIMARY)].spacing(6);
-        let mut rows = 0;
-        'days: for (day_index, day) in days.iter().enumerate() {
-            list = list.push(Space::new().height(18)).push(theme::line(
-                api::day_label(day.date, today),
-                Style::Title,
-                theme::TEXT_PRIMARY,
-            ));
-            for (item_index, item) in day.items.iter().enumerate() {
-                list = list.push(self.context_row(covers, &item.context, item.tracks.first()));
-                for (index, track) in item.tracks.iter().enumerate() {
-                    if rows >= MAX_ROWS {
-                        break 'days;
-                    }
-                    rows += 1;
-                    list = list.push(self.history_track_row(
+        let rows = history_rows(days);
+        let title = container(theme::line("История", Style::Display, theme::TEXT_PRIMARY))
+            .padding(Padding::default().top(PAGE_TOP - LIST_TOP));
+        self.scroller(self.history_body(), Some(title.into()), move |index| {
+            let element: Element<'a, App> = match *rows.get(index)? {
+                HistoryRow::Day(day) => container(theme::line(
+                    api::day_label(days.get(day)?.date, today),
+                    Style::Title,
+                    theme::TEXT_PRIMARY,
+                ))
+                .height(Length::Fill)
+                .align_y(Alignment::End)
+                .padding(Padding::default().bottom(DAY_GAP))
+                .into(),
+                HistoryRow::Context(day, item) => {
+                    let item = days.get(day)?.items.get(item)?;
+                    self.context_row(covers, &item.context, item.tracks.first())
+                }
+                HistoryRow::Track(day, item, index) => {
+                    let track = days.get(day)?.items.get(item)?.tracks.get(index)?;
+                    self.history_track_row(
                         covers,
                         track,
-                        Lib(Message::PlayHistoryItem(day_index, item_index, index)),
-                    ));
+                        Lib(Message::PlayHistoryItem(day, item, index)),
+                    )
                 }
-            }
-        }
-        scroll::smooth(
-            scrollable(list.max_width(760).padding(Padding {
-                top: PAGE_TOP,
-                right: PAGE_SIDE,
-                bottom: PAGE_TOP,
-                left: PAGE_SIDE,
-            }))
-            .width(Length::Fill)
-            .height(Length::Fill),
-        )
+            };
+            Some(container(element).max_width(HISTORY_WIDTH).into())
+        })
     }
 
     /// Подпись контекста: обложка первого трека и название; щелчок — страница
@@ -514,6 +567,65 @@ mod tests {
             kind: kind.to_owned(),
             title: "Плейлист".to_owned(),
         }
+    }
+
+    fn track(id: usize) -> Track {
+        Track {
+            id: id.to_string(),
+            title: None,
+            version: None,
+            artists: Vec::new(),
+            album_id: None,
+            album_title: None,
+            duration: None,
+            available: true,
+            cover_uri: None,
+            warning: crate::api::Warning::None,
+            loudness: None,
+            lyrics: None,
+        }
+    }
+
+    #[test]
+    fn history_rows_follow_the_screen_and_stop_at_the_limit() {
+        let item = |count: usize| api::HistoryItem {
+            context: HistoryContext::Wave,
+            tracks: (0..count).map(track).collect(),
+        };
+        let days = [
+            HistoryDay {
+                date: Some((2026, 11, 14)),
+                items: vec![item(2), item(1)],
+            },
+            HistoryDay {
+                date: Some((2026, 11, 13)),
+                items: vec![item(1)],
+            },
+        ];
+        assert_eq!(
+            history_rows(&days),
+            [
+                HistoryRow::Day(0),
+                HistoryRow::Context(0, 0),
+                HistoryRow::Track(0, 0, 0),
+                HistoryRow::Track(0, 0, 1),
+                HistoryRow::Context(0, 1),
+                HistoryRow::Track(0, 1, 0),
+                HistoryRow::Day(1),
+                HistoryRow::Context(1, 0),
+                HistoryRow::Track(1, 0, 0),
+            ]
+        );
+        // Треков не больше MAX_ROWS, как и раньше.
+        let long = [HistoryDay {
+            date: None,
+            items: vec![item(MAX_ROWS + 50)],
+        }];
+        let tracks = history_rows(&long)
+            .iter()
+            .filter(|row| matches!(row, HistoryRow::Track(..)))
+            .count();
+        assert_eq!(tracks, MAX_ROWS);
     }
 
     #[test]

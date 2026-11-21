@@ -314,6 +314,253 @@ impl<'a, Message: 'a> From<HoverFill<'a, Message>> for Element<'a, Message> {
     }
 }
 
+// ---------------------------------------------------------------- подсветка меню
+
+/// Сколько длится переезд подсветки меню: к этому времени пружина успокаивается
+/// (отклонение меньше 0,1 %).
+pub const NAV_GLIDE: Duration = Duration::from_millis(550);
+
+/// Пружина переезда подсветки (как таблетка нижнего меню на телефоне, но
+/// мягче: затухание 0,8, жёсткость 260, масса 1): доля пути через `elapsed`.
+/// Плавный ход и едва заметный перелёт за 1 (около 1,5 %), после
+/// [`NAV_GLIDE`] — ровно 1.
+pub fn nav_spring(elapsed: Duration) -> f32 {
+    const DAMPING: f32 = 0.8;
+    const STIFFNESS: f32 = 260.0;
+    if elapsed >= NAV_GLIDE {
+        return 1.0;
+    }
+    let t = elapsed.as_secs_f32();
+    let natural = STIFFNESS.sqrt();
+    let decay = DAMPING * natural;
+    let damped = natural * (1.0 - DAMPING * DAMPING).sqrt();
+    1.0 - (-decay * t).exp() * ((damped * t).cos() + decay / damped * (damped * t).sin())
+}
+
+/// На ходу подсветка вытягивается по направлению движения максимум на эту долю
+/// («капля», как на телефоне).
+const NAV_STRETCH: f32 = 0.4;
+
+/// Одна подсветка на всё меню: скругленный прямоугольник `color` под пунктом
+/// `target` (номер ребёнка в колонке `content`). Когда `started` меняется,
+/// подсветка переезжает от того места, где была на экране, к новому пункту за
+/// долю пути `progress` ([`nav_spring`]); посреди пути она вытягивается.
+pub fn nav_highlight<'a, Message>(
+    content: impl Into<Element<'a, Message>>,
+    target: usize,
+    started: Option<Instant>,
+    progress: f32,
+    color: Color,
+    radius: f32,
+) -> NavHighlight<'a, Message> {
+    NavHighlight {
+        content: content.into(),
+        target,
+        started,
+        progress,
+        color,
+        radius,
+    }
+}
+
+pub struct NavHighlight<'a, Message> {
+    content: Element<'a, Message>,
+    target: usize,
+    started: Option<Instant>,
+    progress: f32,
+    color: Color,
+    radius: f32,
+}
+
+#[derive(Default)]
+struct NavHighlightState {
+    /// Переезд, который уже учтён: при смене начинается новый.
+    started: Option<Instant>,
+    /// Откуда едет подсветка (её место на экране в момент начала).
+    from: Option<Rectangle>,
+    /// Последнее нарисованное место без вытягивания.
+    last: std::cell::Cell<Option<Rectangle>>,
+}
+
+/// Место подсветки на доле пути `t` от `from` к `to` (без вытягивания).
+fn lerp_rect(from: Rectangle, to: Rectangle, t: f32) -> Rectangle {
+    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    Rectangle {
+        x: lerp(from.x, to.x),
+        y: lerp(from.y, to.y),
+        width: lerp(from.width, to.width),
+        height: lerp(from.height, to.height),
+    }
+}
+
+/// Вытягивание по вертикали: чем дальше от обоих концов пути (в высотах
+/// пункта), тем выше, до [`NAV_STRETCH`]; у концов — как есть.
+fn stretch_rect(rect: Rectangle, from: Rectangle, to: Rectangle) -> Rectangle {
+    if to.height <= 0.0 {
+        return rect;
+    }
+    let away = (rect.y - from.y).abs().min((rect.y - to.y).abs()) / to.height;
+    let grow = rect.height * NAV_STRETCH * (away * 2.0).min(1.0);
+    Rectangle {
+        y: rect.y - grow / 2.0,
+        height: rect.height + grow,
+        ..rect
+    }
+}
+
+impl<Message> Widget<Message, Theme, iced::Renderer> for NavHighlight<'_, Message> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<NavHighlightState>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(NavHighlightState {
+            started: self.started,
+            ..NavHighlightState::default()
+        })
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        vec![Tree::new(&self.content)]
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        let state = tree.state.downcast_mut::<NavHighlightState>();
+        if state.started != self.started {
+            // Новый переезд: от того места, где подсветка сейчас на экране
+            // (в том числе посреди прошлого переезда).
+            state.started = self.started;
+            state.from = state.last.get();
+        }
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn size_hint(&self) -> Size<Length> {
+        self.content.as_widget().size_hint()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        match tree.children.first_mut() {
+            Some(child) => self.content.as_widget_mut().layout(child, renderer, limits),
+            None => layout::Node::new(Size::ZERO),
+        }
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        if let Some(child) = tree.children.first_mut() {
+            self.content.as_widget_mut().update(
+                child, event, layout, cursor, renderer, clipboard, shell, viewport,
+            );
+        }
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut iced::Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        let state = tree.state.downcast_ref::<NavHighlightState>();
+        if let Some(to) = layout.children().nth(self.target).map(|item| item.bounds()) {
+            let (place, drawn) = match state.from {
+                Some(from) if self.progress < 1.0 => {
+                    let place = lerp_rect(from, to, self.progress);
+                    (place, stretch_rect(place, from, to))
+                }
+                _ => (to, to),
+            };
+            state.last.set(Some(place));
+            renderer.fill_quad(
+                Quad {
+                    bounds: drawn,
+                    border: Border::default().rounded(self.radius),
+                    ..Quad::default()
+                },
+                self.color,
+            );
+        }
+        if let Some(child) = tree.children.first() {
+            self.content
+                .as_widget()
+                .draw(child, renderer, theme, style, layout, cursor, viewport);
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &iced::Renderer,
+    ) -> mouse::Interaction {
+        tree.children
+            .first()
+            .map_or(mouse::Interaction::None, |child| {
+                self.content
+                    .as_widget()
+                    .mouse_interaction(child, layout, cursor, viewport, renderer)
+            })
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn widget::Operation,
+    ) {
+        if let Some(child) = tree.children.first_mut() {
+            self.content
+                .as_widget_mut()
+                .operate(child, layout, renderer, operation);
+        }
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &iced::Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Message, Theme, iced::Renderer>> {
+        let child = tree.children.first_mut()?;
+        self.content
+            .as_widget_mut()
+            .overlay(child, layout, renderer, viewport, translation)
+    }
+}
+
+impl<'a, Message: 'a> From<NavHighlight<'a, Message>> for Element<'a, Message> {
+    fn from(highlight: NavHighlight<'a, Message>) -> Self {
+        Element::new(highlight)
+    }
+}
+
 // ---------------------------------------------------------------- движение
 
 /// Содержимое со сдвигом `offset` и масштабом `scale` относительно центра.
@@ -850,5 +1097,34 @@ mod tests {
         animation.go_mut(false, opened);
         assert!((progress(&animation, opened + POPOVER / 2) - 0.5).abs() < 0.02);
         assert!(progress(&animation, opened + POPOVER).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nav_spring_starts_at_zero_overshoots_slightly_and_settles() {
+        assert!(nav_spring(Duration::ZERO).abs() < 1e-6);
+        let samples: Vec<f32> = (0..=55)
+            .map(|ms| nav_spring(Duration::from_millis(ms * 10)))
+            .collect();
+        let peak = samples.iter().copied().fold(0.0_f32, f32::max);
+        // Едва заметный перелёт (около 1,5 %).
+        assert!(peak > 1.005 && peak < 1.03, "перелёт {peak}");
+        // Половину пути проходит быстро, к концу почти на месте.
+        assert!(nav_spring(Duration::from_millis(120)) > 0.5);
+        assert!((nav_spring(Duration::from_millis(500)) - 1.0).abs() < 0.005);
+        assert_eq!(nav_spring(NAV_GLIDE), 1.0);
+        assert_eq!(nav_spring(Duration::from_secs(5)), 1.0);
+    }
+
+    #[test]
+    fn nav_highlight_stretches_only_on_the_way() {
+        let from = Rectangle::new(iced::Point::new(0.0, 0.0), Size::new(200.0, 40.0));
+        let to = Rectangle::new(iced::Point::new(0.0, 420.0), Size::new(200.0, 40.0));
+        assert_eq!(stretch_rect(from, from, to), from);
+        assert_eq!(stretch_rect(to, from, to), to);
+        let middle = lerp_rect(from, to, 0.5);
+        let stretched = stretch_rect(middle, from, to);
+        assert!((stretched.height - 40.0 * (1.0 + NAV_STRETCH)).abs() < 1e-3);
+        // Вытягивается симметрично относительно центра.
+        assert!((stretched.center_y() - middle.center_y()).abs() < 1e-3);
     }
 }

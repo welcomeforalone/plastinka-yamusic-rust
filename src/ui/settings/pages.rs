@@ -25,6 +25,7 @@ pub fn entries<'a>(category: Category, ctx: &Ctx<'a>) -> Vec<Entry<'a>> {
         Category::Lyrics => lyrics(ctx.prefs),
         Category::Plugins => ctx.library.plugin_entries(),
         Category::Discord => discord(ctx.prefs),
+        Category::Together => ctx.library.together_entries(),
         Category::Account => account(ctx),
         Category::About => about(),
     }

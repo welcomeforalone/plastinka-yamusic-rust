@@ -391,7 +391,8 @@ internal fun PlayerControls(
     val shuffle = player?.shuffle?.collectAsStateWithLifecycle()?.value ?: false
     val repeat = player?.repeatMode?.collectAsStateWithLifecycle()?.value ?: Player.REPEAT_MODE_OFF
     // В волне перемешивания нет, а повтор переключается «выкл ↔ трек».
-    val shuffleOff = queue.isWave
+    val sync by ru.plastinka.sync.SyncPlayBridge.ui.collectAsStateWithLifecycle()
+    val shuffleOff = queue.isWave || (sync.role == ru.plastinka.sync.PlayRole.Slave && sync.wave)
     val edge = 22.dp
     val touch = 44.dp
     BoxWithConstraints(Modifier.fillMaxWidth()) {
@@ -466,17 +467,22 @@ private fun GlassPill(label: String, @DrawableRes icon: Int, onClick: () -> Unit
 
 /** Круглая кнопка на стекле без подписи, 44 dp, как «таблетки» рядом. */
 @Composable
-private fun GlassIconButton(@DrawableRes icon: Int, onClick: () -> Unit) {
+private fun GlassIconButton(
+    @DrawableRes icon: Int,
+    onClick: () -> Unit,
+    description: String = "Мини-плеер",
+    tint: Color = Pl.text,
+) {
     Box(
         Modifier
             .size(44.dp)
             .clip(CircleShape)
             .background(Color.White.copy(alpha = 0.12f), CircleShape)
-            .semantics { contentDescription = "Мини-плеер" }
+            .semantics { contentDescription = description }
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        PlIcon(icon, 20.dp, Pl.text)
+        PlIcon(icon, 20.dp, tint)
     }
 }
 
@@ -540,6 +546,8 @@ fun FullPlayer(
     backEnabled: Boolean = true,
     // Кнопка «Мини-плеер» (PiP); `null` — режим на устройстве не поддерживается.
     onMiniPlayer: (() -> Unit)? = null,
+    // Раздел «Слушать вместе» в настройках (из нижней панели «Устройства»).
+    onOpenSyncSettings: () -> Unit = {},
 ) {
     val track = queue.currentTrack() ?: return
     BackHandler(enabled = backEnabled, onBack = onClose)
@@ -557,12 +565,15 @@ fun FullPlayer(
     var showQueue by remember { mutableStateOf(false) }
     var showLyrics by remember { mutableStateOf(false) }
     var showSound by remember { mutableStateOf(false) }
+    var showSync by remember { mutableStateOf(false) }
+    val syncLinked = syncLinked()
     // Плеер закрывается: листы и текст не должны пережить его, если его откроют снова.
     LaunchedEffect(backEnabled) {
         if (!backEnabled) {
             showQueue = false
             showLyrics = false
             showSound = false
+            showSync = false
         }
     }
 
@@ -687,6 +698,13 @@ fun FullPlayer(
                 GlassPill("Очередь", R.drawable.ic_queue) { showQueue = true }
                 // Три таблетки с подписями не влезают на узкий экран: «Мини-плеер» — круглая кнопка.
                 if (onMiniPlayer != null) GlassIconButton(R.drawable.ic_pip, onMiniPlayer)
+                // «Устройства»: слушать вместе; горит акцентом, пока связь есть.
+                GlassIconButton(
+                    R.drawable.ic_devices,
+                    { showSync = true },
+                    description = "Слушать вместе",
+                    tint = if (syncLinked) Pl.accent else Pl.text,
+                )
             }
             // Под таблетками 25 dp и место под визуализатор спектра (рисуется выше, под колонкой).
             Spacer(Modifier.height(VISUALIZER_HEIGHT + 25.dp))
@@ -717,6 +735,9 @@ fun FullPlayer(
     }
     if (showSound) {
         SoundSheet(onDismiss = { showSound = false })
+    }
+    if (showSync) {
+        SyncSheet(onDismiss = { showSync = false }, onOpenSettings = onOpenSyncSettings)
     }
 }
 

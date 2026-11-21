@@ -12,6 +12,7 @@ security-crypto = "1.1.0-alpha06"
 coil = "2.7.0"
 core-ktx = "1.15.0"
 datastore = "1.1.1"
+junit = "4.13.2"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "core-ktx" }
@@ -32,6 +33,8 @@ media3-okhttp = { group = "androidx.media3", name = "media3-datasource-okhttp", 
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "serialization" }
 security-crypto = { group = "androidx.security", name = "security-crypto", version.ref = "security-crypto" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+kotlin-test-junit = { group = "org.jetbrains.kotlin", name = "kotlin-test-junit", version.ref = "kotlin" }
 coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
 
 [plugins]

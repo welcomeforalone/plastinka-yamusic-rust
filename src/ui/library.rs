@@ -15,6 +15,7 @@ mod mini;
 mod pages;
 mod plugins;
 mod queue_panel;
+mod together;
 mod wave;
 
 use std::collections::HashSet;
@@ -56,6 +57,7 @@ use crate::plugins::fckcensor::{Censor, Decision};
 use crate::plugins::slopless::Slop;
 use crate::relink::Relinks;
 use crate::storage::token::StoredToken;
+use crate::sync::service::Repeat as TogetherRepeat;
 use crate::texts::{self, sentence};
 use iced::animation::Animation;
 use iced::time::Instant;
@@ -63,6 +65,7 @@ pub use pages::Target;
 use pages::{Collected, Collections, Entry, Loaded, PlaylistTab, SearchState, ShelfId};
 pub use plugins::Msg as PluginMsg;
 use plugins::{PluginIo, Replace, TrackMenu};
+pub use together::Msg as TogetherMsg;
 pub use wave::Msg as WaveMsg;
 use wave::{Leave, Wave};
 
@@ -157,6 +160,7 @@ struct ExtrasFit {
     more: bool,
     lyrics: bool,
     queue: bool,
+    devices: bool,
     equalizer: bool,
     mini: bool,
     quality: Quality,
@@ -181,7 +185,8 @@ fn badge_width(info: StreamInfo, full: bool) -> f32 {
 }
 
 /// Что помещается в правый край шириной `room`. Громкость есть всегда; к ней
-/// по приоритету добавляются меню трека, текст песни, очередь, эквалайзер (не
+/// по приоритету добавляются меню трека, текст песни, очередь, «Устройства»
+/// («Слушать вместе»: ниже громкости, выше эквалайзера), эквалайзер (не
 /// в полноэкранном плеере), мини-плеер, короткий значок качества и полный.
 /// Приоритет строгий: если очередной элемент не влез, следующие не берутся.
 fn extras_fit(room: f32, fullscreen: bool, badge: Option<StreamInfo>) -> ExtrasFit {
@@ -199,12 +204,14 @@ fn extras_fit(room: f32, fullscreen: bool, badge: Option<StreamInfo>) -> ExtrasF
     let more = take(step);
     let lyrics = take(step);
     let queue = take(step);
+    let devices = take(step);
     let equalizer = !fullscreen && take(step);
     let mini = take(step);
     let mut fit = ExtrasFit {
         more,
         lyrics,
         queue,
+        devices,
         equalizer,
         mini,
         quality: Quality::Hidden,
@@ -365,6 +372,8 @@ pub enum Message {
     Plugin(plugins::Msg),
     /// «Моя волна».
     Wave(wave::Msg),
+    /// «Слушать вместе»: события службы и кнопки.
+    Together(together::Msg),
     /// Текст песни: панель, загрузка.
     Lyrics(lyrics::Msg),
     /// Сердце: поставить или снять «Нравится» треку (настоящему треку из
@@ -404,6 +413,8 @@ pub enum Effect {
     Relogin,
     /// Всплывающее сообщение.
     Toast(String),
+    /// Новое сопряжение: запомнить в `config.toml`.
+    TogetherPaired(crate::storage::config::PairedDevice),
 }
 
 enum Likes {
@@ -463,6 +474,8 @@ pub struct Library {
     /// Генератор для перемешивания.
     rng: Rng,
     section: Section,
+    /// Переезд подсветки меню: из какого раздела и когда начался.
+    nav_glide: Option<(Section, Instant)>,
     /// Открытые страницы поверх раздела, последняя — на экране.
     stack: Vec<Entry>,
     /// Последний выданный номер страницы.
@@ -555,6 +568,8 @@ pub struct Library {
     play_context: api::HistoryContext,
     /// Сообщения Яндексу о прослушивании (`play-audio`).
     plays: api::PlayTracker,
+    /// «Слушать вместе»: служба, связь, ведущий и ведомый.
+    together: together::Together,
 }
 
 /// Анимации плеера.
@@ -726,6 +741,7 @@ impl Library {
             engine,
             rng: Rng::new(),
             section: START_SECTION,
+            nav_glide: None,
             stack: Vec::new(),
             serial: 0,
             root_scroll: 0.0,
@@ -793,6 +809,7 @@ impl Library {
             history_shown: Arc::new(Vec::new()),
             play_context: history_screen::liked_context(),
             plays: api::PlayTracker::default(),
+            together: together::Together::new(),
         };
         let task = library.load_likes(http);
         let plugins = library.plugins_changed(plugins);
@@ -1062,13 +1079,21 @@ impl Library {
 
     /// События плеера: позиция, конец трека, ошибки.
     pub fn subscription(&self) -> Subscription<App> {
-        match &self.engine {
+        let audio = match &self.engine {
             Ok(engine) => {
                 Subscription::run_with(engine.events(), |events: &audio::Events| events.stream())
                     .map(|event| Lib(Message::Audio(event)))
             }
             Err(_) => Subscription::none(),
-        }
+        };
+        // Ведущий раз в секунду сообщает позицию ведомому.
+        let tick = if self.together_ticking() {
+            iced::time::every(Duration::from_secs(1))
+                .map(|_| Lib(Message::Together(together::Msg::Tick)))
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([audio, tick])
     }
 
     fn send(&self, command: Command) {
@@ -1100,6 +1125,8 @@ impl Library {
         }
         let pump = self.pump();
         self.wave_pump();
+        // Что у нас изменилось, уходит собеседнику.
+        self.together_sync();
         let queued = Task::batch(std::mem::take(&mut self.tasks));
         // Текст песни: открыли панель или сменился трек — запрашиваем.
         let lyrics = self.lyrics_sync();
@@ -1111,7 +1138,12 @@ impl Library {
         message: Message,
         http: Option<&reqwest::Client>,
     ) -> (Task<Message>, Option<Effect>) {
+        // Кнопки ведомого, которые решает ведущий, уходят ему командой.
+        if self.together_intercept(&message) {
+            return (Task::none(), None);
+        }
         let effect = match message {
+            Message::Together(msg) => return self.together_msg(msg, http),
             Message::Nav(section) => {
                 self.close_wave_menu();
                 return (self.nav(section, http), None);
@@ -1401,7 +1433,10 @@ impl Library {
             Message::LikeDone(track, target, result) => {
                 self.like_busy.remove(&track.id);
                 match result {
-                    Ok(()) => None,
+                    Ok(()) => {
+                        self.together_notify_liked(&track.id, target);
+                        None
+                    }
                     Err(failure) => {
                         // Сервер не принял: возвращаем сердце как было.
                         self.set_liked(&track, !target);
@@ -1563,6 +1598,10 @@ impl Library {
 
     /// Отправка в фоне; ошибки молча (строка в stderr), игре не мешают.
     fn send_play_report(&mut self, report: api::PlayReport) {
+        // Ответ Яндексу о прослушивании шлёт только ведущий.
+        if self.together_follower() {
+            return;
+        }
         let Some(http) = self.http.clone() else {
             return;
         };
@@ -1895,6 +1934,7 @@ impl Library {
                 self.player.buffering = buffering;
                 self.player.stream = stream;
                 if !buffering {
+                    self.together_progress();
                     self.player.skipped = 0;
                     if !self.player.sounded {
                         self.wave_sounded();
@@ -1903,6 +1943,12 @@ impl Library {
                     }
                     self.player.sounded = true;
                 }
+                None
+            }
+            audio::Event::Ended { id } if id == session && self.together_follower() => {
+                // Ведомый: трек кончился — ждём состояние ведущего.
+                self.halt();
+                self.together_settled();
                 None
             }
             audio::Event::Ended { id } if id == session => {
@@ -1949,6 +1995,10 @@ impl Library {
             .current_shown()
             .map(Track::display_title)
             .unwrap_or_default();
+        // Ведомому дальше пропускать нечего: очередь у ведущего.
+        if self.together_follower() {
+            return self.together_failed(&title, &error.to_string());
+        }
         // С самим треком беда — пробуем следующий, но не бесконечно.
         if error.track_specific() && self.player.skipped < MAX_SKIPS {
             let next = self.neighbour(index, true).filter(|next| *next != index);
@@ -2067,7 +2117,7 @@ impl Library {
         ]
         .width(Length::Fill);
         row![
-            self.sidebar(moment.sidebar, self.pixel_scale(prefs)),
+            self.sidebar(moment.sidebar, self.pixel_scale(prefs), moment.now),
             widgets::vertical_divider(),
             right
         ]
@@ -2226,9 +2276,20 @@ impl Library {
     }
 
     /// Меню шириной `width`: узкое — только иконки.
-    fn sidebar(&self, width: f32, pixel_scale: f32) -> Element<'_, App> {
+    fn sidebar(&self, width: f32, pixel_scale: f32, now: Instant) -> Element<'_, App> {
         let compact = width < SIDEBAR_ICONS_BELOW;
-        let item = |section: Section| nav_item(section, self.section == section, compact);
+        // Подсветка переезжает пружиной; цвета пунктов меняются вместе с ней.
+        let glide = self.nav_progress(now);
+        let item = |section: Section| {
+            let active = if section == self.section {
+                glide.clamp(0.0, 1.0)
+            } else if self.nav_glide.is_some_and(|(from, _)| from == section) {
+                1.0 - glide.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            nav_item(section, self.section == section, active, compact)
+        };
         // Кнопка сворачивания появляется, когда мышь над шапкой меню. Её место
         // зависит от ширины плавно, а не от смены вида: в раскрытом меню она у
         // правого края с тем же отступом, что у пунктов (12), в свёрнутом —
@@ -2303,17 +2364,40 @@ impl Library {
             bottom: 12.0,
             left: SIDEBAR_PAD,
         });
+        let menu = anim::nav_highlight(
+            menu,
+            menu_index(self.section),
+            self.nav_glide.map(|(_, started)| started),
+            glide,
+            theme::SURFACE_3,
+            widgets::RADIUS_M,
+        );
         container(menu).width(width).clip(true).into()
+    }
+
+    /// Доля пути подсветки меню (с перелётом за 1). Переезда нет — 1.
+    fn nav_progress(&self, now: Instant) -> f32 {
+        self.nav_glide.map_or(1.0, |(_, started)| {
+            anim::nav_spring(now.saturating_duration_since(started))
+        })
+    }
+
+    /// Подсветка меню ещё едет.
+    fn nav_gliding(&self, now: Instant) -> bool {
+        self.nav_glide
+            .is_some_and(|(_, started)| now.saturating_duration_since(started) < anim::NAV_GLIDE)
     }
 
     /// Идёт ли переход внутри главного окна.
     pub fn transitioning(&self, now: Instant) -> bool {
         self.motion.running(now)
+            || self.together_animating(now)
             || self.wave_menu_running(now)
             || self.lyrics_transitioning(now)
             || self.fullscreen.is_animating(now)
             || self.glide.is_some()
             || self.wave_tint_running(now)
+            || self.nav_gliding(now)
     }
 
     fn account_card(&self, compact: bool, pixel_scale: f32) -> Element<'_, App> {
@@ -2564,13 +2648,17 @@ impl Library {
                 }
                 _ => marquee(artist, Style::Secondary, theme::TEXT_SECONDARY).into(),
             };
-            column![
+            let mut lines = column![
                 marquee(title, Style::BodyStrong, theme::TEXT_PRIMARY),
                 artist
             ]
             .spacing(2)
-            .width(Length::Fill)
-            .into()
+            .width(Length::Fill);
+            // Ведомый: чей трек играет.
+            if let Some(caption) = self.together_caption() {
+                lines = lines.push(theme::line(caption, Style::Caption, theme::accent()));
+            }
+            lines.into()
         } else {
             container(
                 column![
@@ -2627,9 +2715,21 @@ impl Library {
         // Нажатие: кнопка коротко сжимается и возвращается.
         let squeeze = (std::f32::consts::PI * anim::progress(&motion.pulse, now)).sin();
         let play = anim::motion(play).scale(1.0 - 0.1 * squeeze);
-        let in_wave = self.in_wave();
-        let repeat_on = self.repeat_one() || (!in_wave && player.repeat != Repeat::Off);
-        let repeat_icon = if self.repeat_one() {
+        // Ведомый показывает режимы ведущего: решает он.
+        let master = self.together_master();
+        let in_wave = self.in_wave() || master.is_some_and(|master| master.wave);
+        let shuffle_on = master.map_or(player.shuffle, |master| master.shuffle);
+        let (repeat_on, repeat_one) = match master {
+            Some(master) => (
+                master.repeat != TogetherRepeat::Off,
+                master.repeat == TogetherRepeat::One,
+            ),
+            None => (
+                self.repeat_one() || (!in_wave && player.repeat != Repeat::Off),
+                self.repeat_one(),
+            ),
+        };
+        let repeat_icon = if repeat_one {
             Icon::RepeatOne
         } else {
             Icon::Repeat
@@ -2655,7 +2755,7 @@ impl Library {
             widgets::icon_button(
                 Icon::Shuffle,
                 Size::S,
-                player.shuffle,
+                shuffle_on,
                 on(Message::ToggleShuffle),
             )
         };
@@ -2770,6 +2870,19 @@ impl Library {
                     },
                 ),
                 "Очередь",
+                tooltip::Position::Top,
+            ));
+        }
+        // «Слушать вместе»: карточка с устройствами; горит, пока связь есть.
+        if fit.devices {
+            extras = extras.push(widgets::with_tooltip(
+                widgets::icon_button(
+                    Icon::Devices,
+                    Size::S,
+                    self.together_is_linked() || self.together_open(),
+                    Some(Lib(Message::Together(TogetherMsg::TogglePanel))),
+                ),
+                "Слушать вместе",
                 tooltip::Position::Top,
             ));
         }
@@ -3158,16 +3271,36 @@ fn sidebar_toggle<'a>(collapsed: bool) -> Element<'a, App> {
     widgets::with_tooltip(toggle, tip, tooltip::Position::Right)
 }
 
-fn nav_item<'a>(section: Section, selected: bool, compact: bool) -> Element<'a, App> {
+/// Номер пункта `section` в колонке меню ([`Library::sidebar`]): под ним
+/// рисуется подсветка. Порядок тот же, что у детей колонки.
+fn menu_index(section: Section) -> usize {
+    // 0 — шапка, 1 — отступ, 4 — «Коллекция», 10 — распорка, 12 — отступ,
+    // 13 — карточка аккаунта.
+    match section {
+        Section::Wave => 2,
+        Section::Search => 3,
+        Section::Liked => 5,
+        Section::Playlists => 6,
+        Section::Albums => 7,
+        Section::Artists => 8,
+        Section::History => 9,
+        Section::Settings => 11,
+    }
+}
+
+/// Пункт меню. Фона у выбранного нет: его рисует общая подсветка
+/// ([`anim::nav_highlight`]). `active` — насколько пункт выбран (0…1): цвета
+/// значка и подписи меняются вместе с переездом подсветки.
+fn nav_item<'a>(section: Section, selected: bool, active: f32, compact: bool) -> Element<'a, App> {
     let make = move |hovered: bool| -> Element<'a, App> {
-        let (icon_color, text_color, font) = match (selected, hovered) {
-            (true, _) => (theme::accent(), theme::TEXT_PRIMARY, Style::BodyStrong),
-            (false, true) => (theme::TEXT_PRIMARY, theme::TEXT_PRIMARY, Style::BodyStrong),
-            (false, false) => (
-                theme::TEXT_SECONDARY,
-                theme::TEXT_SECONDARY,
+        let (icon_color, text_color, font) = if hovered && !selected {
+            (theme::TEXT_PRIMARY, theme::TEXT_PRIMARY, Style::BodyStrong)
+        } else {
+            (
+                theme::mix(theme::TEXT_SECONDARY, theme::accent(), active),
+                theme::mix(theme::TEXT_SECONDARY, theme::TEXT_PRIMARY, active),
                 Style::BodyStrong,
-            ),
+            )
         };
         let glyph = icon(section.icon(), 20.0, icon_color);
         let content: Element<'a, App> = if compact {
@@ -3184,7 +3317,6 @@ fn nav_item<'a>(section: Section, selected: bool, compact: bool) -> Element<'a, 
             .padding([0, 12])
             .style(move |_, status| button::Style {
                 background: match (selected, status) {
-                    (true, _) => Some(theme::SURFACE_3.into()),
                     (false, button::Status::Pressed) => Some(theme::SURFACE_3.into()),
                     _ => None,
                 },
@@ -3859,10 +3991,17 @@ mod tests {
 
     /// Сколько элементов показано (значок качества: короткий — один, полный — два).
     fn fit_rank(fit: &ExtrasFit) -> usize {
-        [fit.more, fit.lyrics, fit.queue, fit.equalizer, fit.mini]
-            .into_iter()
-            .filter(|shown| *shown)
-            .count()
+        [
+            fit.more,
+            fit.lyrics,
+            fit.queue,
+            fit.devices,
+            fit.equalizer,
+            fit.mini,
+        ]
+        .into_iter()
+        .filter(|shown| *shown)
+        .count()
             + match fit.quality {
                 Quality::Hidden => 0,
                 Quality::Short => 1,
@@ -3888,11 +4027,12 @@ mod tests {
 
     #[test]
     fn extras_fit_keeps_priority_at_1100() {
-        // Окно 1100 с меню: край ~177 px: четыре кнопки и громкость, мини-плеер и значок не влезают.
+        // Окно 1100 с меню: край ~177 px: четыре кнопки и громкость; «Устройства»
+        // стоят выше эквалайзера, поэтому эквалайзер, мини-плеер и значок не влезают.
         let room = extras_room(1100.0 - SIDEBAR, false);
         let fit = extras_fit(room, false, mp3());
-        assert!(fit.more && fit.lyrics && fit.queue && fit.equalizer);
-        assert!(!fit.mini);
+        assert!(fit.more && fit.lyrics && fit.queue && fit.devices);
+        assert!(!fit.equalizer && !fit.mini);
         assert_eq!(fit.quality, Quality::Hidden);
     }
 
@@ -3900,7 +4040,7 @@ mod tests {
     fn extras_fit_shows_everything_when_wide() {
         let room = extras_room(1920.0 - SIDEBAR, false);
         let fit = extras_fit(room, false, mp3());
-        assert!(fit.more && fit.lyrics && fit.queue && fit.equalizer && fit.mini);
+        assert!(fit.more && fit.lyrics && fit.queue && fit.devices && fit.equalizer && fit.mini);
         assert_eq!(fit.quality, Quality::Full);
         // Без потока значка нет.
         assert_eq!(extras_fit(room, false, None).quality, Quality::Hidden);
@@ -3920,6 +4060,7 @@ mod tests {
                 more: false,
                 lyrics: false,
                 queue: false,
+                devices: false,
                 equalizer: false,
                 mini: false,
                 quality: Quality::Hidden,
@@ -3931,10 +4072,10 @@ mod tests {
     fn extras_fit_fullscreen_has_no_equalizer() {
         let fit = extras_fit(1000.0, true, mp3());
         assert!(!fit.equalizer);
-        assert!(fit.more && fit.lyrics && fit.queue && fit.mini);
+        assert!(fit.more && fit.lyrics && fit.queue && fit.devices && fit.mini);
         assert_eq!(fit.quality, Quality::Full);
         // Без эквалайзера мини-плеер появляется на кнопку раньше.
-        let room = 4.0 * (EXTRAS_BUTTON + EXTRAS_GAP) + EXTRAS_BUTTON;
+        let room = 5.0 * (EXTRAS_BUTTON + EXTRAS_GAP) + EXTRAS_BUTTON;
         assert!(extras_fit(room, true, None).mini);
         assert!(!extras_fit(room, false, None).mini);
     }
@@ -3947,7 +4088,7 @@ mod tests {
             assert!(rank >= last, "room {room}: {rank} < {last}");
             last = rank;
         }
-        assert_eq!(last, 7);
+        assert_eq!(last, 8);
     }
 
     #[test]

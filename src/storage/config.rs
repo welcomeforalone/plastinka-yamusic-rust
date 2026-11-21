@@ -88,6 +88,12 @@ pub struct Config {
         deserialize_with = "lenient_table"
     )]
     pub plugins: PluginsConfig,
+    /// «Слушать вместе» (таблица `[sync]`).
+    #[serde(
+        skip_serializing_if = "SyncConfig::is_empty",
+        deserialize_with = "lenient_table"
+    )]
+    pub sync: SyncConfig,
     /// Эквалайзер (таблица `[equalizer]`). Читать и писать через
     /// [`Config::equalizer`] и [`Config::set_equalizer`].
     #[serde(
@@ -232,6 +238,104 @@ impl PluginsConfig {
     fn is_empty(&self) -> bool {
         *self == Self::default()
     }
+}
+
+/// Таблица `[sync]`: «Слушать вместе». Секретов здесь нет: секрет
+/// сопряжения лежит в хранилище паролей (`sync::store`). Значение неверного
+/// типа — как будто его нет.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SyncConfig {
+    /// Включена ли функция (по умолчанию нет).
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub enabled: Option<bool>,
+    /// Идентификатор устройства: 32 hex в нижнем регистре.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub device_id: Option<String>,
+    /// Своё имя устройства; нет — имя компьютера.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub device_name: Option<String>,
+    /// Поправка задержки, мс (зажимается в −500…+500).
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub delay_ms: Option<i64>,
+    /// Сопряжённые устройства.
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "lenient_paired"
+    )]
+    pub paired: Vec<PairedDevice>,
+}
+
+/// Сопряжённое устройство (без секрета).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairedDevice {
+    pub id: String,
+    pub name: String,
+    pub os: String,
+}
+
+/// Пределы поправки задержки, мс.
+pub const SYNC_DELAY_LIMIT: i64 = 500;
+
+impl SyncConfig {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
+
+    /// Поправка задержки в пределах −500…+500 мс.
+    pub fn delay_ms(&self) -> i64 {
+        self.delay_ms
+            .unwrap_or(0)
+            .clamp(-SYNC_DELAY_LIMIT, SYNC_DELAY_LIMIT)
+    }
+
+    /// Идентификатор устройства; создаёт его, если его нет или он испорчен.
+    /// Второе значение — `true`, если настройки нужно сохранить.
+    pub fn ensure_device_id(&mut self) -> (String, bool) {
+        match &self.device_id {
+            Some(id) if crate::sync::proto::is_device_id(id) => (id.clone(), false),
+            _ => {
+                let id = uuid::Uuid::new_v4().simple().to_string();
+                self.device_id = Some(id.clone());
+                (id, true)
+            }
+        }
+    }
+
+    /// Запоминает сопряжение, заменяя запись с тем же `id`.
+    pub fn remember(&mut self, device: PairedDevice) {
+        match self.paired.iter_mut().find(|known| known.id == device.id) {
+            Some(known) => *known = device,
+            None => self.paired.push(device),
+        }
+    }
+
+    /// Убирает сопряжение. `true`, если оно было.
+    pub fn forget(&mut self, id: &str) -> bool {
+        let before = self.paired.len();
+        self.paired.retain(|device| device.id != id);
+        self.paired.len() != before
+    }
+}
+
+/// Сопряжённые: не массив — пусто, битая запись отбрасывается, соседние
+/// остаются.
+fn lenient_paired<'de, D>(deserializer: D) -> Result<Vec<PairedDevice>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let toml::Value::Array(items) = toml::Value::deserialize(deserializer)? else {
+        return Ok(Vec::new());
+    };
+    Ok(items
+        .into_iter()
+        .filter_map(|item| item.try_into::<PairedDevice>().ok())
+        .filter(|device| crate::sync::proto::is_device_id(&device.id))
+        .collect())
 }
 
 /// Масштаб окна: от 75 до 200 % шагом 25.
@@ -631,6 +735,59 @@ accent = \"teal\"
                 .unwrap()
                 .contains("plugins")
         );
+    }
+
+    #[test]
+    fn sync_config_is_lenient_and_roundtrips() {
+        let id = "ab".repeat(16);
+        let config: Config = toml::from_str(&format!(
+            "[sync]
+enabled = true
+delay_ms = 9000
+device_name = 5
+[[sync.paired]]
+id = \"{id}\"
+name = \"Телефон\"
+os = \"android\"
+[[sync.paired]]
+id = \"bad\"
+name = \"x\"
+os = \"y\"
+"
+        ))
+        .unwrap();
+        assert!(config.sync.enabled());
+        assert_eq!(config.sync.delay_ms(), 500);
+        assert_eq!(config.sync.device_name, None);
+        assert_eq!(config.sync.paired.len(), 1);
+        let back: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(back, config);
+        assert!(
+            !toml::to_string(&Config::default())
+                .unwrap()
+                .contains("sync")
+        );
+        let broken: Config = toml::from_str("sync = 5").unwrap();
+        assert!(!broken.sync.enabled());
+    }
+
+    #[test]
+    fn sync_device_id_is_created_once_and_pairs_replace() {
+        let mut sync = SyncConfig::default();
+        let (id, created) = sync.ensure_device_id();
+        assert!(created && crate::sync::proto::is_device_id(&id));
+        assert_eq!(sync.ensure_device_id(), (id.clone(), false));
+        let device = |name: &str| PairedDevice {
+            id: id.clone(),
+            name: name.into(),
+            os: "linux".into(),
+        };
+        sync.remember(device("A"));
+        sync.remember(device("B"));
+        assert_eq!(sync.paired.len(), 1);
+        assert_eq!(sync.paired[0].name, "B");
+        assert!(sync.forget(&id));
+        assert!(!sync.forget(&id));
     }
 
     #[test]

@@ -346,7 +346,9 @@ impl Library {
     /// Пропускать ли трек как ИИ: Slopless с автопропуском, трек не
     /// включён вручную.
     pub(super) fn skip_as_ai(&self, track: &Track) -> bool {
-        self.plugins.slopless
+        // Ведомый играет то, что включил ведущий: ничего не пропускаем.
+        !self.together_follower()
+            && self.plugins.slopless
             && self.plugins.autoskip
             && self.chosen.as_deref() != Some(track.id.as_str())
             && self.slop_label(track) == Label::Ai
@@ -933,7 +935,10 @@ impl Library {
         if self.replace.take().is_some() {
             return true;
         }
-        self.menu.take().is_some() || self.close_sound_panel() || self.close_wave_menu()
+        self.menu.take().is_some()
+            || self.close_sound_panel()
+            || self.close_together_panel()
+            || self.close_wave_menu()
     }
 
     /// Меню трека или диалог замены поверх окна размером `window`.

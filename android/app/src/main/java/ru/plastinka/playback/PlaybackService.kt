@@ -44,6 +44,11 @@ import ru.plastinka.data.Prefs
 import ru.plastinka.data.StreamResult
 import ru.plastinka.data.Track
 import ru.plastinka.data.TrackUris
+import ru.plastinka.sync.LinkState
+import ru.plastinka.sync.PlayerSnap
+import ru.plastinka.sync.SyncPlayBridge
+import ru.plastinka.sync.SyncPlayback
+import ru.plastinka.sync.SyncPlayerPort
 
 /**
  * Фоновое воспроизведение: Media3-сессия с уведомлением, наушники, блокировка.
@@ -56,6 +61,22 @@ import ru.plastinka.data.TrackUris
 class PlaybackService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
+
+    /** «Слушать вместе»: логика ведущего и ведомого; события связи приходят на главном потоке. */
+    private var sync: SyncPlayback? = null
+    private val syncScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val syncTicker = object : Runnable {
+        override fun run() {
+            sync?.onSecond()
+            mainHandler.postDelayed(this, 1_000)
+        }
+    }
+
+    /** Ведомый слушает чужой трек: отчёты Яндексу, волна и автопропуск Slopless не работают. */
+    private val isSlave: Boolean get() = sync?.isSlave == true
+
+    /** Сколько раз трек перезапускался повтором: часть снимка для «Слушать вместе». */
+    private var syncRestarts = 0
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val app: PlastinkaApp get() = application as PlastinkaApp
 
@@ -313,7 +334,8 @@ class PlaybackService : MediaSessionService() {
             Intent(this, ru.plastinka.MainActivity::class.java),
             android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        mediaSession = MediaSession.Builder(this, player)
+        startSync(player)
+        mediaSession = MediaSession.Builder(this, SyncForwardingPlayer(player) { sync })
             .setSessionActivity(sessionActivity)
             .setCallback(SessionCallback())
             .setCustomLayout(customLayout(liked = false))
@@ -334,6 +356,144 @@ class PlaybackService : MediaSessionService() {
                 mainHandler.post { mediaSession?.setCustomLayout(customLayout(liked)) }
             }
         }
+    }
+
+    // ------------------------------------------------------ «Слушать вместе»
+
+    /**
+     * Подключает воспроизведение вместе к плееру: слушатель событий плеера, секундный `tick`,
+     * подписка на события связи. Подписка идёт сразу при создании службы; если связь уже готова
+     * (службу пересоздали), её считаем восстановленной и обмениваемся начальным `state` заново.
+     */
+    private fun startSync(player: ExoPlayer) {
+        val core = SyncPlayback(
+            selfId = Prefs.syncDeviceId,
+            port = ExoSyncPort(player),
+            send = { app.sync.service.send(it) },
+            clock = { android.os.SystemClock.elapsedRealtime() },
+            delayMs = { Prefs.syncDelayMs.toLong() },
+            _ui = SyncPlayBridge.ui,
+        )
+        sync = core
+        SyncPlayback.current = core
+        player.addListener(object : Player.Listener {
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) = core.onPlayerChanged()
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                // «Повторять трек»: тот же трек с нуля; ведомому нужно новое `state`.
+                if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) syncRestarts++
+                core.onPlayerChanged()
+            }
+
+            override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) = core.onPlayerChanged()
+            override fun onRepeatModeChanged(repeatMode: Int) = core.onPlayerChanged()
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                core.onPlayerChanged()
+                if (playbackState == Player.STATE_READY) core.onReady()
+            }
+
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int,
+            ) {
+                if (reason == Player.DISCONTINUITY_REASON_SEEK) core.onSeek()
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                // Пока что-то играет, связь не гасится при уходе с экрана.
+                app.sync.setPlaying(isPlaying)
+            }
+        })
+        mainHandler.postDelayed(syncTicker, 1_000)
+        // События связи: Linked, Unlinked, state, tick, command, liked.
+        syncScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            app.sync.service.events.collect { core.onEvent(it) }
+        }
+        (app.sync.service.ui.value.link as? LinkState.Linked)?.let { core.onAlreadyLinked(it.peer, it.role) }
+        // Очередь изменилась (волна догрузила порцию, сменилось `next`): сверить со снимком.
+        syncScope.launch { QueueHolder.state.collect { core.onPlayerChanged() } }
+    }
+
+    /** Порт плеера для [SyncPlayback]: ExoPlayer и очередь приложения. Главный поток. */
+    private inner class ExoSyncPort(private val player: ExoPlayer) : SyncPlayerPort {
+        override fun snapshot(): PlayerSnap {
+            val queue = QueueHolder.state.value
+            val nextIndex = player.nextMediaItemIndex.takeIf { it != C.INDEX_UNSET && it != player.currentMediaItemIndex }
+            return PlayerSnap(
+                track = queue.currentTrack(),
+                playing = player.playWhenReady,
+                positionMs = player.currentPosition.coerceAtLeast(0),
+                buffering = player.playWhenReady && player.playbackState == Player.STATE_BUFFERING,
+                shuffle = player.shuffleModeEnabled,
+                repeat = when (player.repeatMode) {
+                    Player.REPEAT_MODE_ALL -> "all"
+                    Player.REPEAT_MODE_ONE -> "one"
+                    else -> "off"
+                },
+                wave = queue.isWave,
+                restarts = syncRestarts,
+                // У ведомого одна запись в плеере; «Далее» — следующий трек очереди для показа.
+                next = if (sync?.isSlave == true) {
+                    queue.tracks.getOrNull(queue.current + 1)
+                } else {
+                    nextIndex?.let { queue.tracks.getOrNull(it) }
+                },
+            )
+        }
+
+        private fun title(): String {
+            val peer = (app.sync.service.ui.value.link as? LinkState.Linked)?.peer?.name
+            return if (peer != null) "Слушаю с $peer" else "Слушаю вместе"
+        }
+
+        override fun startRemote(track: Track, next: Track?, positionMs: Long, play: Boolean) {
+            val title = title()
+            QueueHolder.chosenId = track.id
+            QueueHolder.set(listOfNotNull(track, next), 0, title, false, ru.plastinka.data.HistoryContext.Other(title))
+            // У ведомого очереди нет: свои режимы выключены, показываются режимы ведущего.
+            player.shuffleModeEnabled = false
+            player.repeatMode = Player.REPEAT_MODE_OFF
+            player.setMediaItem(mediaItemOf(track), positionMs)
+            player.prepare()
+            player.playWhenReady = play
+        }
+
+        override fun updateNext(track: Track, next: Track?) {
+            val state = QueueHolder.state.value
+            QueueHolder.set(listOfNotNull(track, next), 0, state.title, false, state.context)
+        }
+
+        override fun setPlayWhenReady(play: Boolean) {
+            if (play && player.playbackState == Player.STATE_IDLE) player.prepare()
+            player.playWhenReady = play
+        }
+
+        override fun seekTo(positionMs: Long) = player.seekTo(positionMs)
+
+        override fun dropRemoteQueue(track: Track?) {
+            val state = QueueHolder.state.value
+            if (track != null) QueueHolder.set(listOf(track), 0, state.title, false, state.context)
+        }
+
+        override fun perform(action: String) {
+            val wave = QueueHolder.state.value.isWave
+            when (action) {
+                "next" -> if (wave && !player.hasNextMediaItem()) requestNextInWave() else player.seekToNextMediaItem()
+                "previous" -> player.seekToPrevious()
+                "shuffle" -> if (!wave) player.shuffleModeEnabled = !player.shuffleModeEnabled
+                "repeat" -> player.repeatMode = when {
+                    wave -> if (player.repeatMode == Player.REPEAT_MODE_ONE) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
+                    player.repeatMode == Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
+                    player.repeatMode == Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
+                    else -> Player.REPEAT_MODE_OFF
+                }
+                "dislike" -> TrackActions.dislikeCurrent(app, scope, player)
+            }
+        }
+
+        override fun toast(text: String) = this@PlaybackService.toast(text)
+
+        override fun setLike(trackId: String, liked: Boolean) = QueueHolder.setLike(trackId, liked)
     }
 
     // ------------------------------------------------------ кнопки системного плеера
@@ -558,6 +718,10 @@ class PlaybackService : MediaSessionService() {
      */
     private fun handleError(player: Player, error: PlaybackException) {
         val failure = classify(error)
+        if (isSlave) {
+            slaveFailure(player, error, failure)
+            return
+        }
         val current = player.currentMediaItemIndex
         // Ошибку подготовки следующего элемента Media3 сообщает, когда он уже стал текущим.
         val failedId = player.currentMediaItem?.mediaId
@@ -586,6 +750,20 @@ class PlaybackService : MediaSessionService() {
                 if (tryMp3(failedId)) resumeCurrent(player) else skipBroken(player, failure, failedId)
             FailKind.Track -> skipBroken(player, failure, failedId)
         }
+    }
+
+    /**
+     * Трек не включился у ведомого: сообщение, пауза без `state` ведущему, связь не рвётся, ждём
+     * следующий `state`. Следующий трек не включаем: очереди у ведомого нет.
+     */
+    private fun slaveFailure(player: Player, error: PlaybackException, failure: Failure) {
+        val failedId = player.currentMediaItem?.mediaId
+        Log.w(TAG, "ошибка плеера у ведомого: трек $failedId, ${error.errorCodeName}, ${failure.kind}")
+        Diagnostics.event("ошибка плеера у ведомого: трек $failedId, ${error.errorCodeName}, ${failure.kind}")
+        if (failure.kind == FailKind.Auth) AuthEvents.needRelogin()
+        val name = nameOf(failedId)?.let { "«$it»" } ?: "трек"
+        toastLong("Не удалось включить $name на этом устройстве: ${failure.reason}")
+        sync?.quiet { player.pause() }
     }
 
     /** «Прервался» для трека, который уже звучал, иначе «Не удалось включить». */
@@ -731,6 +909,8 @@ class PlaybackService : MediaSessionService() {
      * плагин ничего не делает.
      */
     private fun slopCheck(player: Player) {
+        // У ведомого нет своей очереди: ничего не пропускаем и никому не ставим «Не нравится».
+        if (isSlave) return
         if (!Prefs.slopless) {
             aiSkips = 0
             return
@@ -809,6 +989,11 @@ class PlaybackService : MediaSessionService() {
     private var report: PlayReport? = null
 
     private fun reportBegin() {
+        // Прослушивание ведомого Яндексу сообщает ведущий (§0 спеки): одно прослушивание — один отчёт.
+        if (isSlave) {
+            report = null
+            return
+        }
         val track = QueueHolder.currentTrack()
         report = track?.let {
             PlayReport(
@@ -1194,6 +1379,9 @@ class PlaybackService : MediaSessionService() {
         Prefs.onQualityChanged = null
         Wave.requestTopUp = null
         mainHandler.removeCallbacksAndMessages(null)
+        syncScope.cancel()
+        SyncPlayback.current = null
+        SyncPlayBridge.ui.value = ru.plastinka.sync.SyncPlayUi()
         scope.cancel()
         mediaSession?.run {
             player.release()

@@ -73,19 +73,21 @@ pub enum Category {
     Lyrics,
     Plugins,
     Discord,
+    Together,
     Account,
     About,
 }
 
 impl Category {
     /// Разделы в порядке навигации.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Appearance,
         Self::Sound,
         Self::Equalizer,
         Self::Lyrics,
         Self::Plugins,
         Self::Discord,
+        Self::Together,
         Self::Account,
         Self::About,
     ];
@@ -98,6 +100,7 @@ impl Category {
             Self::Lyrics => "Текст песни",
             Self::Plugins => "Плагины",
             Self::Discord => "Discord",
+            Self::Together => "Слушать вместе",
             Self::Account => "Аккаунт",
             Self::About => "О программе",
         }
@@ -112,6 +115,7 @@ impl Category {
             Self::Lyrics => "Откуда брать текст",
             Self::Plugins => "Встроенные модули, по умолчанию выключены",
             Self::Discord => "Статус «Слушает» в профиле Discord",
+            Self::Together => "Один трек на двух ваших устройствах в одной сети",
             Self::Account => "Профиль и подписка",
             Self::About => "Версия, лицензии, авторство",
         }
@@ -125,6 +129,7 @@ impl Category {
             Self::Lyrics => Icon::Lyrics,
             Self::Plugins => Icon::Plug,
             Self::Discord => Icon::Chat,
+            Self::Together => Icon::Devices,
             Self::Account => Icon::Artist,
             Self::About => Icon::About,
         }
@@ -135,7 +140,7 @@ impl Category {
             Self::Appearance => Group::Main,
             Self::Sound | Self::Equalizer | Self::Lyrics => Group::Player,
             Self::Plugins => Group::Extensions,
-            Self::Discord => Group::Network,
+            Self::Discord | Self::Together => Group::Network,
             Self::Account | Self::About => Group::System,
         }
     }

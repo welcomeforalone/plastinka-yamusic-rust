@@ -19,15 +19,20 @@ import ru.plastinka.Diagnostics
  * чтобы знать, записан ли токен.
  */
 @SuppressLint("StaticFieldLeak", "ApplySharedPref")
-class TokenStore(context: Context) {
+class TokenStore(
+    context: Context,
+    private val file: String = FILE,
+    /** Ключ Keystore. У отдельного хранилища свой, чтобы его восстановление не стёрло вход. */
+    private val masterKeyAlias: String = MasterKey.DEFAULT_MASTER_KEY_ALIAS,
+) {
     private val context = context.applicationContext
     private var prefs: SharedPreferences? = null
     private var failed = false
 
     private fun create(): SharedPreferences = EncryptedSharedPreferences.create(
         context,
-        FILE,
-        MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
+        file,
+        MasterKey.Builder(context, masterKeyAlias).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
         EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
@@ -49,10 +54,10 @@ class TokenStore(context: Context) {
         }
         // Одна попытка восстановления: бьются файл настроек или ключ, пересоздаём оба.
         return try {
-            context.deleteSharedPreferences(FILE)
+            context.deleteSharedPreferences(file)
             val keyStore = KeyStore.getInstance("AndroidKeyStore")
             keyStore.load(null)
-            keyStore.deleteEntry(MasterKey.DEFAULT_MASTER_KEY_ALIAS)
+            keyStore.deleteEntry(masterKeyAlias)
             create().also { Diagnostics.event("хранилище токена: пересоздано") }
         } catch (e: Exception) {
             report("не пересоздалось", e)
@@ -83,6 +88,30 @@ class TokenStore(context: Context) {
     } catch (e: Exception) {
         report("не записалось", e)
         false
+    }
+
+    /** Значение по своему ключу (для отдельных хранилищ вроде секретов сопряжения) или `null`. */
+    fun loadKey(key: String): String? = try {
+        store()?.getString(key, null)
+    } catch (e: Exception) {
+        report("не прочиталось", e)
+        null
+    }
+
+    /** `true` — значение записано. Любой сбой — `false`. */
+    fun saveKey(key: String, value: String): Boolean = try {
+        store(retry = true)?.edit()?.putString(key, value)?.commit() == true
+    } catch (e: Exception) {
+        report("не записалось", e)
+        false
+    }
+
+    fun removeKey(key: String) {
+        try {
+            store()?.edit()?.remove(key)?.commit()
+        } catch (e: Exception) {
+            report("не очистилось", e)
+        }
     }
 
     fun clear() {

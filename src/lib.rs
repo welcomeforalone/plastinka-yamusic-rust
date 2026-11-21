@@ -12,6 +12,7 @@ pub mod player;
 pub mod plugins;
 pub mod relink;
 pub mod storage;
+pub mod sync;
 pub mod texts;
 pub mod ui;
 

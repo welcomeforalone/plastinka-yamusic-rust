@@ -6,11 +6,15 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.StateFlow
 import ru.plastinka.data.Track
 import ru.plastinka.playback.PlaybackService
 import ru.plastinka.playback.QueueHolder
+import ru.plastinka.sync.PlayRole
+import ru.plastinka.sync.SyncPlayBridge
 
 /** Обёртка над MediaController: запустить очередь, управлять воспроизведением. */
 class PlayerController(val controller: MediaController) {
@@ -39,11 +43,34 @@ class PlayerController(val controller: MediaController) {
     private fun isBuffering(): Boolean =
         controller.playWhenReady && controller.playbackState == Player.STATE_BUFFERING
 
-    /** Перемешивание и повтор: настоящие режимы MediaController. */
-    private val _shuffle = MutableStateFlow(controller.shuffleModeEnabled)
+    /**
+     * Перемешивание и повтор: режимы MediaController. Когда это устройство слушает чужую очередь,
+     * показываются режимы ведущего (свои у ведомого выключены, кнопки идут ведущему командами).
+     */
+    private val _shuffle = MutableStateFlow(shownShuffle())
     val shuffle: StateFlow<Boolean> = _shuffle
-    private val _repeatMode = MutableStateFlow(controller.repeatMode)
+    private val _repeatMode = MutableStateFlow(shownRepeat())
     val repeatMode: StateFlow<Int> = _repeatMode
+
+    private fun shownShuffle(): Boolean = SyncPlayBridge.ui.value.let {
+        if (it.role == PlayRole.Slave) it.shuffle else controller.shuffleModeEnabled
+    }
+
+    private fun shownRepeat(): Int = SyncPlayBridge.ui.value.let {
+        if (it.role == PlayRole.Slave) {
+            when (it.repeat) {
+                "all" -> Player.REPEAT_MODE_ALL
+                "one" -> Player.REPEAT_MODE_ONE
+                else -> Player.REPEAT_MODE_OFF
+            }
+        } else {
+            controller.repeatMode
+        }
+    }
+
+    private val modesScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main.immediate,
+    )
 
     init {
         controller.addListener(object : Player.Listener {
@@ -62,13 +89,20 @@ class PlayerController(val controller: MediaController) {
             }
 
             override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
-                _shuffle.value = shuffleModeEnabled
+                _shuffle.value = shownShuffle()
             }
 
             override fun onRepeatModeChanged(repeatMode: Int) {
-                _repeatMode.value = repeatMode
+                _repeatMode.value = shownRepeat()
             }
         })
+        // Режимы ведущего пришли или связь закрылась: перечитать показываемые значения.
+        modesScope.launch {
+            SyncPlayBridge.ui.collect {
+                _shuffle.value = shownShuffle()
+                _repeatMode.value = shownRepeat()
+            }
+        }
     }
 
     fun toggleShuffle() {
@@ -193,8 +227,15 @@ class PlayerController(val controller: MediaController) {
      * Индекс трека, на который перейдёт «Следующий»: с учётом перемешивания и
      * повтора списка. `null` — дальше ничего нет.
      */
-    fun nextIndex(): Int? =
-        controller.nextMediaItemIndex.takeIf { it != C.INDEX_UNSET && it != controller.currentMediaItemIndex }
+    fun nextIndex(): Int? {
+        // Ведомый показывает «Далее» из `next` ведущего: в очереди для показа это вторая запись.
+        val sync = SyncPlayBridge.ui.value
+        if (sync.role == PlayRole.Slave) {
+            val id = sync.next?.id ?: return null
+            return QueueHolder.state.value.tracks.indexOfFirst { it.id == id }.takeIf { it >= 0 }
+        }
+        return controller.nextMediaItemIndex.takeIf { it != C.INDEX_UNSET && it != controller.currentMediaItemIndex }
+    }
 
     /**
      * Индексы уже сыгранных треков перед текущим, ближайший первым (до `limit`):
@@ -217,7 +258,10 @@ class PlayerController(val controller: MediaController) {
     val positionMs: Long get() = controller.currentPosition.coerceAtLeast(0)
     val durationMs: Long get() = controller.duration.coerceAtLeast(0)
 
-    fun release() = controller.release()
+    fun release() {
+        modesScope.cancel()
+        controller.release()
+    }
 
     /** Остановить воспроизведение, очистить очередь плеера и отпустить контроллер. */
     fun stopAndRelease() {
@@ -227,7 +271,7 @@ class PlayerController(val controller: MediaController) {
         } catch (_: Exception) {
             // Контроллер мог уже отключиться — освободить его всё равно нужно.
         }
-        controller.release()
+        release()
     }
 
     companion object {

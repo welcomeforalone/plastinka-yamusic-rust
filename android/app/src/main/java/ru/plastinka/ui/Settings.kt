@@ -65,6 +65,7 @@ fun SettingsScreen(library: LibraryUi, model: AppViewModel) {
             SettingsPage.Equalizer -> EqualizerScreen(onBack = back)
             SettingsPage.Lyrics -> LyricsSettingsScreen(onBack = back)
             SettingsPage.Plugins -> PluginsScreen(onBack = back)
+            SettingsPage.SyncTogether -> SyncSettingsScreen(onBack = back)
             SettingsPage.About -> AboutScreen(onBack = back)
         }
     }
@@ -141,6 +142,9 @@ private fun SettingsMain(
         }
         Spacer(Modifier.height(12.dp))
         GroupCard {
+            SettingsRow(R.drawable.ic_devices, "Слушать вместе", if (Prefs.syncEnabled) "Включено" else "Одна музыка на двух устройствах") {
+                onOpen(SettingsPage.SyncTogether)
+            }
             SettingsRow(R.drawable.ic_plug, "Плагины", "FckCensor, Slopless, CopyTrackName") {
                 onOpen(SettingsPage.Plugins)
             }

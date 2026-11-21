@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.serialization.json.put
 import ru.plastinka.playback.EqControl
 import ru.plastinka.playback.Normalizer
 import ru.plastinka.playback.SpectrumHub
@@ -82,6 +83,11 @@ object Prefs {
     private const val KEY_WAVE_DIVERSITY = "wave_diversity"
     private const val KEY_WAVE_MOOD = "wave_mood"
     private const val KEY_WAVE_LANGUAGE = "wave_language"
+    private const val KEY_SYNC_ENABLED = "sync_enabled"
+    private const val KEY_SYNC_ID = "sync_device_id"
+    private const val KEY_SYNC_NAME = "sync_device_name"
+    private const val KEY_SYNC_DELAY = "sync_delay_ms"
+    private const val KEY_SYNC_PAIRED = "sync_paired"
 
     private var store: SharedPreferences? = null
 
@@ -135,6 +141,30 @@ object Prefs {
     var eq by mutableStateOf(EqState())
         private set
 
+    /** «Слушать вместе»: включено ли (по умолчанию выключено). */
+    var syncEnabled by mutableStateOf(false)
+        private set
+
+    /** Идентификатор устройства (§1): 32 hex, создаётся один раз; не секрет. */
+    var syncDeviceId by mutableStateOf("")
+        private set
+
+    /** Имя устройства для других устройств; по умолчанию модель телефона. */
+    var syncDeviceName by mutableStateOf("")
+        private set
+
+    /** Поправка задержки, мс (−500…+500). */
+    var syncDelayMs by mutableStateOf(0)
+        private set
+
+    /** Сопряжённые устройства: id, имя, ОС (без секретов, §7). */
+    var syncPaired by mutableStateOf<List<ru.plastinka.sync.PairedDevice>>(emptyList())
+        private set
+
+    /** Служба «Слушать вместе» подписывается: включение и выключение запускают и останавливают её. */
+    @Volatile
+    var onSyncEnabledChanged: (() -> Unit)? = null
+
     /** Загрузка при старте приложения. Битое или неизвестное значение — по умолчанию. */
     fun load(context: Context) {
         val prefs = context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -167,11 +197,67 @@ object Prefs {
             all[KEY_WAVE_MOOD] as? String,
             all[KEY_WAVE_LANGUAGE] as? String,
         )
+        syncEnabled = bool(KEY_SYNC_ENABLED, false)
+        syncDelayMs = ((all[KEY_SYNC_DELAY] as? Int) ?: 0).coerceIn(-500, 500)
+        syncDeviceName = (all[KEY_SYNC_NAME] as? String)?.takeIf { it.isNotBlank() } ?: android.os.Build.MODEL.orEmpty()
+        syncDeviceId = (all[KEY_SYNC_ID] as? String)?.takeIf { Regex("[0-9a-f]{32}").matches(it) }
+            ?: java.security.SecureRandom().let { rnd ->
+                ByteArray(16).also { rnd.nextBytes(it) }.joinToString("") { "%02x".format(it) }
+            }.also { prefs.edit().putString(KEY_SYNC_ID, it).apply() }
+        syncPaired = parsePaired(all[KEY_SYNC_PAIRED] as? String)
         FckCensor.enabled = fckCensor
         FckCensor.explicitSearch = fckExplicit
         SpectrumHub.enabled = visualizer
         Normalizer.enabled = normalize
         EqControl.settings = eq.settings.sanitized()
+    }
+
+    fun changeSyncEnabled(on: Boolean) {
+        syncEnabled = on
+        store?.edit()?.putBoolean(KEY_SYNC_ENABLED, on)?.apply()
+        onSyncEnabledChanged?.invoke()
+    }
+
+    fun changeSyncDeviceName(name: String) {
+        syncDeviceName = name.trim().ifEmpty { android.os.Build.MODEL.orEmpty() }
+        store?.edit()?.putString(KEY_SYNC_NAME, syncDeviceName)?.apply()
+    }
+
+    fun changeSyncDelay(ms: Int) {
+        syncDelayMs = ms.coerceIn(-500, 500)
+        store?.edit()?.putInt(KEY_SYNC_DELAY, syncDelayMs)?.apply()
+    }
+
+    fun saveSyncPaired(list: List<ru.plastinka.sync.PairedDevice>) {
+        syncPaired = list
+        val arr = kotlinx.serialization.json.buildJsonArray {
+            for (d in list) {
+                add(
+                    kotlinx.serialization.json.buildJsonObject {
+                        put("id", d.id)
+                        put("name", d.name)
+                        put("os", d.os)
+                    },
+                )
+            }
+        }
+        store?.edit()?.putString(KEY_SYNC_PAIRED, arr.toString())?.apply()
+    }
+
+    /** Битая или пустая запись — пустой список. */
+    private fun parsePaired(text: String?): List<ru.plastinka.sync.PairedDevice> {
+        if (text == null) return emptyList()
+        return try {
+            (kotlinx.serialization.json.Json.parseToJsonElement(text) as? kotlinx.serialization.json.JsonArray)
+                ?.mapNotNull { el ->
+                    val o = el as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
+                    fun f(k: String) = (o[k] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
+                    val id = f("id")?.takeIf { Regex("[0-9a-f]{32}").matches(it) } ?: return@mapNotNull null
+                    ru.plastinka.sync.PairedDevice(id, f("name") ?: "", f("os") ?: "unknown")
+                }.orEmpty()
+        } catch (_: Exception) {
+            emptyList()
+        }
     }
 
     /** Строка акцента (`red` или `#RRGGBB`) или `null`. */
@@ -281,6 +367,8 @@ object Prefs {
         changeSlopDislike(false)
         changeCopyName(false)
         changeCopyFormat(CopyName.DEFAULT_FORMAT)
+        if (syncEnabled) changeSyncEnabled(false)
+        changeSyncDelay(0)
     }
 
     private fun SharedPreferences.Editor.putOrRemove(key: String, value: String?): SharedPreferences.Editor =

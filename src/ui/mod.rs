@@ -45,9 +45,11 @@ use crate::media_controls;
 use crate::net::{self, NetError};
 use crate::player::eq::EqState;
 use crate::plugins::PluginSettings;
-use crate::storage::config::{self, Config};
+use crate::storage::config::{self, Config, SyncConfig};
 use crate::storage::token::{StoredToken, TokenStore};
 use crate::storage::{self, AppDirs, StorageError};
+use crate::sync::service::{Service, ServiceConfig};
+use crate::sync::store::{SecretStore, default_device_name};
 use crate::texts::sentence;
 
 /// Запускает окно. Блокирует поток до закрытия окна.
@@ -432,6 +434,7 @@ pub enum Message {
         api::WaveSettings,
         mini::MiniPrefs,
         EqState,
+        SyncConfig,
     ),
     ToggleSidebar,
     SetAccent(theme::Accent),
@@ -449,6 +452,12 @@ pub enum Message {
     SetLyricsLrclib(bool),
     /// Настройки Discord Rich Presence.
     SetDiscord(discord::Settings),
+    /// «Слушать вместе»: включить или выключить, имя устройства, задержка.
+    SetSyncEnabled(bool),
+    SetSyncName(String),
+    SetSyncDelay(i64),
+    /// Открыть раздел настроек «Слушать вместе».
+    OpenSyncSettings,
     /// Новые настройки плагинов.
     SetPlugins(PluginSettings),
     /// Пользователь разрешил Slopless ставить «Не нравится».
@@ -501,6 +510,15 @@ pub struct App {
     discord_app_id: String,
     /// `discord_app_id` из `config.toml` (своё приложение вместо встроенных).
     discord_override: Option<String>,
+    /// «Слушать вместе»: служба связи, пока включена и открыто главное окно.
+    sync: Option<Service>,
+    /// Настройки `[sync]`: хранит окно, пишет в `config.toml`.
+    sync_cfg: SyncConfig,
+    /// Имя компьютера для имени устройства по умолчанию.
+    sync_default_name: String,
+    /// Служба не запустилась (хранилище паролей и т. п.): повторно не пробуем,
+    /// пока настройку не переключат.
+    sync_failed: bool,
     /// Системный плеер: медиаклавиши и оверлей; только в главном окне.
     media: Option<media_controls::Controls>,
     /// Системный плеер не удалось создать или он отказал: больше не пробуем.
@@ -560,6 +578,10 @@ impl App {
             discord: None,
             discord_app_id: String::new(),
             discord_override: None,
+            sync: None,
+            sync_cfg: SyncConfig::default(),
+            sync_default_name: default_device_name(),
+            sync_failed: false,
             media: None,
             media_failed: false,
             hwnd: None,
@@ -592,6 +614,7 @@ impl App {
                     api::WaveSettings::from_config(&config.wave_settings),
                     mini::MiniPrefs::from_config(&config.mini_player),
                     config.equalizer(),
+                    config.sync.clone(),
                 )
             }),
         ]);
@@ -657,10 +680,13 @@ impl App {
         );
         let task = self.handle(message);
         let task = Task::batch([task, self.sync_mini()]);
-        if discord_relevant {
+        let task = if discord_relevant {
             self.sync_discord();
             self.sync_media();
-        }
+            Task::batch([task, self.sync_together()])
+        } else {
+            task
+        };
         drag_pulse::set_wanted(self.wants_frames());
         // Сетка карточек строится по ширине раздела справа от меню.
         let sidebar = if self.prefs.sidebar_collapsed {
@@ -710,6 +736,82 @@ impl App {
         }
         if let Some(rpc) = &self.discord {
             rpc.set(library.discord_state(self.prefs.discord));
+        }
+    }
+
+    /// «Слушать вместе»: служба создаётся в главном окне после подтверждения
+    /// Плюса (пропуск берётся у библиотеки), если функция включена, и
+    /// убирается при выключении, выходе из аккаунта и закрытии окна (при
+    /// удалении она прощается с собеседником). Здесь же команды библиотеки
+    /// уходят службе.
+    fn sync_together(&mut self) -> Task<Message> {
+        if self.closing {
+            self.sync = None;
+            return Task::none();
+        }
+        let Screen::Main(library) = &mut self.screen else {
+            self.sync = None;
+            return Task::none();
+        };
+        library.together_config(&self.sync_cfg, &self.sync_default_name);
+        if !self.sync_cfg.enabled() {
+            self.sync_failed = false;
+            if self.sync.take().is_some() {
+                library.together_started(None);
+            }
+            return Task::none();
+        }
+        let mut created_id = false;
+        let mut problem = None;
+        if self.sync.is_none()
+            && !self.sync_failed
+            && let Some(permit) = library.media_permit()
+        {
+            let (id, created) = self.sync_cfg.ensure_device_id();
+            let name = self
+                .sync_cfg
+                .device_name
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| self.sync_default_name.clone());
+            #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+            let mut config = ServiceConfig::new(id, name, self.sync_cfg.paired.clone());
+            // Тестовые хуки: только 127.0.0.1 и без mDNS, чтобы не вызывать окно
+            // брандмауэра.
+            #[cfg(debug_assertions)]
+            if storage::test_hooks_active() {
+                config.bind = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+                config.mdns = false;
+            }
+            let started = SecretStore::open()
+                .map_err(|err| err.to_string())
+                .and_then(|store| {
+                    Service::new(&permit, config, store).map_err(|err| err.to_string())
+                });
+            match started {
+                Ok(service) => {
+                    library.together_started(Some(service.device_id().to_owned()));
+                    self.sync = Some(service);
+                    created_id = created;
+                }
+                Err(text) => {
+                    self.sync_failed = true;
+                    problem = Some(format!("Слушать вместе не запустилось: {text}"));
+                }
+            }
+        }
+        if let Some(service) = &self.sync {
+            for command in library.together_take() {
+                service.send(command);
+            }
+        }
+        if let Some(text) = problem {
+            self.show_toast(text);
+        }
+        if created_id {
+            self.save_prefs()
+        } else {
+            Task::none()
         }
     }
 
@@ -978,8 +1080,10 @@ impl App {
                 wave_settings,
                 mini_prefs,
                 eq,
+                sync,
             ) => {
                 self.discord_override = discord_override;
+                self.sync_cfg = sync;
                 self.apply_eq(eq);
                 // Открытый мини-плеер уже стоит где стоит: берём только раскладку
                 // и положение на следующее открытие.
@@ -999,6 +1103,32 @@ impl App {
                     return Task::batch([plugins, self.refresh_size()]);
                 }
                 return plugins;
+            }
+            Message::SetSyncEnabled(on) => {
+                self.sync_cfg.enabled = Some(on);
+                self.sync_failed = false;
+                return self.save_prefs();
+            }
+            Message::SetSyncName(name) => {
+                self.sync_cfg.device_name = (!name.trim().is_empty()).then_some(name);
+                return self.save_prefs();
+            }
+            Message::SetSyncDelay(ms) => {
+                self.sync_cfg.delay_ms =
+                    Some(ms.clamp(-config::SYNC_DELAY_LIMIT, config::SYNC_DELAY_LIMIT));
+                return self.save_prefs();
+            }
+            Message::OpenSyncSettings => {
+                if let Screen::Main(library) = &mut self.screen {
+                    library.close_together_panel();
+                }
+                let open = self
+                    .settings
+                    .update(settings::Msg::Open(settings::Category::Together));
+                let nav = Task::done(Message::Library(library::Message::Nav(
+                    library::Section::Settings,
+                )));
+                return nav.chain(open);
             }
             Message::SetPlugins(plugins) => {
                 // «Не нравится» — запись в аккаунт: сначала согласие.
@@ -1126,6 +1256,15 @@ impl App {
                 }
             }
             Message::Library(message) => {
+                // «Забыть» устройство: из конфига убирает окно, секрет — служба.
+                let forget = if let library::Message::Together(library::TogetherMsg::Forget(id)) =
+                    &message
+                {
+                    self.sync_cfg.forget(id);
+                    self.save_prefs()
+                } else {
+                    Task::none()
+                };
                 if let Screen::Main(library) = &mut self.screen {
                     let http = self.http.as_ref().ok();
                     let (task, effect) = library.update(message, http);
@@ -1151,9 +1290,13 @@ impl App {
                             self.wave_settings = settings;
                             self.save_prefs()
                         }
+                        Some(library::Effect::TogetherPaired(device)) => {
+                            self.sync_cfg.remember(device);
+                            self.save_prefs()
+                        }
                         None => Task::none(),
                     };
-                    return Task::batch([task, covers, effect]);
+                    return Task::batch([task, covers, effect, forget]);
                 }
             }
         }
@@ -1326,6 +1469,7 @@ impl App {
                 self.eq.clone(),
                 self.wave_settings.clone(),
                 self.mini_prefs,
+                self.sync_cfg.clone(),
             ),
             Message::PrefsSaved,
         )
@@ -1393,6 +1537,8 @@ impl App {
     fn close(&mut self) -> Task<Message> {
         // Статус в Discord очищается до закрытия окна и больше не появляется.
         self.discord = None;
+        // Собеседник узнаёт о выходе (`bye shutdown`), служба останавливается.
+        self.sync = None;
         // Мини-плеер закрывается вместе с главным окном: положение
         // запоминается до выхода.
         if self.mini.take().is_some() {
@@ -1855,6 +2001,19 @@ impl App {
         if let Screen::Main(library) = &self.screen {
             subscriptions.push(library.subscription());
         }
+        if let Some(service) = &self.sync {
+            subscriptions.push(
+                Subscription::run_with(
+                    service.events(),
+                    |events: &crate::sync::service::Events| events.stream(),
+                )
+                .map(|event| {
+                    Message::Library(library::Message::Together(library::TogetherMsg::Event(
+                        Box::new(event),
+                    )))
+                }),
+            );
+        }
         if let Some(controls) = &self.media {
             subscriptions.push(
                 Subscription::run_with(controls.events(), |events: &media_controls::Events| {
@@ -1974,6 +2133,12 @@ impl App {
             }
             if let Some(panel) = library.sound_panel(&self.prefs, self.now) {
                 layers = layers.push(panel);
+            }
+            if let Some(panel) = library.together_panel(self.now) {
+                layers = layers.push(panel);
+            }
+            if let Some(dialog) = library.together_pairing_dialog() {
+                layers = layers.push(dialog);
             }
             let scale = (self.prefs.scale as f32 / 100.0).max(0.1);
             let window_size = Size::new(self.size.width / scale, self.size.height / scale);
@@ -2138,6 +2303,7 @@ async fn save_prefs(
     eq: EqState,
     wave_settings: api::WaveSettings,
     mini_prefs: mini::MiniPrefs,
+    sync: SyncConfig,
 ) -> Result<(), Failure> {
     let path = AppDirs::discover()?.config_file();
     storage::blocking(move || {
@@ -2147,6 +2313,7 @@ async fn save_prefs(
         config.set_equalizer(&eq);
         wave_settings.write(&mut config.wave_settings);
         mini_prefs.write(&mut config.mini_player);
+        config.sync = sync;
         config.save(&path)
     })
     .await

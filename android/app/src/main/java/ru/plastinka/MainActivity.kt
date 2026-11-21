@@ -54,6 +54,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        (application as? PlastinkaApp)?.sync?.setForeground(true)
+    }
+
+    override fun onStop() {
+        (application as? PlastinkaApp)?.sync?.setForeground(false)
+        super.onStop()
+    }
+
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         Pip.setInPip(isInPictureInPictureMode)

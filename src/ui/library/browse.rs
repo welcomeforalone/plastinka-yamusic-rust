@@ -303,6 +303,7 @@ impl Library {
             Section::Playlists | Section::Albums | Section::Artists => {
                 self.grid_body(self.collection_top(), self.collection_len())
             }
+            Section::History => self.history_body(),
             _ => Body::EMPTY,
         }
     }

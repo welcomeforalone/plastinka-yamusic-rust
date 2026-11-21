@@ -17,9 +17,14 @@ object AccountHolder {
 
     private val jobs = ConcurrentLinkedQueue<Job>()
 
+    /** Подписка (служба «Слушать вместе»): аккаунт с Плюсом появился или пропал. */
+    @Volatile
+    var onChanged: (() -> Unit)? = null
+
     /** Подписка подтверждена: сообщения о прослушивании разрешены. */
     fun allow(uid: Long) {
         this.uid = uid
+        onChanged?.invoke()
     }
 
     /** Выход или потеря подписки: отправка запрещена, незавершённые отправки отменены. */
@@ -28,6 +33,7 @@ object AccountHolder {
         while (true) {
             jobs.poll()?.cancel() ?: break
         }
+        onChanged?.invoke()
     }
 
     /** Запомнить фоновую отправку, чтобы её можно было отменить при выходе. */

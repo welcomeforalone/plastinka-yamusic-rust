@@ -17,6 +17,10 @@ class PlastinkaApp : Application() {
     lateinit var slopless: ru.plastinka.data.Slopless
         private set
 
+    /** «Слушать вместе»: служба связи между устройствами (запускается только при подтверждённом Плюсе). */
+    lateinit var sync: ru.plastinka.sync.SyncRuntime
+        private set
+
     val http: okhttp3.OkHttpClient by lazy { YandexApi.defaultHttp() }
 
     /** Копии недоступных треков из других релизов (кэш только с номерами в `cacheDir/relink.json`). */
@@ -64,6 +68,7 @@ class PlastinkaApp : Application() {
         )
         Thread { relink.ensureLoaded() }.apply { isDaemon = true }.start()
         removeLegacyAudio()
+        sync = ru.plastinka.sync.SyncRuntime(this).also { it.attach() }
         ru.plastinka.data.PlayLog.init(this)
         // Причины прошлых выходов (Android 11+): читаем в фоне, запуск не задерживаем.
         Thread { Diagnostics.collectExits(this) }.apply { isDaemon = true }.start()

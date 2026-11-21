@@ -7,6 +7,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import ru.plastinka.PlastinkaApp
 import ru.plastinka.data.YandexApi
+import ru.plastinka.sync.SyncPlayback
 
 /**
  * Действия над играющим треком, общие для приложения и системного плеера
@@ -42,6 +43,8 @@ object TrackActions {
         scope.launch {
             try {
                 app.api.setLike(token, uid, trackId, target)
+                // Запрос в аккаунт уже прошёл: второе устройство только обновит своё сердце.
+                SyncPlayback.current?.onLiked(trackId, target)
             } catch (e: CancellationException) {
                 QueueHolder.setLike(trackId, !target, rollback = true)
                 throw e
@@ -76,6 +79,11 @@ object TrackActions {
      * ExoPlayer в сервисе); `null` — только запись.
      */
     fun dislikeCurrent(app: PlastinkaApp, scope: CoroutineScope, player: Player?) {
+        // Ведомый: «Не нравится» выполняет ведущий как свою кнопку (запись в аккаунт и пропуск).
+        SyncPlayback.current?.takeIf { it.isSlave }?.let {
+            it.command("dislike")
+            return
+        }
         val state = QueueHolder.state.value
         val track = state.currentTrack() ?: return
         val uid = AccountHolder.uid ?: return

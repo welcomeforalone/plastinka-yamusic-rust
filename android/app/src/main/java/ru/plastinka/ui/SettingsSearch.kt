@@ -8,6 +8,7 @@ enum class SettingsPage(val title: String) {
     Equalizer("Эквалайзер"),
     Lyrics("Текст песни"),
     Plugins("Плагины"),
+    SyncTogether("Слушать вместе"),
     About("О программе"),
 }
 
@@ -127,6 +128,18 @@ private val SETTINGS_INDEX: List<SettingsEntry> = listOf(
         SettingsPage.Plugins, "CopyTrackName",
         "Пункт «Скопировать название» в меню трека (кнопка «…») и в плеере",
         "копировать название формат artist title album буфер обмена плагин",
+    ),
+    SettingsEntry(
+        SettingsPage.SyncTogether, "Слушать вместе", "Одна музыка на двух устройствах сразу, по Wi-Fi",
+        "синхронно синхронизация устройства телефон компьютер вместе одновременно сопряжение код",
+    ),
+    SettingsEntry(
+        SettingsPage.SyncTogether, "Задержка звука на этом устройстве", "Для Bluetooth-наушников, от −500 до +500 мс",
+        "bluetooth блютус наушники рассинхрон сдвиг синхронизация",
+    ),
+    SettingsEntry(
+        SettingsPage.SyncTogether, "Подключение по адресу", "Если устройства не видят друг друга",
+        "ip адрес брандмауэр wi-fi сеть вручную",
     ),
     SettingsEntry(
         SettingsPage.About, "О программе", "Версия, лицензии, отчёт о сбое",

@@ -67,4 +67,7 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.security.crypto)
     implementation(libs.coil.compose)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlin.test.junit)
 }

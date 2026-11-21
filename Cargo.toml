@@ -11,6 +11,10 @@ name = "Plastinka"
 path = "src/main.rs"
 
 [dependencies]
+# «Слушать вместе» (src/sync): ECDH P-256 и AES-256-GCM. Apache-2.0 OR ISC. Версия и
+# набор features те же, что у reqwest и rustls (без `ring-io` и `untrusted`):
+# второй копии и новых крейтов в сборке нет.
+aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys"] }
 # Подпись запроса get-file-info (HMAC-SHA256 и base64). Все три — MIT/Apache-2.0.
 base64 = "0.23"
 clap = { version = "4.6.7", features = ["derive"] }
@@ -19,7 +23,14 @@ hmac = "0.13"
 iced = { version = "0.14.0", features = ["tokio", "svg", "image-without-codecs", "advanced"] }
 # Только кодеки для обложек: iced декодирует картинки через этот крейт.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+# Адреса своих сетевых интерфейсов для подключения вручную («Слушать вместе»).
+# MIT OR Apache-2.0; та же версия, что тянет mdns-sd.
+if-addrs = "0.15"
 keyring-core = "1.0.1"
+# Обнаружение устройств по mDNS/DNS-SD («Слушать вместе»), Apache-2.0 OR MIT.
+# Без `async` и `logging`; тянет flume, socket-pktinfo и if-addrs (MIT или
+# Apache-2.0), остальное в сборке уже есть.
+mdns-sd = { version = "0.22", default-features = false }
 md-5 = "0.11"
 open = "5.4.5"
 reqwest = { version = "0.13", features = ["form", "json"] }

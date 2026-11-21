@@ -360,7 +360,7 @@ pub(super) struct Wave {
     /// Цвет экрана волны.
     tint: Tint,
     /// Откуда построена очередь, если играет не волна: подпись в таблетке.
-    source: String,
+    pub(super) source: String,
     /// Выбор в меню настроек (в `config.toml`, не в аккаунте).
     settings: WaveSettings,
     /// Меню настроек: открыто или закрыто (плавно).
@@ -463,6 +463,7 @@ fn source_text(key: &ListKey, title: Option<&str>) -> String {
         ListKey::TopTracks(_) => "Топ месяца".to_owned(),
         ListKey::SearchTracks(_) => "Поиск".to_owned(),
         ListKey::Wave => "Моя волна".to_owned(),
+        ListKey::Remote => "Слушаю вместе".to_owned(),
     }
 }
 

@@ -189,7 +189,7 @@ impl TokenStore {
 
 /// Значение отладочного хука из переменной окружения, если оно непустое.
 #[cfg(debug_assertions)]
-fn env_hook(name: &str) -> Option<String> {
+pub(crate) fn env_hook(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -197,7 +197,7 @@ fn env_hook(name: &str) -> Option<String> {
 
 /// Имя сервиса. В отладочной сборке его можно подменить, чтобы тесты не
 /// трогали настоящую запись пользователя.
-fn service_name() -> String {
+pub(crate) fn service_name() -> String {
     #[cfg(debug_assertions)]
     if let Some(name) = env_hook("PLASTINKA_KEYRING_SERVICE") {
         return name;
@@ -206,28 +206,28 @@ fn service_name() -> String {
 }
 
 #[cfg(windows)]
-fn platform_store() -> Result<Arc<CredentialStore>, StorageError> {
+pub(crate) fn platform_store() -> Result<Arc<CredentialStore>, StorageError> {
     let store: Arc<CredentialStore> =
         windows_native_keyring_store::Store::new().map_err(keyring_error)?;
     Ok(store)
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn platform_store() -> Result<Arc<CredentialStore>, StorageError> {
+pub(crate) fn platform_store() -> Result<Arc<CredentialStore>, StorageError> {
     let store: Arc<CredentialStore> =
         zbus_secret_service_keyring_store::Store::new().map_err(keyring_error)?;
     Ok(store)
 }
 
 #[cfg(target_os = "macos")]
-fn platform_store() -> Result<Arc<CredentialStore>, StorageError> {
+pub(crate) fn platform_store() -> Result<Arc<CredentialStore>, StorageError> {
     let store: Arc<CredentialStore> =
         apple_native_keyring_store::keychain::Store::new().map_err(keyring_error)?;
     Ok(store)
 }
 
 #[cfg(not(any(windows, all(unix, not(target_os = "macos")), target_os = "macos")))]
-fn platform_store() -> Result<Arc<CredentialStore>, StorageError> {
+pub(crate) fn platform_store() -> Result<Arc<CredentialStore>, StorageError> {
     Err(StorageError::SecretStoreUnavailable(
         "эта ОС пока не поддерживается".to_owned(),
     ))
@@ -236,18 +236,18 @@ fn platform_store() -> Result<Arc<CredentialStore>, StorageError> {
 /// На Windows запись по умолчанию может ходить между компьютерами домена,
 /// а токену место только на этом компьютере.
 #[cfg(windows)]
-fn platform_modifiers() -> HashMap<&'static str, &'static str> {
+pub(crate) fn platform_modifiers() -> HashMap<&'static str, &'static str> {
     HashMap::from([("persistence", "Local")])
 }
 
 #[cfg(not(windows))]
-fn platform_modifiers() -> HashMap<&'static str, &'static str> {
+pub(crate) fn platform_modifiers() -> HashMap<&'static str, &'static str> {
     HashMap::new()
 }
 
 /// Переводит ошибку хранилища в нашу. Варианты с содержимым записи
 /// (`BadEncoding`, `BadDataFormat`) не выводим: там может быть токен.
-fn keyring_error(err: keyring_core::Error) -> StorageError {
+pub(crate) fn keyring_error(err: keyring_core::Error) -> StorageError {
     use keyring_core::Error as K;
     match err {
         K::NoStorageAccess(_) => StorageError::SecretStoreLocked,

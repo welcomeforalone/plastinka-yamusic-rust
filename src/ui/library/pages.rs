@@ -436,6 +436,10 @@ impl Library {
     ) -> Task<Message> {
         let changed = section != self.section || !self.stack.is_empty();
         self.stack.clear();
+        if section != self.section {
+            // Подсветка в меню переезжает к новому разделу.
+            self.nav_glide = Some((self.section, Instant::now()));
+        }
         self.section = section;
         let mut tasks = Vec::new();
         if changed {
@@ -1027,7 +1031,7 @@ impl Library {
             | ListKey::ArtistPopular(serial)
             | ListKey::ArtistTracks(serial)
             | ListKey::TopTracks(serial) => page_tracks(*serial),
-            ListKey::Detached | ListKey::Wave => None,
+            ListKey::Detached | ListKey::Wave | ListKey::Remote => None,
             ListKey::SearchTracks(generation) => match &self.search.tracks {
                 Some(Load::Ready(paged)) if *generation == self.search.generation => {
                     Some(paged.items.clone())
