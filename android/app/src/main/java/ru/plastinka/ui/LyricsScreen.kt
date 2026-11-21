@@ -50,6 +50,7 @@ import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -96,7 +97,9 @@ internal fun LyricsScreen(
     backEnabled: Boolean = true,
 ) {
     BackHandler(enabled = backEnabled, onBack = onClose)
-    val repo = (LocalContext.current.applicationContext as PlastinkaApp).lyrics
+    val links = rememberTrackLinks(track)
+    val context = LocalContext.current
+    val repo = (context.applicationContext as PlastinkaApp).lyrics
     var attempt by remember { mutableIntStateOf(0) }
     // Состояние привязано к треку и попытке: смена трека сбрасывает его сразу,
     // без кадра со старым текстом.
@@ -106,7 +109,9 @@ internal fun LyricsScreen(
     LaunchedEffect(track.id, attempt) {
         if (state !is LyricsUi.Loading) return@LaunchedEffect
         state = try {
-            LyricsUi.Loaded(repo.load(track))
+            // У недоступного трека с копией текст Яндекса берётся у копии (как `lyrics_source` на десктопе).
+            val copyId = (context.applicationContext as PlastinkaApp).relink.playingCopy(track)?.id
+            LyricsUi.Loaded(repo.load(track, copyId ?: track.id))
         } catch (e: CancellationException) {
             throw e
         } catch (e: LyricsException) {
@@ -114,9 +119,15 @@ internal fun LyricsScreen(
         }
     }
     val progress by rememberProgress(player, track)
+    // Свайп вниз закрывает текст (не весь плеер): за пальцем едет сам экран текста.
+    val dismiss = rememberSwipeOffset()
+    val fling = with(LocalDensity.current) { SWIPE_FLING_VELOCITY.toPx() }
+    val dismissScroll = remember(dismiss, fling) { dismissDownNestedScroll(dismiss, fling, onClose) }
 
     Box(
         Modifier
+            .dismissDownDraggable(dismiss, onClose)
+            .nestedScroll(dismissScroll)
             .fillMaxSize()
             .background(Color.Black)
             .pointerInput(Unit) { detectTapGestures { } },
@@ -140,8 +151,8 @@ internal fun LyricsScreen(
                 Cover(track.coverUrl("100x100"), track.id, 44.dp, 10.dp)
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                    PlText(track.title, PlType.bodyStrong, maxLines = 1)
-                    PlText(track.artistNames, PlType.secondary, Color.White.copy(alpha = 0.7f), maxLines = 1)
+                    PlText(track.displayTitle, PlType.bodyStrong, modifier = links.title, maxLines = 1)
+                    PlText(track.artistNames, PlType.secondary, Color.White.copy(alpha = 0.7f), links.artists, maxLines = 1)
                 }
                 HeartButton(liked, onLike, 24.dp)
             }

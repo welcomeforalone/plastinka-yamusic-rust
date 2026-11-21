@@ -215,7 +215,7 @@ pub fn unix_now() -> u64 {
 /// `None`.
 pub fn system_path() -> Option<PathBuf> {
     // Unit-тесты не трогают файл пользователя.
-    if cfg!(test) || crate::storage::test_hooks_active() {
+    if cfg!(test) || crate::storage::test_hooks_active() || crate::relink::hook_active() {
         return None;
     }
     AppDirs::discover()

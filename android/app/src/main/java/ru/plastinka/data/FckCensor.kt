@@ -188,7 +188,7 @@ class FckCensor(
     private fun loudnessOfTrack(api: YandexApi, token: String, id: String): Loudness? {
         loudnessMemo[id]?.let { return it }
         val loud = try {
-            runBlocking { api.tracks(token, listOf(id)) }.firstOrNull { it.id == id }?.loudness
+            runBlocking { api.tracks(token, listOf(id), placeholders = false) }.firstOrNull { it.id == id }?.loudness
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
             null
@@ -245,7 +245,7 @@ class FckCensor(
             return@withContext ReplaceOutcome("Этот трек не подходит для замены", ok = false)
         }
         chosen.loudness?.let { loudnessMemo[chosen.id] = it }
-        val title = cleanLabel("${chosen.artistNames} — ${chosen.title}")
+        val title = cleanLabel("${chosen.artistNames} — ${chosen.displayTitle}")
         commit(trackId, Replacement.YandexTrack(chosen.id, title), "Звук заменён: $title")
     }
 
@@ -383,7 +383,7 @@ class FckCensor(
         if (loaded == null) withTimeoutOrNull(LIST_WAIT_MS) { refresh() }
         val patch = albumPatch(details.card.id)?.takeIf { it.volumes.isNotEmpty() } ?: return details
         val fetched = try {
-            api.tracks(token, patch.volumes)
+            api.tracks(token, patch.volumes, placeholders = false)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {

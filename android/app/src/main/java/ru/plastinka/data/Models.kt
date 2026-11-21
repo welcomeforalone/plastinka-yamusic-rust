@@ -28,15 +28,24 @@ data class Track(
     val explicit: Boolean = false,
     /** Пометка `contentWarning: clean`: цензурная версия трека (для автопоиска explicit-версии FckCensor). */
     val clean: Boolean = false,
+    /** Версия трека (`version`: «Live», «Remastered»); `null` — версии нет. */
+    val version: String? = null,
 ) {
     /**
-     * Трек можно включить: он доступен или FckCensor даёт ему звук из списка. Как `playable` на
-     * десктопе; чтение идёт через снимок состояния Compose, строки перерисовываются сразу.
+     * Трек можно включить: он доступен, FckCensor даёт ему звук из списка или найдена копия в
+     * другом релизе ([Relink]). Как `playable` на десктопе; чтение идёт через снимок состояния
+     * Compose, строки перерисовываются сразу.
      */
-    val playable: Boolean get() = available || FckCensor.hasSound(id)
+    val playable: Boolean get() = available || FckCensor.hasSound(id) || Relink.hasCopy(id)
 
-    /** Название для показа: без цензуры, если плагин включён и трек есть в списке. */
+    /**
+     * Название без версии (с подменой FckCensor, если она есть). Им ищут: текст песни в LRCLib,
+     * explicit-версию и копию. Для показа служит [displayTitle].
+     */
     val title: String get() = FckCensor.trackPatch(id)?.title ?: sourceTitle
+
+    /** Название для показа: «Название (Версия)», как `display_title` на десктопе. */
+    val displayTitle: String get() = title.let { t -> version?.let { "$t ($it)" } ?: t }
 
     /** Исполнители для показа (см. [title]). Slopless спрашивает и [sourceArtists]. */
     val artists: List<ArtistRef> get() = FckCensor.trackPatch(id)?.artists ?: sourceArtists
@@ -206,7 +215,12 @@ sealed interface StreamResult {
     data class Url(val url: String, val kbps: Int, val codec: String) : StreamResult
     data object Unavailable : StreamResult
     data object Unauthorized : StreamResult
-    data class Error(val message: String) : StreamResult
+    /**
+     * Ссылку получить не вышло. `network` — сбой сети или сервера (запрос стоит повторить),
+     * иначе причина в самом треке (нет ссылки, зашифрован, чужой хост). В `message` — только
+     * тип сбоя или код ответа: текста, где может оказаться адрес или токен, здесь нет.
+     */
+    data class Error(val message: String, val network: Boolean = false) : StreamResult
 }
 
 /** Внутренний «адрес» трека в очереди: plastinka://track/<id>[?alt=<id>]. */

@@ -76,9 +76,21 @@ private val TABS = listOf(
  * возвращает к результатам с прежней прокруткой.
  */
 @Composable
-fun SearchTab(model: AppViewModel, player: PlayerController?) {
+fun SearchTab(
+    model: AppViewModel,
+    player: PlayerController?,
+    request: RouteRequest? = null,
+    onRequestHandled: () -> Unit = {},
+) {
     var stack by rememberSaveable(stateSaver = StackSaver) {
         mutableStateOf<List<CollectionRoute>>(listOf(CollectionRoute.Hub))
+    }
+    // Переход из плеера: маршрут ложится на стек один раз на запрос.
+    LaunchedEffect(request?.seq) {
+        request?.let {
+            stack = pushRouteUnique(stack, it.route)
+            onRequestHandled()
+        }
     }
     val holder = rememberSaveableStateHolder()
     val push = { route: CollectionRoute -> stack = stack + route }
@@ -88,14 +100,16 @@ fun SearchTab(model: AppViewModel, player: PlayerController?) {
             stack = stack.dropLast(1)
         }
     }
-    BackHandler(enabled = stack.size > 1) { pop() }
+    BackHandler(enabled = stack.size > 1 && LocalTabActive.current) { pop() }
 
     val top = stack.lastOrNull() ?: CollectionRoute.Hub
     holder.SaveableStateProvider(stateKey(stack.lastIndex, top)) {
-        if (top == CollectionRoute.Hub) {
-            SearchMain(model, player, onOpen = push)
-        } else {
-            DetailRouteScreen(top, model, player, onBack = pop, push = push)
+        PageAppear(stateKey(stack.lastIndex, top)) {
+            if (top == CollectionRoute.Hub) {
+                SearchMain(model, player, onOpen = push)
+            } else {
+                DetailRouteScreen(top, model, player, onBack = pop, push = push)
+            }
         }
     }
 }
@@ -350,7 +364,7 @@ private fun BestResult(best: SearchBest, onOpen: () -> Unit, onPlay: () -> Unit)
     val radius: androidx.compose.ui.unit.Dp
     when (best) {
         is SearchBest.TrackHit -> {
-            cover = best.track.coverUrl("200x200"); title = best.track.title; kind = "Трек"
+            cover = best.track.coverUrl("200x200"); title = best.track.displayTitle; kind = "Трек"
             seed = best.track.id; radius = 12.dp
         }
         is SearchBest.AlbumHit -> {

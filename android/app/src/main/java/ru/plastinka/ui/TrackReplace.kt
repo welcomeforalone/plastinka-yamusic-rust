@@ -110,7 +110,7 @@ fun FilePickHost(trackId: String, onFinished: () -> Unit) {
 fun ReplaceSheet(track: Track, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val app = context.applicationContext as? PlastinkaApp
-    var query by remember { mutableStateOf("${track.artistNames} ${track.title}".trim()) }
+    var query by remember { mutableStateOf("${track.artistNames} ${track.displayTitle}".trim()) }
     var found by remember { mutableStateOf<ReplaceFound>(ReplaceFound.Idle) }
 
     LaunchedEffect(query) {
@@ -130,7 +130,7 @@ fun ReplaceSheet(track: Track, onDismiss: () -> Unit) {
         found = try {
             val link = TrackLink.trackId(text)
             val tracks = if (link != null) {
-                app.api.tracks(token, listOf(link))
+                app.api.tracks(token, listOf(link), placeholders = false)
             } else {
                 app.api.search(token, SearchKind.Track, text).tracks
             }
@@ -150,7 +150,7 @@ fun ReplaceSheet(track: Track, onDismiss: () -> Unit) {
             ) {
                 PlText("Заменить звук", PlType.title)
                 PlText(
-                    "Вместо «${track.title}» будет играть выбранный трек Яндекса. " +
+                    "Вместо «${track.displayTitle}» будет играть выбранный трек Яндекса. " +
                         "Замена действует везде, в том числе в очереди.",
                     PlType.secondary,
                     Pl.text2,
@@ -211,7 +211,7 @@ private fun ReplaceRow(item: Track, original: String, onPick: () -> Unit) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (item.explicit) ExplicitBadge()
                 PlText(
-                    item.title,
+                    item.displayTitle,
                     PlType.body,
                     if (usable) Pl.text else Pl.textDisabled,
                     maxLines = 1,

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use crate::api::Track;
 use crate::player::Sound;
 use crate::plugins::fckcensor::{Censor, Decision};
+use crate::relink::CopyRef;
 
 /// Откуда список треков. По ключу окно находит список и понимает, что
 /// строка в нём — это играющий трек.
@@ -256,12 +257,25 @@ impl Queue {
 }
 
 /// Какой звук играть вместо показанного трека. `censor` — FckCensor, если
-/// он включён; `explicit_search` — искать ли версию без цензуры.
-pub fn sound(track: &Track, censor: Option<&Censor>, explicit_search: bool) -> Decision {
-    match censor {
+/// он включён; `explicit_search` — искать ли версию без цензуры; `copy` —
+/// копия недоступного трека из другого релиза. FckCensor решает первым
+/// (замена, звук из списка); недоступный трек без его звука играет копию.
+pub fn sound(
+    track: &Track,
+    censor: Option<&Censor>,
+    explicit_search: bool,
+    copy: Option<&CopyRef>,
+) -> Decision {
+    let decision = match censor {
         Some(censor) => censor.sound(track, explicit_search),
         None if track.available => Decision::Play(Sound::Track(track.id.clone())),
         None => Decision::Silent,
+    };
+    match (decision, copy) {
+        (Decision::Silent, Some(copy)) if !track.available => {
+            Decision::Play(Sound::Track(copy.id.clone()))
+        }
+        (decision, _) => decision,
     }
 }
 
@@ -419,10 +433,10 @@ mod tests {
     fn unavailable_track_has_no_sound() {
         let list = tracks(&[true, false]);
         assert_eq!(
-            sound(&list[0], None, true),
+            sound(&list[0], None, true, None),
             Decision::Play(Sound::Track("0".to_owned()))
         );
-        assert_eq!(sound(&list[1], None, true), Decision::Silent);
+        assert_eq!(sound(&list[1], None, true, None), Decision::Silent);
     }
     fn censor_with_list() -> Censor {
         use crate::plugins::fckcensor::{Loaded, SAMPLE_LIST, parse_list};
@@ -457,18 +471,18 @@ mod tests {
 
         let first = list.first().unwrap();
         assert_eq!(
-            sound(first, Some(&censor), false),
+            sound(first, Some(&censor), false, None),
             Decision::Play(Sound::Track("0".to_owned()))
         );
         let listed = list.get(1).unwrap();
         assert_eq!(
-            sound(listed, Some(&censor), false),
+            sound(listed, Some(&censor), false, None),
             Decision::Play(Sound::Track("29238706".to_owned()))
         );
         let gone = list.get(2).unwrap();
-        assert_eq!(sound(gone, Some(&censor), false), Decision::Silent);
+        assert_eq!(sound(gone, Some(&censor), false, None), Decision::Silent);
         // Выключенный плагин (censor = None) замен не знает.
-        assert_eq!(sound(listed, None, false), Decision::Silent);
+        assert_eq!(sound(listed, None, false, None), Decision::Silent);
 
         // Очередь с FckCensor доходит до трека со звуком-заменой.
         let mut rng = Rng::seeded(5);
@@ -497,12 +511,65 @@ mod tests {
         hidden.id = "1".to_owned();
         hidden.available = false;
         assert_eq!(
-            sound(&hidden, Some(&censor), false),
+            sound(&hidden, Some(&censor), false, None),
             Decision::Play(Sound::File("мой-файл.mp3".into()))
         );
     }
 
     fn censor_playable(censor: &Censor, track: &Track) -> bool {
         censor.playable(track)
+    }
+
+    fn copy_of(id: &str) -> CopyRef {
+        CopyRef {
+            id: id.to_owned(),
+            album_id: Some("77".to_owned()),
+        }
+    }
+
+    #[test]
+    fn unavailable_track_plays_its_copy() {
+        let list = tracks(&[true, false]);
+        let copy = copy_of("500");
+        assert_eq!(
+            sound(&list[1], None, true, Some(&copy)),
+            Decision::Play(Sound::Track("500".to_owned()))
+        );
+        // Доступному треку копия не нужна.
+        assert_eq!(
+            sound(&list[0], None, true, Some(&copy)),
+            Decision::Play(Sound::Track("0".to_owned()))
+        );
+    }
+
+    #[test]
+    fn censor_sound_wins_over_copy() {
+        use crate::plugins::fckcensor::Replacement;
+        let mut censor = censor_with_list();
+        let copy = copy_of("500");
+        let mut listed = tracks(&[false]).first().unwrap().clone();
+        listed.id = "2".to_owned();
+        // Звук из списка FckCensor главнее копии.
+        assert_eq!(
+            sound(&listed, Some(&censor), false, Some(&copy)),
+            Decision::Play(Sound::Track("29238706".to_owned()))
+        );
+        // Ручная замена — тоже.
+        censor
+            .replacements
+            .tracks
+            .insert("2".to_owned(), Replacement::file("мой-файл.mp3".into()));
+        assert_eq!(
+            sound(&listed, Some(&censor), false, Some(&copy)),
+            Decision::Play(Sound::File("мой-файл.mp3".into()))
+        );
+        // Нет звука у FckCensor — играет копия.
+        let mut gone = listed.clone();
+        gone.id = "99".to_owned();
+        assert_eq!(
+            sound(&gone, Some(&censor), false, Some(&copy)),
+            Decision::Play(Sound::Track("500".to_owned()))
+        );
+        assert_eq!(sound(&gone, Some(&censor), false, None), Decision::Silent);
     }
 }

@@ -68,8 +68,13 @@ fun LikesTab(library: LibraryUi, model: AppViewModel, player: PlayerController?,
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        if (library.loading) {
+                        if (library.loading || library.likesLoading) {
                             CircularProgressIndicator(Modifier.size(28.dp), color = Pl.accent, strokeWidth = 2.dp)
+                        } else if (library.likesError != null) {
+                            PlText("Не удалось загрузить «Мне нравится»", PlType.bodyStrong, textAlign = TextAlign.Center)
+                            PlText(library.likesError, PlType.secondary, Pl.text2, textAlign = TextAlign.Center)
+                            Spacer(Modifier.height(10.dp))
+                            Pill("Повторить", kind = PillKind.Tonal, onClick = model::retryLikes)
                         } else {
                             PlText("В «Мне нравится» пока пусто", PlType.bodyStrong, textAlign = TextAlign.Center)
                             PlText(

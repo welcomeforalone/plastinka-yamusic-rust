@@ -13,6 +13,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Color, Element, Length, Padding, mouse};
 
+use super::copies::Link;
 use super::pages::{
     AlbumView, ArtistView, Entry, Load, Page, Paged, PlaylistTab, PlaylistView, ShelfId, Target,
 };
@@ -457,7 +458,7 @@ impl Library {
                     (first..last)
                         .filter_map(|row| self.shown_at(row))
                         .filter_map(|index| tracks.get(index))
-                        .filter_map(|track| self.shown(track).cover_uri.as_deref())
+                        .filter_map(|track| self.art_track(track).cover_uri.as_deref())
                         .map(|uri| (Grade::Small, uri)),
                 );
             }
@@ -550,7 +551,7 @@ impl Library {
     ) -> Vec<(Grade, &'a str)> {
         range
             .filter_map(|index| tracks.get(index))
-            .filter_map(|track| self.shown(track).cover_uri.as_deref())
+            .filter_map(|track| self.art_track(track).cover_uri.as_deref())
             .map(|uri| (Grade::Small, uri))
             .collect()
     }
@@ -655,6 +656,8 @@ impl Library {
             .is_some_and(|(selected, at)| selected == key && *at == index);
         let liked = self.liked.contains(&track.id);
         let playable = self.track_playable(track);
+        let link = self.link(track);
+        let art = self.art_track(track);
         let ai = self.ai_track(track);
         let replaced = self.replaced(track);
         let shown = self.shown(track);
@@ -667,12 +670,14 @@ impl Library {
                 track,
                 covers,
                 Flags {
+                    art,
                     current,
                     playing: self.player.playing,
                     buffering: self.player.buffering,
                     hovered,
                     liked,
                     playable,
+                    link,
                     ai,
                     replaced,
                 },
@@ -1721,7 +1726,9 @@ fn album_link<'a>(track: &'a Track, color: Color) -> Element<'a, App> {
 
 /// Состояние строки трека.
 #[derive(Clone, Copy)]
-struct Flags {
+struct Flags<'a> {
+    /// Трек, чья обложка в строке.
+    art: &'a Track,
     current: bool,
     playing: bool,
     buffering: bool,
@@ -1729,6 +1736,8 @@ struct Flags {
     liked: bool,
     /// Можно включить: доступен сам или есть замена FckCensor.
     playable: bool,
+    /// Копия из другого релиза или «Недоступен».
+    link: Link<'a>,
     /// ИИ-трек по Slopless.
     ai: bool,
     /// Ручная замена FckCensor.
@@ -1742,7 +1751,7 @@ fn track_cells<'a>(
     track: &'a Track,
     original: &'a Track,
     covers: &'a Covers,
-    flags: Flags,
+    flags: Flags<'a>,
 ) -> Element<'a, App> {
     let available = flags.playable;
     let (title_color, other_color) = match (available, flags.current) {
@@ -1765,12 +1774,15 @@ fn track_cells<'a>(
             _ => theme::line(number.to_string(), Style::Secondary, theme::TEXT_TERTIARY).into(),
         };
     let cover = if available {
-        widgets::cover(super::cover_art(covers, track), 40.0, widgets::RADIUS_S)
+        widgets::cover(super::cover_art(covers, flags.art), 40.0, widgets::RADIUS_S)
     } else {
         widgets::block(40, 40, theme::SURFACE_3, widgets::RADIUS_S)
     };
     // Метки плагинов — перед названием: длинное название их не вытеснит.
     let mut name = row![].spacing(6).align_y(Alignment::Center);
+    if let Some(tag) = super::copies::tag(flags.link) {
+        name = name.push(tag);
+    }
     if flags.ai {
         name = name.push(widgets::with_tooltip(
             super::plugins::tag("ИИ", theme::ERROR),

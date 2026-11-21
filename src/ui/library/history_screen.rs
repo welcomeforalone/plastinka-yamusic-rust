@@ -19,6 +19,7 @@ use super::super::queue::{ListKey, Queue};
 use super::super::scroll;
 use super::super::theme::{self, Style};
 use super::super::widgets::{self, Kind};
+use super::copies::Link;
 use super::pages::{Page, Target, no_network};
 use super::{
     App, Effect, Failure, FailureKind, Lib, Library, Message, PAGE_SIDE, PAGE_TOP, Section,
@@ -293,7 +294,7 @@ impl Library {
             .flat_map(|day| &day.items)
             .flat_map(|item| &item.tracks)
             .take(MAX_ROWS)
-            .filter_map(|track| self.shown(track).cover_uri.as_deref())
+            .filter_map(|track| self.art_track(track).cover_uri.as_deref())
             .collect()
     }
 
@@ -447,15 +448,28 @@ impl Library {
             liked,
             Some(Lib(Message::ToggleLike(original.clone()))),
         );
-        let (title_color, other_color) = if original.available || track.id != original.id {
+        let link = self.link(original);
+        let (title_color, other_color) = if link != Link::Gone || track.id != original.id {
             (theme::TEXT_PRIMARY, theme::TEXT_SECONDARY)
         } else {
             (theme::TEXT_DISABLED, theme::TEXT_DISABLED)
         };
+        // Метка перед названием: «Копия» или «Недоступен».
+        let mut name = row![].spacing(6).align_y(Alignment::Center);
+        if let Some(tag) = super::copies::tag(link) {
+            name = name.push(tag);
+        }
+        let name = name.push(
+            container(theme::line(track.display_title(), Style::Body, title_color)).clip(true),
+        );
         let content = row![
-            widgets::cover(cover_art(covers, track), COVER, widgets::RADIUS_S),
+            widgets::cover(
+                cover_art(covers, self.art_track(original)),
+                COVER,
+                widgets::RADIUS_S
+            ),
             column![
-                container(theme::line(track.display_title(), Style::Body, title_color)).clip(true),
+                name,
                 container(theme::line(
                     track.artists_text(),
                     Style::Secondary,

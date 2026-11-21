@@ -17,6 +17,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -57,7 +58,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -109,11 +109,13 @@ class Progress(val positionMs: Long, val durationMs: Long) {
 /** Опрос позиции плеера; длительность трека — запасной вариант, пока плеер её не знает. */
 @Composable
 fun rememberProgress(player: PlayerController?, track: Track?): State<Progress> =
-    produceState(Progress(0, 0), player, track?.id) {
-        while (true) {
-            val duration = player?.durationMs?.takeIf { it > 0 } ?: track?.durationMs ?: 0L
-            value = Progress(player?.positionMs ?: 0L, duration)
-            delay(300)
+    remember { mutableStateOf(Progress(0, 0)) }.also { state ->
+        LaunchedEffect(player, track?.id) {
+            while (true) {
+                val duration = player?.durationMs?.takeIf { it > 0 } ?: track?.durationMs ?: 0L
+                state.value = Progress(player?.positionMs ?: 0L, duration)
+                delay(300)
+            }
         }
     }
 
@@ -224,7 +226,10 @@ fun MiniPlayer(
     onLike: () -> Unit,
     onOpen: () -> Unit,
 ) {
-    val playing = player?.isPlaying?.collectAsStateWithLifecycle()?.value ?: false
+    // Свайп влево/вправо — следующий/предыдущий трек (те же вызовы, что у кнопок плеера).
+    val swipe = rememberSwipeOffset()
+    val playing = player?.playWhenReady?.collectAsStateWithLifecycle()?.value ?: false
+    val buffering = player?.buffering?.collectAsStateWithLifecycle()?.value ?: false
     val progress by rememberProgress(player, track)
     val queue by QueueHolder.state.collectAsStateWithLifecycle()
     // VibeColorizer красит только спектр; полоса прогресса, сердце и кнопка — акцент.
@@ -246,6 +251,9 @@ fun MiniPlayer(
     ) {
         Box(
             Modifier
+                .trackSwipe(swipe, player != null, player != null, { player?.previous() }, { player?.next() })
+                // Свайп вверх открывает полноэкранный плеер.
+                .swipeUpToOpen(onOpen)
                 .fillMaxWidth()
                 .height(64.dp)
                 .shadow(
@@ -271,17 +279,19 @@ fun MiniPlayer(
                 Modifier.fillMaxSize().padding(start = 10.dp, end = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Cover(track.coverUrl("100x100"), track.id, 44.dp, 10.dp)
+                Cover(track.coverUrl("100x100"), track.id, 44.dp, 10.dp, fadeMs = COVER_FADE_MS)
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                    PlText(track.title, PlType.secondaryStrong, maxLines = 1)
-                    PlText(track.artistNames, PlType.caption, Pl.text2, maxLines = 1)
+                    // Не помещается — бегущая строка (пауза 2 с, 40 dp/с), как в мини-окне десктопа.
+                    // Название и исполнитель здесь не ссылки: нажатие по карточке открывает плеер.
+                    MarqueeText(track.displayTitle, PlType.secondaryStrong, Pl.text)
+                    MarqueeText(track.artistNames, PlType.caption, Pl.text2)
                 }
                 // Зона нажатия сердца 40 dp: по 3 dp слева и справа дают зазор 12 dp, как в макете.
                 Spacer(Modifier.width(3.dp))
                 HeartButton(liked, onLike, 22.dp)
                 Spacer(Modifier.width(3.dp))
-                PlayButton(40.dp, playing, onClick = { player?.toggle() })
+                PlayButton(40.dp, playing, onClick = { player?.toggle() }, loading = buffering)
             }
             Box(
                 Modifier
@@ -319,7 +329,7 @@ internal fun CoverBackdrop(track: Track, scrim: Float) {
             val blurred = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
             Box(Modifier.fillMaxSize().background(coverPlaceholder(track.id)))
             AsyncImage(
-                model = track.coverUrl("600x600"),
+                model = track.coverUrl("600x600")?.let { fadingCover(it, COVER_FADE_MS) },
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize().then(if (blurred) Modifier.blur(48.dp) else Modifier),
@@ -376,7 +386,8 @@ internal fun PlayerControls(
     playSize: Dp,
     skipSize: Dp,
 ) {
-    val playing = player?.isPlaying?.collectAsStateWithLifecycle()?.value ?: false
+    val playing = player?.playWhenReady?.collectAsStateWithLifecycle()?.value ?: false
+    val buffering = player?.buffering?.collectAsStateWithLifecycle()?.value ?: false
     val shuffle = player?.shuffle?.collectAsStateWithLifecycle()?.value ?: false
     val repeat = player?.repeatMode?.collectAsStateWithLifecycle()?.value ?: Player.REPEAT_MODE_OFF
     // В волне перемешивания нет, а повтор переключается «выкл ↔ трек».
@@ -411,6 +422,7 @@ internal fun PlayerControls(
                 playSize,
                 playing,
                 onClick = { player?.toggle() },
+                loading = buffering,
                 modifier = Modifier.shadow(
                     16.dp,
                     CircleShape,
@@ -491,7 +503,13 @@ private fun QualityBadge(label: String, onClick: () -> Unit) {
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MarqueeText(text: String, style: TextStyle, color: Color) {
+internal fun MarqueeText(
+    text: String,
+    style: TextStyle,
+    color: Color,
+    modifier: Modifier = Modifier,
+    textAlign: TextAlign? = null,
+) {
     Text(
         text = text,
         style = style,
@@ -499,7 +517,8 @@ private fun MarqueeText(text: String, style: TextStyle, color: Color) {
         maxLines = 1,
         softWrap = false,
         overflow = TextOverflow.Clip,
-        modifier = Modifier.basicMarquee(
+        textAlign = textAlign,
+        modifier = modifier.basicMarquee(
             iterations = Int.MAX_VALUE,
             repeatDelayMillis = 2000,
             initialDelayMillis = 2000,
@@ -507,6 +526,9 @@ private fun MarqueeText(text: String, style: TextStyle, color: Color) {
         ),
     )
 }
+
+/** Смена обложки при смене трека, мс (`COVER` на десктопе). */
+internal const val COVER_FADE_MS = 260
 
 @Composable
 fun FullPlayer(
@@ -521,7 +543,12 @@ fun FullPlayer(
 ) {
     val track = queue.currentTrack() ?: return
     BackHandler(enabled = backEnabled, onBack = onClose)
+    val links = rememberTrackLinks(track)
 
+    // Свайп вниз по плееру закрывает его: плеер едет за пальцем, под ним видно приложение.
+    val dismiss = rememberSwipeOffset()
+    // Свайп по обложке: влево — следующий трек, вправо — предыдущий (как кнопки управления).
+    val coverSwipe = rememberSwipeOffset()
     // VibeColorizer красит здесь только спектр; кнопки, перемотка и значки — акцент.
     val tint = rememberTint(queue, track)
     val liked by QueueHolder.likedIds.collectAsStateWithLifecycle()
@@ -541,6 +568,7 @@ fun FullPlayer(
 
     Box(
         Modifier
+            .dismissDownDraggable(dismiss, onClose)
             .fillMaxSize()
             .background(Color.Black)
             // Плеер лежит поверх вкладок: нажатия мимо кнопок не должны
@@ -607,7 +635,13 @@ fun FullPlayer(
                     track.id,
                     side,
                     28.dp,
-                    Modifier.shadow(
+                    Modifier.trackSwipe(
+                        coverSwipe,
+                        canPrevious = player != null,
+                        canNext = player != null,
+                        onPrevious = { player?.previous() },
+                        onNext = { player?.next() },
+                    ).shadow(
                         32.dp,
                         RoundedCornerShape(28.dp),
                         clip = false,
@@ -619,8 +653,8 @@ fun FullPlayer(
             Column(Modifier.padding(horizontal = 28.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        MarqueeText(track.title, PlType.playerTitle, Pl.text)
-                        MarqueeText(track.artistNames, PlType.headline, Color.White.copy(alpha = 0.7f))
+                        MarqueeText(track.displayTitle, PlType.playerTitle, Pl.text, links.title)
+                        MarqueeText(track.artistNames, PlType.headline, Color.White.copy(alpha = 0.7f), links.artists)
                     }
                     Spacer(Modifier.width(4.dp))
                     // Зона нажатия 40 dp шире значка 28: сдвиг, чтобы значок встал у поля 28.
@@ -636,6 +670,7 @@ fun FullPlayer(
                     qualities[track.id]?.label?.let { QualityBadge(it) { showSound = true } }
                     if (rememberIsAi(track)) AiTag(color = Pl.text)
                     if (FckCensor.hasReplacement(track.id)) ReplacedTag()
+                    LinkTag(if (trackLink(track) == RowLink.Copy) RowLink.Copy else RowLink.Plain)
                 }
                 // Зона перемотки начинается на 8 dp выше дорожки: 18 по макету минус 8.
                 Spacer(Modifier.height(10.dp))
@@ -979,6 +1014,8 @@ private fun QueueRow(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
+    val link = trackLink(track)
+    val links = rememberTrackLinks(track)
     Row(
         modifier
             .fillMaxWidth()
@@ -988,7 +1025,7 @@ private fun QueueRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-            Cover(track.coverUrl("100x100"), track.id, 48.dp, 8.dp)
+            Cover(track.artUrl("100x100"), track.id, 48.dp, 8.dp)
             if (current) {
                 Box(
                     Modifier
@@ -1002,11 +1039,11 @@ private fun QueueRow(
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             PlText(
-                track.title,
+                track.displayTitle,
                 if (current) PlType.bodyStrong else PlType.body,
                 when {
                     current -> Pl.accent
-                    enabled -> Pl.text
+                    enabled && link != RowLink.Gone -> Pl.text
                     else -> Pl.textDisabled
                 },
                 maxLines = 1,
@@ -1014,12 +1051,13 @@ private fun QueueRow(
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (track.explicit) ExplicitBadge()
                 if (FckCensor.hasReplacement(track.id)) ReplacedTag()
+                LinkTag(link)
                 PlText(
                     track.artistNames,
                     PlType.secondary,
-                    if (enabled) Pl.text2 else Pl.textDisabled,
+                    if (enabled && link != RowLink.Gone) Pl.text2 else Pl.textDisabled,
                     maxLines = 1,
-                    modifier = Modifier.weight(1f, fill = false),
+                    modifier = Modifier.weight(1f, fill = false).then(links.artists),
                 )
             }
         }

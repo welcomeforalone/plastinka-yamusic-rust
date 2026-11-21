@@ -31,10 +31,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Diagnostics.event("экран: создан (восстановление состояния: ${savedInstanceState != null})")
         enableEdgeToEdge()
         ContextCompat.registerReceiver(this, pipReceiver, Pip.intentFilter(), ContextCompat.RECEIVER_NOT_EXPORTED)
         Pip.setInPip(isInPictureInPictureMode)
-        if (model.loggedIn) model.loadLibrary()
+        // Поворот экрана не перезапускает загрузку: библиотека уже есть или грузится.
+        if (model.loggedIn) model.ensureLibrary()
         setContent {
             PlastinkaTheme {
                 val login by model.login.collectAsStateWithLifecycle()
@@ -69,6 +71,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        Diagnostics.event("экран: уничтожен (закрыт: $isFinishing, смена конфигурации: $isChangingConfigurations)")
         unregisterReceiver(pipReceiver)
         Pip.setInPip(false)
         super.onDestroy()

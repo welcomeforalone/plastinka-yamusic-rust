@@ -1,5 +1,10 @@
 package ru.plastinka.ui
 
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -172,7 +177,10 @@ fun Chip(
     }
 }
 
-/** Круглая кнопка Play/Pause; иконка — 42 % размера. */
+/**
+ * Круглая кнопка Play/Pause; иконка — 42 % размера. `loading` — звук ждёт сеть: по краю
+ * кнопки крутится тонкий ободок, значок остаётся (как спиннер на десктопе).
+ */
 @Composable
 fun PlayButton(
     size: Dp,
@@ -181,9 +189,16 @@ fun PlayButton(
     modifier: Modifier = Modifier,
     color: Color = Pl.accent,
     onColor: Color = Pl.onAccent,
+    loading: Boolean = false,
 ) {
+    val source = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    val shown by rememberPressedColor(color, source)
     Box(
-        modifier.size(size).clip(CircleShape).background(color, CircleShape).clickable(onClick = onClick),
+        modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(shown, CircleShape)
+            .clickable(interactionSource = source, indication = androidx.compose.foundation.LocalIndication.current, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         PlIcon(
@@ -191,7 +206,68 @@ fun PlayButton(
             size * 0.42f,
             onColor,
         )
+        if (loading) {
+            CircularProgressIndicator(
+                Modifier.size(size - 6.dp),
+                color = onColor.copy(alpha = 0.85f),
+                strokeWidth = 2.dp,
+            )
+        }
     }
+}
+
+/**
+ * Цвет круглой кнопки с откликом нажатия: при нажатии темнеет на 16 % (как `Pressed` у кнопки волны
+ * на десктопе) и возвращается, смена цвета 120 мс (`HOVER`).
+ */
+@Composable
+fun rememberPressedColor(
+    base: Color,
+    source: androidx.compose.foundation.interaction.InteractionSource,
+): androidx.compose.runtime.State<Color> {
+    val pressed by source.collectIsPressedAsState()
+    return androidx.compose.animation.animateColorAsState(
+        if (pressed) androidx.compose.ui.graphics.lerp(base, Color.Black, 0.16f) else base,
+        androidx.compose.animation.core.tween(120),
+        label = "pressed",
+    )
+}
+
+/** Запрос картинки обложки с плавной сменой [fadeMs] мс; 0 — обычная ссылка. */
+@Composable
+internal fun fadingCover(url: String, fadeMs: Int): Any {
+    if (fadeMs <= 0) return url
+    val context = androidx.compose.ui.platform.LocalContext.current
+    return remember(url, fadeMs) {
+        coil.request.ImageRequest.Builder(context).data(url).crossfade(fadeMs).build()
+    }
+}
+
+/**
+ * Появление экрана (десктоп: `PAGE` 200 мс, `EaseOutCubic`): при смене [key] новый экран проступает
+ * из фона и поднимается на 12 dp снизу, старый исчезает сразу, без перекрёстного затухания.
+ * Первый показ без движения. Содержимое не пересоздаётся: состояние и загрузки сохраняются,
+ * движение идёт в фазе отрисовки (`graphicsLayer`), без перекомпозиции каждый кадр.
+ */
+@Composable
+fun PageAppear(key: Any?, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    val first = remember { booleanArrayOf(true) }
+    // Новый ключ — новый аниматор, уже на 0: кадра с готовым экраном до начала движения нет.
+    val progress = remember(key) {
+        androidx.compose.animation.core.Animatable(if (first[0]) 1f else 0f).also { first[0] = false }
+    }
+    LaunchedEffect(progress) {
+        if (progress.value < 1f) {
+            progress.animateTo(1f, androidx.compose.animation.core.tween(200, easing = androidx.compose.animation.core.EaseOutCubic))
+        }
+    }
+    val lift = with(androidx.compose.ui.platform.LocalDensity.current) { 12.dp.toPx() }
+    Box(
+        modifier.fillMaxSize().graphicsLayer {
+            alpha = progress.value
+            translationY = (1f - progress.value) * lift
+        },
+    ) { content() }
 }
 
 /** Аккаунт для аватара: адрес картинки (может не быть) и буква-запас. */
@@ -311,12 +387,14 @@ fun Cover(
     size: Dp,
     radius: Dp,
     modifier: Modifier = Modifier,
+    /** Длительность плавной смены картинки, мс (`COVER` 260 мс на десктопе); 0 — без перехода. */
+    fadeMs: Int = 0,
 ) {
     val shape = RoundedCornerShape(radius)
     Box(modifier.size(size).clip(shape).background(coverPlaceholder(seed), shape)) {
         if (url != null) {
             AsyncImage(
-                model = url,
+                model = fadingCover(url, fadeMs),
                 contentDescription = null,
                 modifier = Modifier.size(size),
                 contentScale = androidx.compose.ui.layout.ContentScale.Crop,

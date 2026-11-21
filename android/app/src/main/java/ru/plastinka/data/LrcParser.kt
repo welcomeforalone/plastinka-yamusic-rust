@@ -15,7 +15,7 @@ object LrcParser {
      * порядок по времени, при равенстве — как в тексте.
      */
     fun parse(text: String): List<LyricLine> {
-        val body = text.removePrefix("﻿")
+        val body = text.removePrefix("\uFEFF")
         val out = ArrayList<LyricLine>()
         for (raw in body.lineSequence()) parseLine(raw, out)
         return out.sortedBy { it.timeMs }

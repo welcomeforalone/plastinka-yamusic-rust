@@ -75,20 +75,26 @@ object QueueHolder {
         _likes.value = ids
     }
 
-    fun toggleLike(trackId: String): Boolean {
-        val now = _likes.value.toMutableSet()
-        val liked = if (now.contains(trackId)) {
-            now.remove(trackId); false
-        } else {
-            now.add(trackId); true
-        }
-        _likes.value = now
-        return liked
+    /**
+     * Поставить или убрать сердце у id (не переключить: целевое значение известно в момент нажатия).
+     * `rollback` — откат после ошибки записи: список «Мне нравится» вернёт строку на прежнее место.
+     */
+    fun setLike(trackId: String, liked: Boolean, rollback: Boolean = false) {
+        if (_likes.value.contains(trackId) == liked) return
+        if (rollback && liked) rolledBack.add(trackId)
+        // Откат приходит и с фонового потока сервиса: набор меняем атомарно.
+        _likes.update { if (liked) it + trackId else it - trackId }
     }
+
+    /** Id, чей лайк вернулся откатом (а не новым нажатием): для места строки в списке. */
+    private val rolledBack: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** `true`, если лайк этого id вернулся откатом; отметка снимается. */
+    fun consumeRollback(trackId: String): Boolean = rolledBack.remove(trackId)
 
     /** Убрать сердце только у нас: сервер сам снимает «Нравится» при «Не нравится». */
     fun removeLike(trackId: String) {
-        if (_likes.value.contains(trackId)) _likes.value = _likes.value - trackId
+        if (_likes.value.contains(trackId)) _likes.update { it - trackId }
     }
 
     fun currentTrack(): Track? = _state.value.tracks.getOrNull(_state.value.current)

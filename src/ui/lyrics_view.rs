@@ -4,8 +4,10 @@
 //! небольшим опережением, чтобы строка загоралась вместе с голосом) и просит
 //! перерисовку ровно к началу следующей строки. Прокрутка к активной строке —
 //! по времени (ease-out за 400 мс, при смене цели подхватывается без рывка),
-//! цвет строк меняется за 200 мс. Кадры (~60 в секунду) просятся только пока
-//! идёт доводка; в покое окно не перерисовывается вовсе.
+//! цвет строк меняется за 200 мс. Колесо и тачпад двигают текст сразу, с той
+//! же короткой доводкой, что у остальных списков окна (`scroll::Glide`):
+//! долгая доводка здесь ощущалась как задержка ввода. Кадры (~60 в секунду)
+//! просятся только пока идёт доводка; в покое окно не перерисовывается вовсе.
 
 use std::time::Duration;
 
@@ -19,6 +21,7 @@ use iced::time::Instant;
 use iced::widget::text::{LineHeight, Shaping, Wrapping};
 use iced::{Color, Element, Event, Length, Pixels, Point, Rectangle, Size, Theme, mouse, window};
 
+use super::scroll::{self, Glide};
 use super::theme::{self, Style};
 
 /// Где стоит активная строка: доля высоты сверху.
@@ -37,8 +40,6 @@ const FRAME: Duration = Duration::from_millis(16);
 /// Опережение: строка загорается чуть раньше метки, потому что звук идёт
 /// с задержкой вывода.
 pub const LEAD_MS: u64 = 180;
-/// Пикселей на «строку» колеса мыши.
-const WHEEL_STEP: f32 = 60.0;
 /// Пауза в тексте (пустая строка) выше этой доли высоты строки.
 const PAUSE_HEIGHT: f32 = 0.6;
 
@@ -284,6 +285,16 @@ impl<'a, Message> LyricsView<'a, Message> {
     }
 }
 
+/// Как сейчас движется текст.
+#[derive(Debug, Clone, Copy)]
+enum Motion {
+    /// Следует за активной строкой.
+    Follow(Scroll),
+    /// Листает пользователь: цель не пересчитывается до смены строки. `at` —
+    /// где текст сейчас, `glide` — доводка к цели колеса (`None` — стоит).
+    Manual { at: f32, glide: Option<Glide> },
+}
+
 struct State {
     key: Option<u64>,
     paragraphs: Vec<Plain<Paragraph>>,
@@ -291,9 +302,7 @@ struct State {
     tops: Vec<(f32, f32)>,
     content: f32,
     viewport: f32,
-    scroll: Scroll,
-    /// Пользователь листал колесом: цель не пересчитывается до смены строки.
-    manual: bool,
+    motion: Motion,
     active: Option<usize>,
     /// Какая строка была активной до последней смены и когда сменилась.
     from_active: Option<usize>,
@@ -313,8 +322,7 @@ impl Default for State {
             tops: Vec::new(),
             content: 0.0,
             viewport: 0.0,
-            scroll: Scroll::rest(0.0, now),
-            manual: false,
+            motion: Motion::Follow(Scroll::rest(0.0, now)),
             active: None,
             from_active: None,
             changed: None,
@@ -325,6 +333,22 @@ impl Default for State {
 }
 
 impl State {
+    /// Прокрутка на момент последнего кадра.
+    fn offset(&self) -> f32 {
+        match &self.motion {
+            Motion::Follow(scroll) => scroll.value(self.now),
+            Motion::Manual { at, .. } => *at,
+        }
+    }
+
+    /// Едет ли текст.
+    fn moving(&self, now: Instant) -> bool {
+        match &self.motion {
+            Motion::Follow(scroll) => !scroll.done(now),
+            Motion::Manual { glide, .. } => glide.is_some(),
+        }
+    }
+
     /// Идёт ли смена цвета.
     fn color_running(&self, now: Instant) -> bool {
         self.changed
@@ -402,24 +426,29 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LyricsView<'_, Message>
         match event {
             Event::Mouse(mouse::Event::WheelScrolled { delta }) if cursor.is_over(bounds) => {
                 let max = (state.content - state.viewport).max(0.0);
-                match delta {
-                    // Колесо: плавно к цели, щелчки складываются.
-                    mouse::ScrollDelta::Lines { y, .. } => {
-                        let base = if state.scroll.done(state.now) {
-                            state.scroll.value(state.now)
-                        } else {
-                            state.scroll.target()
+                let here = state.offset();
+                state.motion = match (state.motion, delta) {
+                    // Колесо: цель сдвигается сразу, текст быстро доезжает;
+                    // частые щелчки складываются в одно движение.
+                    (motion, mouse::ScrollDelta::Lines { y, .. }) => {
+                        let mut glide = match motion {
+                            Motion::Manual {
+                                glide: Some(glide), ..
+                            } => glide,
+                            _ => Glide::new(here, here),
                         };
-                        let target = (base - y * WHEEL_STEP).clamp(0.0, max);
-                        state.scroll.retarget(state.now, target);
+                        glide.retarget((glide.target() - y * scroll::WHEEL_STEP).clamp(0.0, max));
+                        Motion::Manual {
+                            at: here,
+                            glide: Some(glide),
+                        }
                     }
                     // Тачпад и так плавный: двигаем сразу.
-                    mouse::ScrollDelta::Pixels { y, .. } => {
-                        let at = (state.scroll.value(state.now) - y).clamp(0.0, max);
-                        state.scroll = Scroll::rest(at, state.now);
-                    }
-                }
-                state.manual = true;
+                    (_, mouse::ScrollDelta::Pixels { y, .. }) => Motion::Manual {
+                        at: (here - y).clamp(0.0, max),
+                        glide: None,
+                    },
+                };
                 shell.capture_event();
                 shell.request_redraw();
             }
@@ -428,7 +457,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LyricsView<'_, Message>
                     (&self.on_press, cursor.position_over(bounds))
                     && !self.times.is_empty()
                 {
-                    let y = position.y - bounds.y + state.scroll.value(state.now);
+                    let y = position.y - bounds.y + state.offset();
                     if let Some(index) = hit(&state.tops, y) {
                         shell.publish(on_press(index));
                         shell.capture_event();
@@ -444,24 +473,39 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LyricsView<'_, Message>
                     state.from_active = state.active;
                     state.active = active;
                     state.changed = (!state.fresh).then_some(now);
-                    state.manual = false;
+                    // Новая строка: текст снова идёт за ней.
+                    if let Motion::Manual { at, .. } = state.motion {
+                        state.motion = Motion::Follow(Scroll::rest(at, now));
+                    }
                 }
-                if !state.manual {
-                    let target = state
-                        .active
-                        .and_then(|index| state.tops.get(index))
-                        .map_or(0.0, |(top, _)| {
-                            scroll_target(*top, state.viewport, state.content)
-                        });
-                    if state.fresh {
+                let target = state
+                    .active
+                    .and_then(|index| state.tops.get(index))
+                    .map_or(0.0, |(top, _)| {
+                        scroll_target(*top, state.viewport, state.content)
+                    });
+                match &mut state.motion {
+                    Motion::Follow(scroll) if state.fresh => {
                         // Первый показ: сразу на месте, без проезда с начала.
-                        state.scroll = Scroll::rest(target, now);
-                    } else if (state.scroll.target() - target).abs() > 0.5 {
-                        state.scroll.retarget(now, target);
+                        *scroll = Scroll::rest(target, now);
+                    }
+                    Motion::Follow(scroll) => {
+                        if (scroll.target() - target).abs() > 0.5 {
+                            scroll.retarget(now, target);
+                        }
+                    }
+                    Motion::Manual { at, glide } => {
+                        if let Some(moving) = glide {
+                            let (pos, done) = moving.step(now);
+                            *at = pos;
+                            if done {
+                                *glide = None;
+                            }
+                        }
                     }
                 }
                 state.fresh = false;
-                let animating = !state.scroll.done(now) || state.color_running(now);
+                let animating = state.moving(now) || state.color_running(now);
                 let playing = self.anchor.is_some_and(|anchor| anchor.playing);
                 let next = position.and_then(|position| until_next(&self.times, position));
                 if let Some(wait) = next_wake(animating, playing, next)
@@ -489,7 +533,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LyricsView<'_, Message>
         let Some(clip) = bounds.intersection(viewport) else {
             return;
         };
-        let offset = state.scroll.value(state.now);
+        let offset = state.offset();
         let progress = state.color_progress(state.now);
         renderer.with_layer(clip, |renderer| {
             for (index, (paragraph, (top, height))) in
@@ -532,11 +576,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LyricsView<'_, Message>
         match (&self.on_press, cursor.position_over(bounds)) {
             (Some(_), Some(position))
                 if !self.times.is_empty()
-                    && hit(
-                        &state.tops,
-                        position.y - bounds.y + state.scroll.value(state.now),
-                    )
-                    .is_some() =>
+                    && hit(&state.tops, position.y - bounds.y + state.offset()).is_some() =>
             {
                 mouse::Interaction::Pointer
             }

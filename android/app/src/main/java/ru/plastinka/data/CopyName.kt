@@ -24,7 +24,7 @@ object CopyName {
         val pattern = if (format.isBlank()) DEFAULT_FORMAT else format
         val values = listOf(
             "{artist}" to track.artistNames.ifEmpty { "Неизвестный исполнитель" },
-            "{title}" to track.title.ifEmpty { "Без названия" },
+            "{title}" to track.displayTitle.ifEmpty { "Без названия" },
             "{album}" to (track.albumTitle ?: ""),
         )
         val out = StringBuilder(pattern.length + 32)

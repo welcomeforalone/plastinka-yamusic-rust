@@ -5,8 +5,10 @@ import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
 import android.util.LruCache
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
-import androidx.compose.runtime.produceState
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import coil.imageLoader
 import coil.request.ImageRequest
@@ -70,7 +72,10 @@ object CoverColors {
 @Composable
 fun rememberCoverColor(url: String?): State<Int?> {
     val context = LocalContext.current
-    return produceState(url?.let(CoverColors::cached), url) {
-        value = if (url == null) null else CoverColors.average(context, url)
+    // Состояние живёт между перерисовками; при смене ссылки цвет считается заново.
+    val state = remember { mutableStateOf(url?.let(CoverColors::cached)) }
+    LaunchedEffect(url) {
+        state.value = if (url == null) null else CoverColors.average(context, url)
     }
+    return state
 }

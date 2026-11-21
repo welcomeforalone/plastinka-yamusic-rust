@@ -23,6 +23,7 @@ use crate::plugins::fckcensor::{
 };
 use crate::plugins::slopless::{self, Label};
 use crate::plugins::{PluginSettings, copy_name, stale, unix_now};
+use crate::relink::{self, Relinks};
 use crate::texts::{plural, sentence};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::queue::ListKey;
@@ -101,6 +102,14 @@ pub enum Msg {
         found: Option<Option<String>>,
     },
     ExplicitSaved,
+    /// Кэш копий недоступных треков с диска.
+    RelinkDisk(Box<relink::Cache>),
+    /// Поиск копии трека `track` закончился.
+    RelinkFound {
+        track: String,
+        lookup: relink::Lookup,
+    },
+    RelinkSaved,
     SlopCached(Box<slopless::Cache>),
     SlopFound(String, Result<slopless::Verdict, slopless::SlopError>),
     SlopSaved,
@@ -139,9 +148,11 @@ fn plugin(msg: Msg) -> Message {
     Message::Plugin(msg)
 }
 
-/// Можно ли включить трек: сам доступен или (с FckCensor) у него есть замена.
-pub(super) fn playable(censor: Option<&Censor>, track: &Track) -> bool {
+/// Можно ли включить трек: сам доступен, у него есть замена FckCensor или
+/// найдена копия из другого релиза.
+pub(super) fn playable(censor: Option<&Censor>, relinks: &Relinks, track: &Track) -> bool {
     censor.map_or(track.available, |censor| censor.playable(track))
+        || relinks.copy_of(&track.id).is_some()
 }
 
 async fn censor_disk() -> CensorDisk {
@@ -156,7 +167,7 @@ impl Library {
     // ---------------------------------------------------------- показ
 
     /// FckCensor включён и список есть.
-    fn censor_on(&self) -> Option<&Censor> {
+    pub(super) fn censor_on(&self) -> Option<&Censor> {
         self.plugins.fckcensor.then_some(&self.censor)
     }
 
@@ -201,7 +212,7 @@ impl Library {
     }
 
     pub(super) fn track_playable(&self, track: &Track) -> bool {
-        playable(self.censor_on(), track)
+        playable(self.censor_on(), &self.relinks, track)
     }
 
     pub(super) fn any_playable(&self, tracks: &[Track]) -> bool {
@@ -368,7 +379,12 @@ impl Library {
 
     /// Откуда брать звук трека.
     pub(super) fn decide(&self, track: &Track) -> Decision {
-        super::queue::sound(track, self.censor_on(), self.plugins.explicit_search)
+        super::queue::sound(
+            track,
+            self.censor_on(),
+            self.plugins.explicit_search,
+            self.relinks.copy_of(&track.id),
+        )
     }
 
     /// Поиск версии без цензуры перед запуском трека. Пока он идёт, звука
@@ -439,7 +455,7 @@ impl Library {
     /// После каждого сообщения: вопросы Slopless о видимых исполнителях и
     /// запись кэшей, когда в них что-то изменилось.
     pub(super) fn pump(&mut self) -> Task<Message> {
-        let mut tasks = Vec::new();
+        let mut tasks = self.relink_pump();
         if self.plugins.slopless && self.io.slop_ready {
             let wanted = self.wanted_artists();
             self.slop.want(
@@ -552,6 +568,19 @@ impl Library {
             }
             Msg::ExplicitSaved => {
                 self.io.explicit_saving = false;
+                None
+            }
+            Msg::RelinkDisk(cache) => {
+                self.relinks.merge_disk(*cache);
+                None
+            }
+            Msg::RelinkFound { track, lookup } => {
+                self.relinks
+                    .finished(&track, lookup, std::time::Instant::now(), unix_now());
+                None
+            }
+            Msg::RelinkSaved => {
+                self.relinks.saving = false;
                 None
             }
             Msg::SlopCached(cache) => {
@@ -1531,19 +1560,40 @@ mod tests {
 
     #[test]
     fn unavailable_track_plays_only_with_a_replacement() {
+        let none = Relinks::default();
         let gone = track("99", false);
-        assert!(!playable(None, &gone));
-        assert!(playable(None, &track("1", true)));
+        assert!(!playable(None, &none, &gone));
+        assert!(playable(None, &none, &track("1", true)));
 
         let mut censor = censor();
-        assert!(!playable(Some(&censor), &gone));
+        assert!(!playable(Some(&censor), &none, &gone));
         // «Снят с каталога» (2): в списке есть трек Яндекса вместо него.
-        assert!(playable(Some(&censor), &track("2", false)));
+        assert!(playable(Some(&censor), &none, &track("2", false)));
         // Ручная замена открывает и недоступный трек.
         censor.replacements.tracks.insert(
             "99".to_owned(),
             Replacement::file(PathBuf::from("мой-файл.flac")),
         );
-        assert!(playable(Some(&censor), &gone));
+        assert!(playable(Some(&censor), &none, &gone));
+    }
+
+    #[test]
+    fn found_copy_makes_an_unavailable_track_playable() {
+        let gone = track("99", false);
+        let mut relinks = Relinks::default();
+        relinks.merge_disk(relink::Cache::default());
+        assert!(!playable(None, &relinks, &gone));
+        let mut copy = track("500", true);
+        copy.album_id = Some("7".to_owned());
+        relinks.finished(
+            "99",
+            relink::Lookup::Found(Box::new(copy)),
+            std::time::Instant::now(),
+            0,
+        );
+        assert!(playable(None, &relinks, &gone));
+        assert!(playable(Some(&censor()), &relinks, &gone));
+        // Копия другого трека не в счёт.
+        assert!(!playable(None, &relinks, &track("98", false)));
     }
 }

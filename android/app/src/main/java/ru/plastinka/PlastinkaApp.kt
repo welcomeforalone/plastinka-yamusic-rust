@@ -19,6 +19,10 @@ class PlastinkaApp : Application() {
 
     val http: okhttp3.OkHttpClient by lazy { YandexApi.defaultHttp() }
 
+    /** Копии недоступных треков из других релизов (кэш только с номерами в `cacheDir/relink.json`). */
+    lateinit var relink: ru.plastinka.data.Relink
+        private set
+
     /** Тексты песен: кэш только в памяти, токен берётся из хранилища при каждом запросе. */
     val lyrics: ru.plastinka.data.LyricsRepository by lazy {
         ru.plastinka.data.LyricsRepository(http) { tokenStore.load() }
@@ -41,6 +45,8 @@ class PlastinkaApp : Application() {
     }
 
     override fun onCreate() {
+        // Первой строкой: обработчик сбоев должен стоять до всего, что может упасть.
+        Diagnostics.install(this)
         super.onCreate()
         // Настройки и акцент грузим до первого кадра и до запуска сервиса воспроизведения.
         ru.plastinka.data.Prefs.load(this)
@@ -49,7 +55,17 @@ class PlastinkaApp : Application() {
         api = YandexApi(http)
         fckCensor = FckCensor.get(http, cacheDir, filesDir, contentResolver)
         slopless = ru.plastinka.data.Slopless.get(http, cacheDir)
+        // Своя область: поиск копий живёт, пока живёт приложение (сервис воспроизведения пересоздаётся).
+        relink = ru.plastinka.data.Relink(
+            api,
+            { tokenStore.load() },
+            java.io.File(cacheDir, "relink.json"),
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO),
+        )
+        Thread { relink.ensureLoaded() }.apply { isDaemon = true }.start()
         removeLegacyAudio()
         ru.plastinka.data.PlayLog.init(this)
+        // Причины прошлых выходов (Android 11+): читаем в фоне, запуск не задерживаем.
+        Thread { Diagnostics.collectExits(this) }.apply { isDaemon = true }.start()
     }
 }

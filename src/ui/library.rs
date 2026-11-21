@@ -8,6 +8,7 @@
 //! только видимые строки.
 
 mod browse;
+mod copies;
 mod history_screen;
 mod lyrics;
 mod mini;
@@ -53,6 +54,7 @@ use crate::player::{self as audio, Command, PlayError, Sound};
 use crate::plugins::PluginSettings;
 use crate::plugins::fckcensor::{Censor, Decision};
 use crate::plugins::slopless::Slop;
+use crate::relink::Relinks;
 use crate::storage::token::StoredToken;
 use crate::texts::{self, sentence};
 use iced::animation::Animation;
@@ -516,6 +518,8 @@ pub struct Library {
     /// Эквалайзер включён (подсветка кнопки в плеере).
     eq_enabled: bool,
     censor: Censor,
+    /// Копии недоступных треков из других релизов.
+    relinks: Relinks,
     slop: Slop,
     io: PluginIo,
     /// Задачи, которые набрались за одно сообщение (поиск версии без
@@ -769,6 +773,7 @@ impl Library {
             normalize: false,
             eq_enabled: false,
             censor: Censor::default(),
+            relinks: Relinks::default(),
             slop: Slop::default(),
             io: PluginIo::default(),
             tasks: Vec::new(),
@@ -804,9 +809,13 @@ impl Library {
         let stations = library.wave_load_stations();
         // Аватар из Яндекс ID грузится отдельно и экран не задерживает.
         let avatar = library.avatar_load(http);
+        // Кэш копий недоступных треков — с диска, в фоне.
+        let relinks = Task::perform(crate::relink::load(), |cache| {
+            Message::Plugin(plugins::Msg::RelinkDisk(Box::new(cache)))
+        });
         (
             library,
-            Task::batch([task, plugins, history, restored, stations, avatar]),
+            Task::batch([task, plugins, history, restored, stations, avatar, relinks]),
         )
     }
 
@@ -1300,8 +1309,9 @@ impl Library {
                 {
                     let current = queue.current;
                     let censor = self.plugins.fckcensor.then_some(&self.censor);
+                    let relinks = &self.relinks;
                     queue.shuffle(Some(current), &mut self.rng, &|track| {
-                        plugins::playable(censor, track)
+                        plugins::playable(censor, relinks, track)
                     });
                 }
                 None
@@ -1511,7 +1521,15 @@ impl Library {
         let shown = self.shown(track);
         let length = shown.duration.or(track.duration);
         // У замены FckCensor другой трек: альбом оригинала к нему не относится.
-        let album = (id == track.id).then(|| track.album_id.clone()).flatten();
+        // У копии недоступного трека — свой альбом.
+        let album = if id == track.id {
+            track.album_id.clone()
+        } else {
+            self.relinks
+                .copy_of(&track.id)
+                .filter(|copy| copy.id == id)
+                .and_then(|copy| copy.album_id.clone())
+        };
         self.plays.begin(
             &id,
             album.as_deref(),
@@ -1819,8 +1837,10 @@ impl Library {
             return 1.0;
         };
         let shown = self.shown(track);
-        let loudness = [shown, track]
+        // Копия недоступного трека: громкость берём у неё, если она в памяти.
+        let loudness = [Some(shown), Some(track), self.relinks.track(id)]
             .into_iter()
+            .flatten()
             .find(|candidate| candidate.id == *id)
             .and_then(|candidate| candidate.loudness);
         api::normalization_gain(loudness, self.normalize)
@@ -1968,10 +1988,11 @@ impl Library {
             (self.player.shuffle, self.player.repeat == Repeat::All)
         };
         let censor = self.plugins.fckcensor.then_some(&self.censor);
+        let relinks = &self.relinks;
         self.queue
             .as_mut()?
             .neighbour(from, forward, shuffle, wrap, &mut self.rng, &|track| {
-                plugins::playable(censor, track)
+                plugins::playable(censor, relinks, track)
             })
     }
 

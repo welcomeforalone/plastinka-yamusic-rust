@@ -8,8 +8,9 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.CommandButton
@@ -23,17 +24,22 @@ import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import ru.plastinka.Diagnostics
 import ru.plastinka.PlastinkaApp
 import ru.plastinka.R
 import ru.plastinka.data.FckCensor
 import ru.plastinka.data.FckSound
+import ru.plastinka.data.Lookup
 import ru.plastinka.data.Prefs
 import ru.plastinka.data.StreamResult
 import ru.plastinka.data.Track
@@ -46,6 +52,7 @@ import ru.plastinka.data.TrackUris
  * как на десктопе.
  * Для очереди-волны шлёт события rotor и догружает порции треков.
  */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class PlaybackService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
@@ -54,13 +61,49 @@ class PlaybackService : MediaSessionService() {
 
     /** Состояние волны: сессия, последняя порция, для событий и догрузки. */
     private object Wave {
+        @Volatile
         var session: String? = null
+
+        @Volatile
         var batchId: String? = null
+
+        @Volatile
         var from: String? = null
+
+        @Volatile
         var started = false
-        var previousTrackId: String? = null
+
+        /** Прошлый трек (объект, а не номер: очередь могла смениться) и время его начала. */
+        var previousTrack: Track? = null
         var startedAtMs: Long? = null
+
+        /** Номер запуска волны: растёт при новом запуске и при уходе из волны. Порция старого запуска не дописывается. */
+        @Volatile
+        var gen = 0
+
+        /** Один запрос порции в полёте. */
         val topUpMutex = Mutex()
+
+        /** Номера треков, уже бывших в этой волне (до [SEEN_LIMIT]); только главный поток. */
+        private val seen = LinkedHashSet<String>()
+
+        /** `true`, если трек в этой волне ещё не встречался (и теперь запомнен). */
+        fun markSeen(id: String): Boolean {
+            if (!seen.add(id)) return false
+            if (seen.size > SEEN_LIMIT) {
+                val iterator = seen.iterator()
+                if (iterator.hasNext()) {
+                    iterator.next()
+                    iterator.remove()
+                }
+            }
+            return true
+        }
+
+        fun resetSeen(ids: List<String>) {
+            seen.clear()
+            ids.forEach { markSeen(it) }
+        }
 
         /** «Не нравится»: следующий переход закрывает трек событием skip, а не trackFinished. */
         @Volatile
@@ -77,6 +120,7 @@ class PlaybackService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
+        Diagnostics.event("служба воспроизведения: запущена")
 
         // Источник данных: plastinka://track/<id> решается в сетевой адрес —
         // сначала FckCensor, потом поток Яндекса. Звук только потоком; единственное
@@ -85,8 +129,19 @@ class PlaybackService : MediaSessionService() {
             PlastinkaDataSource(this, app.http, app.fckCensor::isReplacementFile) { uri -> resolveUri(uri) }
         }
 
+        // Буфер: трек целиком в памяти, как на десктопе (60 с минимум, до 6 минут и 48 МБ).
+        // Только оперативная память: ни SimpleCache, ни файлов (правило 1).
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(60_000, 360_000, 2_500, 5_000)
+            .setTargetBufferBytes(48 * 1024 * 1024)
+            .setPrioritizeTimeOverSizeThresholds(false)
+            .build()
+
         val player = ExoPlayer.Builder(this, PlastinkaRenderersFactory(this))
-            .setMediaSourceFactory(DefaultMediaSourceFactory(source))
+            .setLoadControl(loadControl)
+            .setMediaSourceFactory(
+                DefaultMediaSourceFactory(source).setLoadErrorHandlingPolicy(PlayLoadErrorPolicy()),
+            )
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
@@ -103,6 +158,12 @@ class PlaybackService : MediaSessionService() {
             private var pendingLog = false
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying) {
+                    // Трек зазвучал: счётчик пропусков сломанных треков начинается заново.
+                    skips = 0
+                    silentSkips = 0
+                    playedCurrent = true
+                }
                 if (isPlaying && pendingLog) logPlay()
                 if (isPlaying) reportSounded() else reportPaused()
             }
@@ -113,8 +174,11 @@ class PlaybackService : MediaSessionService() {
             /** Очередь доиграна до конца: последний трек закрывается как «доигран». */
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_ENDED) {
+                    Diagnostics.event("очередь доиграна (волна: ${QueueHolder.state.value.isWave})")
                     reportFinish(ended = true)
                     rememberSounded()
+                    // Очередь волны кончилась: ждём порцию и переходим к первому новому треку.
+                    if (QueueHolder.state.value.isWave) waitForWaveBatch(player)
                 }
             }
 
@@ -133,10 +197,14 @@ class PlaybackService : MediaSessionService() {
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                skipBrokenFile(player)
+                // Всё восстановление синхронно: иначе Media3 успеет снять сервис с переднего плана.
+                handleError(player, error)
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                playedCurrent = false
+                // Пока ждали порцию волны, трек сменился сам или выбран другой: ждать больше нечего.
+                Wave.advanceOnAppend = false
                 // Прежний трек зазвучал и сменился другим: запоминаем для «Недавно играли».
                 rememberSounded()
                 // Звук уже идёт (автопереход к следующему) — пишем сразу, иначе ждём начала звука.
@@ -154,26 +222,31 @@ class PlaybackService : MediaSessionService() {
                 // Slopless: проверить трек после того, как переход закончит обрабатываться.
                 mainHandler.post { slopCheck(player) }
                 applyNormalization()
+                wantAhead(player)
                 reportBegin()
                 if (player.isPlaying) {
                     logPlay()
                     reportSounded()
                 }
                 val now = System.currentTimeMillis()
-                val previousId = Wave.previousTrackId
                 val previousStart = Wave.startedAtMs
-                val previousTrack = previousId
-                    ?.let { id -> QueueHolder.state.value.tracks.firstOrNull { it.id == id } }
+                val previousTrack = Wave.previousTrack
                 // «Не нравится» всегда закрывает трек как пропущенный, как на десктопе.
                 val disliked = Wave.dislikeSkip
                 Wave.dislikeSkip = false
+                val repeated = reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
 
-                Wave.previousTrackId = QueueHolder.currentTrack()?.id
+                Wave.previousTrack = QueueHolder.currentTrack()
                 Wave.startedAtMs = now
 
                 if (!QueueHolder.state.value.isWave) {
+                    // Ушли из волны: последний трек волны закрываем событием до выхода.
+                    if (Wave.session != null && Wave.started) {
+                        closeWaveTrack(previousTrack, previousStart, now, repeated = false, disliked = disliked)
+                    }
                     Wave.session = null
                     Wave.started = false
+                    Wave.gen += 1
                     return
                 }
 
@@ -183,30 +256,32 @@ class PlaybackService : MediaSessionService() {
                     feedback("radioStarted", trackId = null, played = null)
                 }
 
-                // Закрытие прошлого трека: доиграл (≥90 %) — trackFinished, иначе skip.
-                // Повтор трека («Повторять трек») — это доигранный до конца трек и новое начало
-                // того же трека: обычная пара событий, без skip (как на десктопе).
-                if (previousTrack != null && previousStart != null) {
-                    val repeated = reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
-                    val length = previousTrack.durationMs?.let { it / 1000.0 }
-                    val played = if (repeated && length != null) length else (now - previousStart) / 1000.0
-                    val full = !disliked && (repeated || (length?.let { played >= 0.9 * it } ?: false))
-                    feedback(
-                        if (full) "trackFinished" else "skip",
-                        trackId = previousTrack,
-                        played = played,
-                    )
-                }
+                closeWaveTrack(previousTrack, previousStart, now, repeated, disliked)
                 QueueHolder.currentTrack()?.let { feedback("trackStarted", trackId = it) }
                 topUp(player)
             }
         })
 
+        // События обратной связи волны уходят строго по порядку: один потребитель.
+        scope.launch {
+            for (event in feedbackQueue) {
+                app.api.waveFeedback(
+                    event.token, event.session, event.batchId, event.from,
+                    event.type, event.trackId, event.played,
+                )
+            }
+        }
+
         // «Не нравится» на последнем треке просит догрузку у сервиса.
         Wave.requestTopUp = { mainHandler.post { topUp(player) } }
 
         // Смена качества: играющий трек открывается заново с той же позиции.
-        Prefs.onQualityChanged = { mainHandler.post { restartForQuality(player) } }
+        Prefs.onQualityChanged = {
+            mainHandler.post {
+                mp3Retry.clear()
+                restartForQuality(player)
+            }
+        }
 
         // Slopless: ответ пришёл, когда трек уже играет, или настройки сменились — проверить ещё раз.
         Prefs.onSlopChanged = { mainHandler.post { slopCheck(player) } }
@@ -289,7 +364,7 @@ class PlaybackService : MediaSessionService() {
             when (customCommand.customAction) {
                 ACTION_LIKE -> QueueHolder.currentTrack()?.let { TrackActions.toggleLike(app, scope, it.id) }
                 ACTION_DISLIKE -> TrackActions.dislikeCurrent(app, scope, session.player)
-                else -> return Futures.immediateFuture(SessionResult(SessionResult.RESULT_ERROR_NOT_SUPPORTED))
+                else -> return Futures.immediateFuture(SessionResult(androidx.media3.session.SessionError.ERROR_NOT_SUPPORTED))
             }
             return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
         }
@@ -329,7 +404,13 @@ class PlaybackService : MediaSessionService() {
     /** Нормализация громкости по тому, что реально играет у текущего трека (замена FckCensor или он сам). */
     private fun applyNormalization() {
         val track = QueueHolder.currentTrack()
-        Normalizer.onTrack(track?.let(app.fckCensor::loudnessOf))
+        Normalizer.onTrack(
+            track?.let { t ->
+                // Играет копия из другого релиза: её громкость (известна, если искали в этом сеансе).
+                val copy = app.relink.playingCopy(t)
+                if (copy != null) app.relink.copyTrack(copy.id)?.loudness else app.fckCensor.loudnessOf(t)
+            },
+        )
     }
 
     // ------------------------------------------------------ качество
@@ -393,48 +474,223 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
-    // ------------------------------------------------------ свой файл замены
+    // ------------------------------------------------------ ошибки воспроизведения
 
-    /** Сообщения о файлах замены, которые не открылись: номер трека → текст (пишет загрузчик плеера). */
-    private val fileProblems = java.util.concurrent.ConcurrentHashMap<String, String>()
+    /** Сколько сломанных треков подряд пропущено (как `skipped` на десктопе); сбрасывается, когда трек зазвучал. */
+    private var skips = 0
 
     /**
-     * Ошибка плеера: если это файл замены (удалён, доступ потерян), говорим об этом по-русски и
-     * переходим к следующему треку. Другие ошибки не трогаем. Ошибка следующего трека может
-     * прийти, пока играет текущий: тогда пропускаем сломанный трек заранее. Только на главном потоке.
+     * Сколько треков без копии подряд пропущено молча (без сообщения и не в [skips]); предел — число
+     * элементов очереди (перебрали всех). Сбрасывается вместе с [skips].
      */
-    private fun skipBrokenFile(player: Player) {
-        val index = player.currentMediaItemIndex
-        val currentId = player.currentMediaItem?.mediaId
-        val nextId = if (index + 1 < player.mediaItemCount) player.getMediaItemAt(index + 1).mediaId else null
-        // Сначала играющий трек, потом следующий; снимаем только то сообщение, которое показываем.
-        val failedIndex: Int
-        val failedId: String
-        val problem: String
-        val currentProblem = currentId?.let { fileProblems.remove(it) }
-        if (currentProblem != null) {
-            failedIndex = index
-            failedId = currentId.orEmpty()
-            problem = currentProblem
+    private var silentSkips = 0
+
+    /** Текущий трек уже звучал: от этого зависит текст сообщения. */
+    private var playedCurrent = false
+
+    /** Треки, которые после ошибки формата открываем как MP3 (только память). */
+    private val mp3Retry: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    private enum class FailKind { Auth, Audio, Network, Format, Track, Other }
+
+    /** Разбор ошибки плеера: что случилось и что сказать пользователю (текст без адресов и токенов). */
+    private class Failure(
+        val kind: FailKind,
+        val reason: String,
+        val replacementFile: Boolean = false,
+        val noCopy: Boolean = false,
+    )
+
+    private fun classify(error: PlaybackException): Failure {
+        val chain = generateSequence<Throwable>(error) { it.cause }.take(10).toList()
+        if (chain.any { it is StreamAuthException }) return Failure(FailKind.Auth, "вход устарел")
+        chain.filterIsInstance<TrackUnavailableException>().firstOrNull()?.let {
+            return Failure(FailKind.Track, it.reason, it.replacementFile, it.noCopy)
+        }
+        return when (error.errorCode) {
+            PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,
+            PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED,
+            PlaybackException.ERROR_CODE_AUDIO_TRACK_OFFLOAD_INIT_FAILED,
+            PlaybackException.ERROR_CODE_AUDIO_TRACK_OFFLOAD_WRITE_FAILED ->
+                Failure(FailKind.Audio, "не удалось открыть звук устройства")
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+            PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
+            PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
+            PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+            PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
+            PlaybackException.ERROR_CODE_DECODING_FAILED,
+            PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
+            PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED ->
+                Failure(FailKind.Format, "формат звука не читается")
+            PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND,
+            PlaybackException.ERROR_CODE_IO_NO_PERMISSION ->
+                Failure(FailKind.Track, "файл не открывается")
+            else -> {
+                val http = chain.filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()
+                when {
+                    http != null && http.responseCode in PlayLoadErrorPolicy.STALE_LINK_CODES ->
+                        Failure(FailKind.Track, "ссылка на звук не открылась")
+                    http != null -> Failure(FailKind.Network, "сервер не отвечает")
+                    error.errorCode in PlaybackException.ERROR_CODE_IO_UNSPECIFIED..IO_ERRORS_END ->
+                        Failure(FailKind.Network, "нет соединения с сетью")
+                    else -> Failure(FailKind.Other, "ошибка воспроизведения")
+                }
+            }
+        }
+    }
+
+    private fun nameOf(trackId: String?): String? =
+        trackId?.let { id -> QueueHolder.state.value.tracks.firstOrNull { it.id == id }?.displayTitle }
+            ?.takeIf { it.isNotBlank() }
+
+    private fun toastLong(text: String) {
+        mainHandler.post { android.widget.Toast.makeText(applicationContext, text, android.widget.Toast.LENGTH_LONG).show() }
+    }
+
+    /**
+     * Ошибка плеера, как `fn failed` на десктопе. Только на главном потоке и синхронно: любая
+     * отложенная починка даёт Media3 время снять сервис с переднего плана.
+     * Ошибка трека (недоступен, формат не читается, ссылка не открылась) — сообщение и следующий
+     * трек, но не больше [MAX_SKIPS] подряд; ошибка формата сначала даёт один тихий повтор как
+     * MP3. Сеть после всех повторов — пауза на месте (Play продолжит с той же секунды).
+     * Токен не принят — сообщение и событие [AuthEvents.relogin]. Нет звукового вывода — пауза.
+     */
+    private fun handleError(player: Player, error: PlaybackException) {
+        val failure = classify(error)
+        val current = player.currentMediaItemIndex
+        // Ошибку подготовки следующего элемента Media3 сообщает, когда он уже стал текущим.
+        val failedId = player.currentMediaItem?.mediaId
+        // В журнал — только номер трека, код и тип: ссылок и текста исключений здесь нет.
+        Log.w(TAG, "ошибка плеера: трек $failedId, ${error.errorCodeName}, ${failure.kind}")
+        Diagnostics.event("ошибка плеера: трек $failedId, ${error.errorCodeName}, ${failure.kind}")
+        when (failure.kind) {
+            FailKind.Auth -> {
+                player.pause()
+                toastLong("Вход устарел — войдите заново")
+                AuthEvents.needRelogin()
+            }
+            FailKind.Audio -> {
+                player.pause()
+                toastLong("Не удалось открыть звук устройства")
+            }
+            FailKind.Other -> {
+                player.pause()
+                toastLong(stopText(failedId, failure.reason))
+            }
+            FailKind.Network -> {
+                holdInPlace(player)
+                toastLong(stopText(failedId, failure.reason))
+            }
+            FailKind.Format ->
+                if (tryMp3(failedId)) resumeCurrent(player) else skipBroken(player, failure, failedId)
+            FailKind.Track -> skipBroken(player, failure, failedId)
+        }
+    }
+
+    /** «Прервался» для трека, который уже звучал, иначе «Не удалось включить». */
+    private fun stopText(trackId: String?, reason: String): String {
+        val name = nameOf(trackId)
+        return if (playedCurrent) {
+            "${name?.let { "«$it»" } ?: "Трек"} прервался: $reason"
         } else {
-            val nextProblem = nextId?.let { fileProblems.remove(it) } ?: return
-            failedIndex = index + 1
-            failedId = nextId.orEmpty()
-            problem = nextProblem
+            "Не удалось включить ${name?.let { "«$it»" } ?: "трек"}: $reason"
         }
-        val title = QueueHolder.state.value.tracks.firstOrNull { it.id == failedId }?.title.orEmpty()
-        val subject = if (title.isBlank()) "Трек" else "«$title»"
-        android.widget.Toast.makeText(app, "$subject: $problem", android.widget.Toast.LENGTH_LONG).show()
-        val target = failedIndex + 1
-        if (target < player.mediaItemCount) {
-            player.seekTo(target, C.TIME_UNSET)
-            player.prepare()
-            player.play()
-        } else if (failedIndex != index) {
-            // Сломан последний трек, а текущий ещё играет: доигрываем его.
-            player.seekTo(index, player.currentPosition.coerceAtLeast(0))
-            player.prepare()
+    }
+
+    /** Пауза на месте: позиция сохраняется, Play откроет трек заново с той же секунды. */
+    private fun holdInPlace(player: Player) {
+        val position = player.currentPosition.coerceAtLeast(0)
+        player.pause()
+        player.seekTo(player.currentMediaItemIndex, position)
+    }
+
+    /** Открыть текущий трек заново с той же позиции (звук продолжается, если шёл). */
+    private fun resumeCurrent(player: Player) {
+        val position = player.currentPosition.coerceAtLeast(0)
+        player.seekTo(player.currentMediaItemIndex, position)
+        player.prepare()
+    }
+
+    /**
+     * Один молчаливый повтор трека в MP3 после ошибки формата или декодера (как на десктопе).
+     * Только если сейчас играл поток Яндекса не в MP3 и MP3 для этого трека ещё не пробовали.
+     */
+    private fun tryMp3(trackId: String?): Boolean {
+        val id = trackId ?: return false
+        val codec = QualityHolder.state.value[id]?.codec ?: return false
+        if (codec.equals("mp3", ignoreCase = true)) return false
+        if (mp3Retry.size > MP3_RETRY_LIMIT) mp3Retry.clear()
+        if (!mp3Retry.add(id)) return false
+        Log.i(TAG, "повтор трека $id как MP3 после ошибки формата")
+        return true
+    }
+
+    /**
+     * Сломанный (текущий) трек: сообщение и следующий. Следующего нет: в волне ждём порцию,
+     * иначе стоим на месте.
+     */
+    private fun skipBroken(player: Player, failure: Failure, failedId: String?) {
+        if (failure.noCopy) {
+            skipWithoutCopy(player)
+            return
         }
+        val subject = nameOf(failedId)?.let { "«$it»" } ?: "Трек"
+        val message = if (failure.replacementFile) "$subject: ${failure.reason}" else "$subject не играет: ${failure.reason}"
+        val current = player.currentMediaItemIndex
+        // Повтор одного трека пропуск не зацикливает: берём следующий по порядку списка.
+        val mode = if (player.repeatMode == Player.REPEAT_MODE_ONE) Player.REPEAT_MODE_OFF else player.repeatMode
+        val next = player.currentTimeline.getNextWindowIndex(current, mode, player.shuffleModeEnabled)
+        val hasNext = next != C.INDEX_UNSET && next != current
+        when {
+            skips >= MAX_SKIPS -> giveUpOn(player, failedId, failure.reason)
+            hasNext -> {
+                skips++
+                toastLong("$message. Включаем следующий трек")
+                player.seekTo(next, C.TIME_UNSET)
+                player.prepare()
+                player.play()
+            }
+            QueueHolder.state.value.isWave -> {
+                skips++
+                toastLong("$message. Ждём новые треки")
+                waitForWaveBatch(player)
+            }
+            else -> giveUpOn(player, failedId, failure.reason)
+        }
+    }
+
+    /**
+     * Трек без копии не играбелен: пропускаем молча (как на десктопе), из очереди не удаляем.
+     * Все элементы очереди перебрали или дальше нет треков — пауза с одним сообщением.
+     */
+    private fun skipWithoutCopy(player: Player) {
+        val current = player.currentMediaItemIndex
+        val mode = if (player.repeatMode == Player.REPEAT_MODE_ONE) Player.REPEAT_MODE_OFF else player.repeatMode
+        val next = player.currentTimeline.getNextWindowIndex(current, mode, player.shuffleModeEnabled)
+        val hasNext = next != C.INDEX_UNSET && next != current
+        val total = QueueHolder.state.value.tracks.size
+        when {
+            hasNext && silentSkips < total -> {
+                silentSkips++
+                player.seekTo(next, C.TIME_UNSET)
+                player.prepare()
+                player.play()
+            }
+            hasNext -> {
+                toastLong("В очереди не осталось треков, которые можно включить")
+                player.pause()
+            }
+            else -> {
+                toastLong("Дальше в очереди нет треков, которые можно включить")
+                player.pause()
+            }
+        }
+    }
+
+    private fun giveUpOn(player: Player, trackId: String?, reason: String) {
+        toastLong(stopText(trackId, reason))
+        player.pause()
     }
 
     /**
@@ -577,8 +833,15 @@ class PlaybackService : MediaSessionService() {
                 return
             }
             r.trackId = id
-            // У замены другой трек: альбом оригинала к нему не относится.
-            if (id != r.track.id) r.albumId = null
+            val copy = if (id == r.track.id) app.relink.playingCopy(r.track) else null
+            if (copy != null) {
+                // Играет копия из другого релиза: id и альбом копии (как `report_begin` на десктопе).
+                r.trackId = copy.id
+                r.albumId = copy.albumId
+            } else if (id != r.track.id) {
+                // У замены другой трек: альбом оригинала к нему не относится.
+                r.albumId = null
+            }
         }
         if (r.resumedAt == null) r.resumedAt = System.currentTimeMillis()
         if (!r.startedSent) {
@@ -626,70 +889,194 @@ class PlaybackService : MediaSessionService() {
         AccountHolder.track(job)
     }
 
-    /** Событие волны: ошибки молча глотаем, как на десктопе. */
+    /** Событие обратной связи волны: данные сессии берутся в момент события, отправка идёт по очереди. */
+    private class FeedbackEvent(
+        val token: String,
+        val session: String,
+        val batchId: String,
+        val from: String?,
+        val type: String,
+        val trackId: String?,
+        val played: Double?,
+    )
+
+    private val feedbackQueue = Channel<FeedbackEvent>(Channel.UNLIMITED)
+
+    /** Событие волны: ошибки молча глотаем, как на десктопе; порядок событий сохраняется. */
     private fun feedback(type: String, trackId: Track? = null, played: Double? = null) {
         val token = app.tokenStore.load() ?: return
         val session = Wave.session ?: return
         val batchId = Wave.batchId ?: return
         val track = trackId?.let(app.api::waveTrackId)
-        scope.launch {
-            app.api.waveFeedback(token, session, batchId, Wave.from, type, track, played)
-        }
+        feedbackQueue.trySend(FeedbackEvent(token, session, batchId, Wave.from, type, track, played))
     }
 
-    /** Впереди меньше двух треков — просим порцию; сессия протухла — новую. */
-    private fun topUp(player: Player) {
-        val token = app.tokenStore.load() ?: return
-        val state = QueueHolder.state.value
-        if (!state.isWave) return
-        scope.launch {
-            Wave.topUpMutex.withLock {
-                val remaining = state.tracks.size - (state.current + 1)
-                if (remaining > 2) return@withLock
-                try {
-                    val queueIds = state.tracks
-                        .subList(0, state.current + 1)
-                        .map(app.api::waveTrackId)
-                    val batch = app.api.waveTracks(token, Wave.session.orEmpty(), queueIds)
-                    if (batch == null) {
-                        // Сессия кончилась: новая с нуля (с выбранными настройками), её треки догружаем.
-                        val fresh = app.api.startWave(token, Prefs.waveSettings.seeds())
-                        Wave.session = fresh.session
-                        Wave.batchId = fresh.batchId
-                        Wave.from = fresh.from
-                        append(player, fresh)
-                        Log.i(TAG, "волна: сессия обновлена")
-                    } else {
-                        Wave.batchId = batch.batchId
-                        if (batch.from != null) Wave.from = batch.from
-                        append(player, batch)
-                        Log.i(TAG, "волна: порция ${batch.tracks.size} треков")
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "волна: догрузка не удалась: ${e.message}")
-                }
-            }
-        }
+    /**
+     * Закрытие прошлого трека волны: доиграл (>=90 %) — trackFinished, иначе skip.
+     * Повтор трека («Повторять трек») — это доигранный до конца трек и новое начало
+     * того же трека: обычная пара событий, без skip (как на десктопе).
+     */
+    private fun closeWaveTrack(
+        previousTrack: Track?,
+        previousStart: Long?,
+        now: Long,
+        repeated: Boolean,
+        disliked: Boolean,
+    ) {
+        if (previousTrack == null || previousStart == null) return
+        val length = previousTrack.durationMs?.let { it / 1000.0 }
+        val played = if (repeated && length != null) length else (now - previousStart) / 1000.0
+        val full = !disliked && (repeated || (length?.let { played >= 0.9 * it } ?: false))
+        feedback(
+            if (full) "trackFinished" else "skip",
+            trackId = previousTrack,
+            played = played,
+        )
     }
 
-    private fun append(player: Player, batch: ru.plastinka.data.YandexApi.WaveBatch) {
-        if (batch.tracks.isEmpty()) return
-        // Плеером можно управлять только с главного потока, а догрузка идёт в фоне.
+    /** Выполнить на главном потоке и дождаться результата (плеером можно управлять только оттуда). */
+    private suspend fun <T> onMain(block: () -> T): T {
+        val done = CompletableDeferred<T>()
         mainHandler.post {
-            QueueHolder.append(batch.tracks)
-            player.addMediaItems(batch.tracks.map(::mediaItemOf))
-            // «Не нравится» застало конец очереди: переходим к первому новому треку.
-            if (Wave.advanceOnAppend && player.hasNextMediaItem()) {
-                Wave.advanceOnAppend = false
-                player.seekToNextMediaItem()
-                player.play()
+            try {
+                done.complete(block())
+            } catch (e: Exception) {
+                done.completeExceptionally(e)
+            }
+        }
+        return done.await()
+    }
+
+    /** Снимок состояния волны, снятый на главном потоке. */
+    private class WaveSnapshot(
+        val gen: Int,
+        val state: QueueHolder.State,
+        val waiting: Boolean,
+        val session: String?,
+    )
+
+    /** Ждём порцию: переход к первому новому треку сделает дописывание порции. */
+    private fun waitForWaveBatch(player: Player) {
+        Wave.advanceOnAppend = true
+        topUp(player)
+    }
+
+    /** Впереди меньше трёх треков (или ждём порцию) — просим порцию; сессия протухла — новую. */
+    private fun topUp(player: Player) {
+        if (!QueueHolder.state.value.isWave) return
+        val token = app.tokenStore.load() ?: return
+        scope.launch {
+            // Одна догрузка в полёте: пока идёт эта, она сама перечитывает состояние очереди.
+            if (!Wave.topUpMutex.tryLock()) return@launch
+            try {
+                fillWave(player, token)
+            } finally {
+                Wave.topUpMutex.unlock()
             }
         }
     }
 
-    /** plastinka://track/<id> → сетевой адрес потока. */
-    private fun resolveUri(uri: String): String? {
-        val trackId = TrackUris.trackIdOf(uri) ?: return null
+    /**
+     * Догрузка в цикле, пока впереди ≤ [TOP_UP_AHEAD] треков (или ждём порцию) и волна та же.
+     * Состояние очереди читается на главном потоке уже под мьютексом. Сбой — повтор с паузами
+     * 2, 4, 8, 16, 30 с; порция, целиком состоявшая из уже игравших треков, — сразу ещё запрос,
+     * но не больше [MAX_EMPTY] раз подряд.
+     */
+    private suspend fun fillWave(player: Player, token: String) {
+        var startGen: Int? = null
+        var empty = 0
+        var failures = 0
+        while (true) {
+            val snap = onMain {
+                WaveSnapshot(Wave.gen, QueueHolder.state.value, Wave.advanceOnAppend, Wave.session)
+            }
+            if (!snap.state.isWave) return
+            if (startGen == null) startGen = snap.gen
+            if (snap.gen != startGen) return
+            val remaining = snap.state.tracks.size - (snap.state.current + 1)
+            if (remaining > TOP_UP_AHEAD && !snap.waiting) return
+            val applied: Int
+            try {
+                val queueIds = snap.state.tracks.take(snap.state.current + 1).map(app.api::waveTrackId)
+                val batch = app.api.waveTracks(token, snap.session.orEmpty(), queueIds)
+                // Сессия кончилась: новая с нуля (с выбранными настройками), её треки догружаем.
+                val ready = batch ?: app.api.startWave(token, Prefs.waveSettings.seeds())
+                val renewed = batch == null
+                applied = onMain { applyBatch(player, snap.gen, ready, renewed) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // В журнал — только тип сбоя: текст исключения может содержать адрес запроса.
+                Log.w(TAG, "волна: догрузка не удалась: ${e.javaClass.simpleName}")
+                Diagnostics.event("волна: догрузка не удалась: ${e.javaClass.simpleName}")
+                if (snap.waiting && failures == 0) toast("Не удалось загрузить волну, пробуем ещё раз")
+                val pause = TOP_UP_RETRY_MS.getOrElse(failures) { TOP_UP_RETRY_MS.last() }
+                failures++
+                delay(pause)
+                continue
+            }
+            failures = 0
+            // Порция устарела (волну перезапустили или из неё ушли): ничего не дописано.
+            if (applied < 0) return
+            if (applied > 0) {
+                empty = 0
+                continue
+            }
+            empty++
+            if (empty > MAX_EMPTY) {
+                onMain { giveUpWaiting(player) }
+                return
+            }
+        }
+    }
+
+    /**
+     * Дописать порцию в очередь и плеер (главный поток). Возвращает, сколько треков дописано:
+     * `-1` — порция устарела, `0` — все треки в ней уже были в этой волне (отсев как `Seen` на десктопе).
+     */
+    private fun applyBatch(player: Player, gen: Int, batch: ru.plastinka.data.YandexApi.WaveBatch, renewed: Boolean): Int {
+        if (gen != Wave.gen || !QueueHolder.state.value.isWave) return -1
+        if (renewed) {
+            Wave.session = batch.session
+            Wave.batchId = batch.batchId
+            Wave.from = batch.from
+            // Новая сессия: следующий переход трека снова шлёт radioStarted.
+            Wave.started = false
+            Log.i(TAG, "волна: сессия обновлена")
+        } else {
+            Wave.batchId = batch.batchId
+            if (batch.from != null) Wave.from = batch.from
+        }
+        val fresh = batch.tracks.filter { Wave.markSeen(it.id) }
+        Log.i(TAG, "волна: порция ${batch.tracks.size} треков, новых ${fresh.size}")
+        if (fresh.isEmpty()) return 0
+        val first = player.mediaItemCount
+        QueueHolder.append(fresh)
+        player.addMediaItems(fresh.map(::mediaItemOf))
+        // Ждали порцию (последний трек, конец очереди, «Не нравится»): переходим к первому новому треку.
+        if (Wave.advanceOnAppend) {
+            Wave.advanceOnAppend = false
+            player.seekTo(first, C.TIME_UNSET)
+            player.prepare()
+            player.play()
+        }
+        return fresh.size
+    }
+
+    /** Новых треков волна не нашла: ждать порцию дальше бесполезно. */
+    private fun giveUpWaiting(player: Player) {
+        if (!Wave.advanceOnAppend) return
+        Wave.advanceOnAppend = false
+        Diagnostics.event("волна: новых треков нет, ждать порцию перестали")
+        toast("Волна пока не нашла новых треков. Попробуйте позже")
+        val state = player.playbackState
+        if (state == Player.STATE_IDLE || state == Player.STATE_ENDED) player.pause()
+    }
+
+    /** plastinka://track/<id> → сетевой адрес потока или причина, почему его нет. */
+    private fun resolveUri(uri: String): ResolvedSound {
+        val trackId = TrackUris.trackIdOf(uri)
+            ?: return ResolvedSound.Failed(TrackUnavailableException("адрес трека не распознан"))
         return resolve(trackId)
     }
 
@@ -698,53 +1085,111 @@ class PlaybackService : MediaSessionService() {
      * explicit-версия — поиск ждёт не дольше 10 с), иначе поток самого трека. Значок качества
      * относится к треку очереди, но показывает кодек и битрейт того потока, который играет.
      */
-    private fun resolve(trackId: String): String? {
-        val token = app.tokenStore.load() ?: return null
+    private fun resolve(trackId: String): ResolvedSound {
+        val token = app.tokenStore.load() ?: return ResolvedSound.Failed(StreamAuthException())
         val queued = QueueHolder.state.value.tracks.firstOrNull { it.id == trackId }
         return when (val sound = app.fckCensor.resolveSound(app.api, token, trackId, queued)) {
             is FckSound.Direct -> {
                 QualityHolder.clear(trackId)
-                sound.url
+                ResolvedSound.Url(sound.url)
             }
             is FckSound.File -> {
-                // Свой файл: значка качества нет; если он недоступен, плеер получит ошибку и
-                // [skipBrokenFile] скажет пользователю, что случилось.
+                // Свой файл: значка качества нет; если он недоступен, плеер получит ошибку
+                // с причиной, и [handleError] скажет пользователю, что случилось.
                 QualityHolder.clear(trackId)
                 val problem = app.fckCensor.checkFile(sound.uri)
-                if (problem != null) fileProblems[trackId] = problem else fileProblems.remove(trackId)
-                if (problem == null) sound.uri else null
+                if (problem != null) {
+                    ResolvedSound.Failed(TrackUnavailableException(problem, replacementFile = true))
+                } else {
+                    ResolvedSound.Url(sound.uri)
+                }
             }
-            is FckSound.Yandex -> streamOf(token, trackId, sound.id)
+            is FckSound.Yandex ->
+                // FckCensor ничего не меняет, а трек недоступен: играет его копия из другого релиза.
+                if (sound.id == trackId && queued != null && !queued.available) {
+                    relinkedStream(token, queued)
+                } else {
+                    streamOf(token, trackId, sound.id)
+                }
             FckSound.Pending -> streamOf(token, trackId, trackId)
         }
     }
 
-    /** Поток трека Яндекса [streamId] для трека очереди [trackId]. */
-    private fun streamOf(token: String, trackId: String, streamId: String): String? =
-        when (val result = app.api.streamUrlBlocking(token, streamId)) {
-            is StreamResult.Url -> {
-                QualityHolder.put(trackId, result.codec, result.kbps)
-                result.url
+    /**
+     * Звук недоступного трека: копия из другого релиза. Известна — играем; нет — поиск, не дольше
+     * 10 с (как explicit-поиск FckCensor). Копии нет — трек не играет (дальше обычный пропуск),
+     * поиск не удался — сбой сети: пауза на месте с сообщением. В журнал — только номера.
+     */
+    private fun relinkedStream(token: String, track: Track): ResolvedSound {
+        app.relink.copyOf(track.id)?.let { return streamOf(token, track.id, it.id) }
+        return when (val found = app.relink.lookupBlocking(track)) {
+            is Lookup.Found -> {
+                Diagnostics.event("копия трека ${track.id}: ${found.copy.id}")
+                // Громкость копии стала известна уже после начала трека.
+                mainHandler.post { applyNormalization() }
+                streamOf(token, track.id, found.copy.id)
             }
-            else -> {
-                QualityHolder.clear(trackId)
-                // В лог — только тип результата: у Url внутри ссылка на поток.
-                Log.w(TAG, "поток трека $streamId не получен: ${(result as? StreamResult.Error)?.message ?: result::class.simpleName}")
-                null
+            Lookup.Missing -> {
+                Diagnostics.event("копии трека ${track.id} нет")
+                ResolvedSound.Failed(TrackUnavailableException("в другом релизе трек не нашёлся", noCopy = true))
+            }
+            Lookup.Failed -> {
+                Diagnostics.event("копия трека ${track.id}: поиск не удался")
+                ResolvedSound.Failed(java.io.IOException("нет связи с сервером"))
             }
         }
+    }
+
+    /** Следующие в очереди недоступные треки ставятся в поиск копий заранее (как `relink_wanted` на десктопе). */
+    private fun wantAhead(player: Player) {
+        val tracks = QueueHolder.state.value.tracks
+        var index = player.currentMediaItemIndex
+        repeat(RELINK_AHEAD) {
+            index = player.currentTimeline.getNextWindowIndex(index, Player.REPEAT_MODE_OFF, player.shuffleModeEnabled)
+            if (index == C.INDEX_UNSET) return
+            tracks.getOrNull(index)?.let(app.relink::want)
+        }
+    }
+
+    /** Поток трека Яндекса [streamId] для трека очереди [trackId]; после ошибки формата — MP3. */
+    private fun streamOf(token: String, trackId: String, streamId: String): ResolvedSound {
+        val result = app.api.streamUrlBlocking(token, streamId, mp3Only = mp3Retry.contains(trackId))
+        if (result is StreamResult.Url) {
+            QualityHolder.put(trackId, result.codec, result.kbps)
+            return ResolvedSound.Url(result.url)
+        }
+        QualityHolder.clear(trackId)
+        // В журнал — только тип результата: у Url внутри ссылка на поток.
+        Log.w(TAG, "поток трека $streamId не получен: ${(result as? StreamResult.Error)?.message ?: result::class.simpleName}")
+        return ResolvedSound.Failed(
+            when (result) {
+                StreamResult.Unavailable -> TrackUnavailableException("трек недоступен")
+                StreamResult.Unauthorized -> StreamAuthException()
+                // Сеть или сервер: обычный сбой загрузки, плеер повторит по политике.
+                is StreamResult.Error ->
+                    if (result.network) {
+                        java.io.IOException("нет связи с сервером")
+                    } else {
+                        TrackUnavailableException("не удалось получить звук трека")
+                    }
+                is StreamResult.Url -> java.io.IOException("ссылка уже получена")
+            },
+        )
+    }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? =
         mediaSession
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         val player = mediaSession?.player
+        Diagnostics.event("приложение смахнули из списка (музыка играла: ${player?.playWhenReady == true})")
         if (player == null || !player.playWhenReady) {
             stopSelf()
         }
     }
 
     override fun onDestroy() {
+        Diagnostics.event("служба воспроизведения: остановлена")
         Prefs.onSlopChanged = null
         Prefs.onQualityChanged = null
         Wave.requestTopUp = null
@@ -761,6 +1206,9 @@ class PlaybackService : MediaSessionService() {
     companion object {
         private const val TAG = "PlaybackService"
 
+        /** Сколько следующих треков очереди готовим заранее (поиск копий). */
+        private const val RELINK_AHEAD = 3
+
         private const val ACTION_LIKE = "ru.plastinka.action.LIKE"
         private const val ACTION_DISLIKE = "ru.plastinka.action.DISLIKE"
         private val LIKE_COMMAND = SessionCommand(ACTION_LIKE, android.os.Bundle.EMPTY)
@@ -769,8 +1217,29 @@ class PlaybackService : MediaSessionService() {
         /** Сколько ИИ-треков подряд пропускать, прежде чем сдаться. */
         private const val MAX_AI_SKIPS = 50
 
-        /** За сколько до конца трека плеер уже мог открыть следующий (буфер ExoPlayer ~50 с). */
-        private const val NEXT_PREPARED_WITHIN_MS = 90_000L
+        /** За сколько до конца трека плеер уже мог открыть следующий (буфер плеера до 6 минут). */
+        private const val NEXT_PREPARED_WITHIN_MS = 360_000L
+
+        /** Сколько сломанных треков подряд пропускаем (как `MAX_SKIPS` на десктопе). */
+        private const val MAX_SKIPS = 5
+
+        /** Догружаем, когда впереди текущего трека осталось не больше стольких (как `TOP_UP_AHEAD`). */
+        private const val TOP_UP_AHEAD = 2
+
+        /** Сколько порций подряд, целиком состоящих из уже игравших треков, ещё просим (как `MAX_EMPTY`). */
+        private const val MAX_EMPTY = 2
+
+        /** Сколько последних номеров треков волны помним для отсева повторов (как `SEEN_LIMIT`). */
+        private const val SEEN_LIMIT = 500
+
+        /** Паузы перед повтором неудавшейся догрузки волны, мс. */
+        private val TOP_UP_RETRY_MS = longArrayOf(2_000, 4_000, 8_000, 16_000, 30_000)
+
+        /** Сколько треков держим в списке «повторить как MP3». */
+        private const val MP3_RETRY_LIMIT = 100
+
+        /** Верхний код группы ошибок ввода-вывода (2000..2999). */
+        private const val IO_ERRORS_END = 2999
 
         /** Вызывается после старта волны: запомнить сессию до первого трека. */
         fun waveStarted(session: String, batchId: String, from: String?) {
@@ -780,6 +1249,25 @@ class PlaybackService : MediaSessionService() {
             Wave.started = false
             Wave.dislikeSkip = false
             Wave.advanceOnAppend = false
+            // Новая волна: порции прежнего запуска не дописываются, повторы и закрытие трека начинаются с нуля.
+            Wave.gen += 1
+            Wave.previousTrack = null
+            Wave.startedAtMs = null
+            Wave.resetSeen(emptyList())
+        }
+
+        /** Первая порция волны встала в очередь: её треки уже «были» (отсев повторов). */
+        fun waveQueued(trackIds: List<String>) {
+            Wave.resetSeen(trackIds)
+        }
+
+        /**
+         * «Следующий» на последнем треке волны: ждём порцию и переходим к первому новому треку
+         * (без записи в аккаунт; событие о закрытии трека пошлёт обычный переход).
+         */
+        fun requestNextInWave() {
+            Wave.advanceOnAppend = true
+            Wave.requestTopUp?.invoke()
         }
 
         /**
@@ -798,7 +1286,7 @@ class PlaybackService : MediaSessionService() {
                 .setMediaId(track.id)
                 .setMediaMetadata(
                     MediaMetadata.Builder()
-                        .setTitle(track.title.ifEmpty { "Трек ${track.id}" })
+                        .setTitle(track.displayTitle.ifEmpty { "Трек ${track.id}" })
                         .setArtist(track.artistNames.ifEmpty { null })
                         .setAlbumTitle(track.albumTitle)
                         .setArtworkUri(track.coverUrl()?.let { android.net.Uri.parse(it) })
@@ -819,15 +1307,17 @@ class PlastinkaDataSource(
     private val context: android.content.Context,
     private val http: okhttp3.OkHttpClient,
     private val isReplacementFile: (String) -> Boolean,
-    private val resolve: (String) -> String?,
+    private val resolve: (String) -> ResolvedSound,
 ) : androidx.media3.datasource.DataSource {
 
     private var inner: androidx.media3.datasource.DataSource? = null
 
     override fun open(dataSpec: androidx.media3.datasource.DataSpec): Long {
         val target = when (dataSpec.uri.scheme) {
-            "plastinka" -> resolve(dataSpec.uri.toString())
-                ?: throw java.io.IOException("звук трека недоступен")
+            "plastinka" -> when (val resolved = resolve(dataSpec.uri.toString())) {
+                is ResolvedSound.Url -> resolved.url
+                is ResolvedSound.Failed -> throw resolved.error
+            }
             else -> dataSpec.uri.toString()
         }
         // Звук только потоком из сети. Исключение — файл замены из сохранённого списка
@@ -839,7 +1329,7 @@ class PlastinkaDataSource(
                     .createDataSource()
             target.startsWith("content://") && isReplacementFile(target) ->
                 androidx.media3.datasource.ContentDataSource(context)
-            else -> throw java.io.IOException("звук трека недоступен")
+            else -> throw TrackUnavailableException("звук трека недоступен")
         }
         inner = source
         return source.open(dataSpec.buildUpon().setUri(android.net.Uri.parse(target)).build())

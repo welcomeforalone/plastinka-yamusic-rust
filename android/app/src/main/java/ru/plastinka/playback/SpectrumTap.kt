@@ -15,6 +15,7 @@ import java.nio.ByteBuffer
  * Нормализация громкости идёт первой, затем эквалайзер. Спектр показывает
  * звук после эквалайзера, поэтому отвод идёт последним.
  */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 object AudioChain {
     fun processors(): Array<AudioProcessor> = arrayOf(
         GainProcessor(),
@@ -24,6 +25,7 @@ object AudioChain {
 }
 
 /** Фабрика рендереров с нашей цепочкой процессоров в аудиотракте. */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class PlastinkaRenderersFactory(context: Context) : DefaultRenderersFactory(context) {
     override fun buildAudioSink(
         context: Context,
@@ -43,6 +45,7 @@ class PlastinkaRenderersFactory(context: Context) : DefaultRenderersFactory(cont
  * выделений памяти на буфер и без блокировок. Формат не 16 бит и не float —
  * процессор неактивен (звук идёт мимо него).
  */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class SpectrumTap : BaseAudioProcessor() {
 
     override fun onConfigure(inputAudioFormat: AudioFormat): AudioFormat {

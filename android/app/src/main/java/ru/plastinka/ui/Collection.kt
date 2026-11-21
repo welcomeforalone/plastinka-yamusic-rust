@@ -136,9 +136,18 @@ fun CollectionTab(
     model: AppViewModel,
     player: PlayerController?,
     onOpenSettings: () -> Unit,
+    request: RouteRequest? = null,
+    onRequestHandled: () -> Unit = {},
 ) {
     var stack by rememberSaveable(stateSaver = StackSaver) {
         mutableStateOf<List<CollectionRoute>>(listOf(CollectionRoute.Hub))
+    }
+    // Переход из плеера: маршрут ложится на стек один раз на запрос.
+    LaunchedEffect(request?.seq) {
+        request?.let {
+            stack = pushRouteUnique(stack, it.route)
+            onRequestHandled()
+        }
     }
     val holder = rememberSaveableStateHolder()
     val push = { route: CollectionRoute -> stack = stack + route }
@@ -148,45 +157,47 @@ fun CollectionTab(
             stack = stack.dropLast(1)
         }
     }
-    BackHandler(enabled = stack.size > 1) { pop() }
+    BackHandler(enabled = stack.size > 1 && LocalTabActive.current) { pop() }
 
     val top = stack.lastOrNull() ?: CollectionRoute.Hub
     holder.SaveableStateProvider(stateKey(stack.lastIndex, top)) {
-        when (top) {
-            CollectionRoute.Hub -> CollectionHub(
-                library = library,
-                model = model,
-                player = player,
-                onOpenSettings = onOpenSettings,
-                onOpen = push,
-            )
-            CollectionRoute.Liked -> LikesTab(library, model, player, onBack = pop)
-            CollectionRoute.Playlists -> PlaylistsScreen(
-                model = model,
-                onBack = pop,
-                onOpen = { card -> push(CollectionRoute.Playlist(card.uid, card.kind, card.title, card.coverUri)) },
-            )
-            is CollectionRoute.Playlist, is CollectionRoute.Album, is CollectionRoute.Artist,
-            is CollectionRoute.ArtistTracks ->
-                DetailRouteScreen(top, model, player, onBack = pop, push = push)
-            CollectionRoute.Albums -> AlbumsScreen(
-                model = model,
-                onBack = pop,
-                onOpen = { card -> push(CollectionRoute.Album(card.id, card.displayTitle, card.coverUri)) },
-            )
-            CollectionRoute.History -> HistoryScreen(model, player, onBack = pop)
-            CollectionRoute.TopMonth -> TopMonthScreen(
-                model = model,
-                player = player,
-                onBack = pop,
-                onOpenArtist = { top -> push(CollectionRoute.Artist(top.card.id, top.card.name, top.card.coverUri)) },
-            )
-            CollectionRoute.Artists -> ArtistsScreen(
-                model = model,
-                onBack = pop,
-                onAllTop = { push(CollectionRoute.TopMonth) },
-                onOpen = { card -> push(CollectionRoute.Artist(card.id, card.name, card.coverUri)) },
-            )
+        PageAppear(stateKey(stack.lastIndex, top)) {
+            when (top) {
+                CollectionRoute.Hub -> CollectionHub(
+                    library = library,
+                    model = model,
+                    player = player,
+                    onOpenSettings = onOpenSettings,
+                    onOpen = push,
+                )
+                CollectionRoute.Liked -> LikesTab(library, model, player, onBack = pop)
+                CollectionRoute.Playlists -> PlaylistsScreen(
+                    model = model,
+                    onBack = pop,
+                    onOpen = { card -> push(CollectionRoute.Playlist(card.uid, card.kind, card.title, card.coverUri)) },
+                )
+                is CollectionRoute.Playlist, is CollectionRoute.Album, is CollectionRoute.Artist,
+                is CollectionRoute.ArtistTracks ->
+                    DetailRouteScreen(top, model, player, onBack = pop, push = push)
+                CollectionRoute.Albums -> AlbumsScreen(
+                    model = model,
+                    onBack = pop,
+                    onOpen = { card -> push(CollectionRoute.Album(card.id, card.displayTitle, card.coverUri)) },
+                )
+                CollectionRoute.History -> HistoryScreen(model, player, onBack = pop)
+                CollectionRoute.TopMonth -> TopMonthScreen(
+                    model = model,
+                    player = player,
+                    onBack = pop,
+                    onOpenArtist = { top -> push(CollectionRoute.Artist(top.card.id, top.card.name, top.card.coverUri)) },
+                )
+                CollectionRoute.Artists -> ArtistsScreen(
+                    model = model,
+                    onBack = pop,
+                    onAllTop = { push(CollectionRoute.TopMonth) },
+                    onOpen = { card -> push(CollectionRoute.Artist(card.id, card.name, card.coverUri)) },
+                )
+            }
         }
     }
 }

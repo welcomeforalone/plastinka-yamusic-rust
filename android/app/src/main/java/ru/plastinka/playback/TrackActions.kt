@@ -6,6 +6,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import ru.plastinka.PlastinkaApp
+import ru.plastinka.data.YandexApi
 
 /**
  * Действия над играющим треком, общие для приложения и системного плеера
@@ -24,20 +25,43 @@ object TrackActions {
         mainHandler.post { android.widget.Toast.makeText(app, text, android.widget.Toast.LENGTH_SHORT).show() }
     }
 
-    /** «Нравится»: переключает лайк трека; ошибка сети откатывает значок. */
+    /** Треки, у которых запрос «Нравится» ещё идёт: повторные нажатия по ним игнорируются. */
+    private val busy: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /**
+     * «Нравится» (как `toggle_like` на десктопе): сердце меняется сразу на целевое значение,
+     * пока запрос идёт, повторные нажатия по треку игнорируются, ошибка возвращает сердце
+     * как было и показывает причину. Токен не принят — событие повторного входа.
+     */
     fun toggleLike(app: PlastinkaApp, scope: CoroutineScope, trackId: String) {
         val token = app.tokenStore.load() ?: return
         val uid = AccountHolder.uid ?: return
-        val nowLiked = QueueHolder.toggleLike(trackId)
+        if (!busy.add(trackId)) return
+        val target = !QueueHolder.likedIds.value.contains(trackId)
+        QueueHolder.setLike(trackId, target)
         scope.launch {
             try {
-                app.api.setLike(token, uid, trackId, nowLiked)
+                app.api.setLike(token, uid, trackId, target)
             } catch (e: CancellationException) {
+                QueueHolder.setLike(trackId, !target, rollback = true)
                 throw e
-            } catch (_: Exception) {
-                QueueHolder.toggleLike(trackId) // откат
+            } catch (e: Exception) {
+                QueueHolder.setLike(trackId, !target, rollback = true)
+                if (e is YandexApi.UnauthorizedException) AuthEvents.needRelogin()
+                val what = if (target) "поставить" else "снять"
+                toast(app, "Не удалось $what «Нравится»: ${failureReason(e)}")
+            } finally {
+                busy.remove(trackId)
             }
         }
+    }
+
+    /** Причина для сообщения: без текста исключений, где может оказаться адрес запроса. */
+    private fun failureReason(e: Exception): String = when {
+        e is java.io.IOException -> "нет соединения с сервером"
+        e is YandexApi.UnauthorizedException -> "вход больше не действует"
+        e is YandexApi.HttpStatusException -> "сервер ответил ${e.code}"
+        else -> e.javaClass.simpleName
     }
 
     /**

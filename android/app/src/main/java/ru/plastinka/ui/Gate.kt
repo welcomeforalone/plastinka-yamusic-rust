@@ -71,7 +71,7 @@ private fun Spinner(size: Int = 18) {
 // ------------------------------------------------------------------ вход
 
 @Composable
-fun LoginScreen(login: LoginUi, onLogin: () -> Unit) {
+fun LoginScreen(login: LoginUi, onLogin: () -> Unit, onRetrySave: () -> Unit) {
     GateBackground(glowAlpha = 0.5f) {
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
             Column(
@@ -87,7 +87,11 @@ fun LoginScreen(login: LoginUi, onLogin: () -> Unit) {
                 Spacer(Modifier.height(28.dp))
                 PlText("Вход в Plastinka", PlType.display, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(10.dp))
-                LoginBody(login, onLogin)
+                login.notice?.let {
+                    PlText(it, PlType.secondary, Pl.text2, textAlign = TextAlign.Center)
+                    Spacer(Modifier.height(10.dp))
+                }
+                LoginBody(login, onLogin, onRetrySave)
             }
             PlText(
                 "Пароль вводится только на странице Яндекса.\n" +
@@ -102,10 +106,20 @@ fun LoginScreen(login: LoginUi, onLogin: () -> Unit) {
 }
 
 @Composable
-private fun LoginBody(login: LoginUi, onLogin: () -> Unit) {
+private fun LoginBody(login: LoginUi, onLogin: () -> Unit, onRetrySave: () -> Unit) {
     val context = LocalContext.current
     when (login.phase) {
         LoginPhase.Idle -> {
+            if (login.retrySave) {
+                // Токен получен, но хранилище ключей его не приняло: повторяем только сохранение.
+                Spacer(Modifier.height(16.dp))
+                PlText("Не удалось сохранить вход", PlType.bodyStrong, Pl.error, textAlign = TextAlign.Center)
+                Spacer(Modifier.height(8.dp))
+                PlText(login.error.orEmpty(), PlType.secondary, Pl.text2, textAlign = TextAlign.Center)
+                Spacer(Modifier.height(24.dp))
+                Pill("Повторить", height = 52.dp, fillWidth = true, onClick = onRetrySave)
+                return
+            }
             PlText(
                 "Войдите по коду устройства: пароль вы введёте на странице Яндекса.",
                 PlType.body,

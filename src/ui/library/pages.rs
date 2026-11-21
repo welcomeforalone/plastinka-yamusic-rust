@@ -647,12 +647,13 @@ impl Library {
         let autoplay = std::mem::take(&mut entry.autoplay) && entry.page_ready();
         let key = entry_key(entry);
         let censor = self.plugins.fckcensor.then_some(&self.censor);
+        let relinks = &self.relinks;
         if let Some(tracks) = grown
             && let Some(queue) = &mut self.queue
             && key.as_ref() == Some(&queue.key)
         {
             queue.extend(tracks, &mut self.rng, &|track| {
-                plugins::playable(censor, track)
+                plugins::playable(censor, relinks, track)
             });
         }
         // FckCensor знает состав альбома — догружаем треки по нему.
@@ -908,13 +909,14 @@ impl Library {
                 );
                 // Очередь из этих же треков растёт вместе со списком.
                 let censor = self.plugins.fckcensor.then_some(&self.censor);
+                let relinks = &self.relinks;
                 if let Some(Load::Ready(paged)) = &self.search.tracks
                     && let Some(queue) = &mut self.queue
                     && queue.key == ListKey::SearchTracks(generation)
                     && queue.tracks.len() < paged.items.len()
                 {
                     queue.extend(paged.items.clone(), &mut self.rng, &|track| {
-                        plugins::playable(censor, track)
+                        plugins::playable(censor, relinks, track)
                     });
                 }
                 failure
@@ -1055,8 +1057,9 @@ impl Library {
             let mut queue = Queue::new(key, tracks, index);
             if self.player.shuffle {
                 let censor = self.plugins.fckcensor.then_some(&self.censor);
+                let relinks = &self.relinks;
                 queue.shuffle(Some(index), &mut self.rng, &|track| {
-                    plugins::playable(censor, track)
+                    plugins::playable(censor, relinks, track)
                 });
             }
             self.queue = Some(queue);
@@ -1076,8 +1079,9 @@ impl Library {
         self.remember_context(&key);
         let mut queue = Queue::new(key, tracks, 0);
         let censor = self.plugins.fckcensor.then_some(&self.censor);
+        let relinks = &self.relinks;
         let first = queue.first(self.player.shuffle, &mut self.rng, &|track| {
-            plugins::playable(censor, track)
+            plugins::playable(censor, relinks, track)
         })?;
         queue.current = first;
         self.queue = Some(queue);

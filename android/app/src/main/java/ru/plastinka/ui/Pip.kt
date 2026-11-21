@@ -191,13 +191,13 @@ fun PipScreen(track: Track, player: PlayerController?) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val side = maxHeight
             Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
-                Cover(track.coverUrl("600x600"), track.id, side, 0.dp)
+                Cover(track.coverUrl("600x600"), track.id, side, 0.dp, fadeMs = COVER_FADE_MS)
                 Column(
                     Modifier.weight(1f).fillMaxHeight().padding(horizontal = 10.dp),
                     verticalArrangement = Arrangement.Center,
                 ) {
-                    PlText(track.title, PlType.secondaryStrong, maxLines = 2)
-                    PlText(track.artistNames, PlType.caption, Pl.text2, maxLines = 1)
+                    MarqueeText(track.displayTitle, PlType.secondaryStrong, Pl.text)
+                    MarqueeText(track.artistNames, PlType.caption, Pl.text2)
                 }
             }
         }

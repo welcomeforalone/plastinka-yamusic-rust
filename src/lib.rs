@@ -10,6 +10,7 @@ pub mod media_controls;
 pub mod net;
 pub mod player;
 pub mod plugins;
+pub mod relink;
 pub mod storage;
 pub mod texts;
 pub mod ui;

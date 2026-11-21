@@ -39,6 +39,7 @@ object Normalizer {
  * зажимается в допустимый диапазон. Множитель 1 — звук проходит как есть.
  * Формат другой — процессор неактивен.
  */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class GainProcessor : BaseAudioProcessor() {
 
     private var current = 1f

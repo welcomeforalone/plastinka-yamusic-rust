@@ -182,8 +182,10 @@ impl Library {
     fn lyrics_key(&self) -> Option<Key> {
         let current = self.current()?;
         let shown = self.current_shown()?;
+        // У недоступного трека с копией текст Яндекса — копии.
+        let (track, _) = self.lyrics_source(current);
         Some(Key {
-            track: current.id.clone(),
+            track,
             shown: shown.id.clone(),
             lrclib: self.lyrics.lrclib,
         })
@@ -192,8 +194,9 @@ impl Library {
     fn lyrics_request(&self) -> Option<Request> {
         let current = self.current()?;
         let shown = self.current_shown()?;
+        let (track_id, hint) = self.lyrics_source(current);
         Some(Request {
-            track_id: current.id.clone(),
+            track_id,
             title: shown.title.clone().unwrap_or_default(),
             // LRCLib сверяет одного исполнителя: берём первого.
             artist: shown
@@ -203,7 +206,7 @@ impl Library {
                 .unwrap_or_default(),
             album: shown.album_title.clone(),
             duration: shown.duration,
-            hint: current.lyrics,
+            hint,
         })
     }
 

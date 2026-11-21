@@ -162,9 +162,13 @@ class YandexApi(private val http: OkHttpClient) {
             .orEmpty()
     }
 
-    /** Поставить/снять «Нравится». */
+    /**
+     * Поставить/снять «Нравится» (как `write_likes` на десктопе). Токен не принят —
+     * [UnauthorizedException], другой неуспех — [HttpStatusException]. Непохожий id не шлём.
+     */
     suspend fun setLike(token: String, uid: Long, trackId: String, like: Boolean) {
         withContext(Dispatchers.IO) {
+            if (!plausibleId(trackId)) return@withContext
             val action = if (like) "add" else "remove"
             val body = FormBody.Builder().add("track-ids", trackId).build()
             http.newCall(
@@ -173,7 +177,12 @@ class YandexApi(private val http: OkHttpClient) {
                     .header("Authorization", "OAuth $token")
                     .header("X-Yandex-Music-Client", MUSIC_CLIENT)
                     .post(body).build()
-            ).execute().use { /* результат не критичен: список обновится перечитыванием */ }
+            ).execute().use { resp ->
+                when {
+                    resp.code == 401 || resp.code == 403 -> throw UnauthorizedException()
+                    !resp.isSuccessful -> throw HttpStatusException(resp.code)
+                }
+            }
         }
     }
 
@@ -200,45 +209,90 @@ class YandexApi(private val http: OkHttpClient) {
 
     // -------------------------------------------------------------- треки
 
-    /** Метаданные треков пачками (сервис отвечает 400 на плохой ID — режем пополам). */
-    suspend fun tracks(token: String, ids: List<String>): List<Track> {
+    /**
+     * Метаданные треков пачками (как `load_tracks` на десктопе). Сервис отвечает 400 на всю
+     * пачку с плохим id: такую пачку делим пополам (бюджет делений [SPLIT_BUDGET]). Больше
+     * [MAX_REJECTED_BEFORE_SUCCESS] отказов до первого успеха или ни одного успеха при
+     * нескольких id — ошибка. Результат в порядке `ids`, без повторов (первый id побеждает:
+     * одинаковый ключ в списке роняет экран). Нет трека — заглушка ([placeholders]), 401 и 403 —
+     * [UnauthorizedException], прочие коды и сбои сети — исключением наружу.
+     */
+    suspend fun tracks(token: String, ids: List<String>, placeholders: Boolean = true): List<Track> {
         if (ids.isEmpty()) return emptyList()
         return withContext(Dispatchers.IO) {
-            val out = mutableListOf<Track>()
-            var batch = ids
-            var failed = 0
-            while (batch.isNotEmpty()) {
-                val good = try {
-                    val body = FormBody.Builder()
-                        .add("track-ids", batch.joinToString(","))
-                        .add("with-positions", "false")
-                        .build()
-                    val response = http.newCall(
-                        Request.Builder()
-                            .url("$API_BASE/tracks")
-                            .header("Authorization", "OAuth $token")
-                            .header("X-Yandex-Music-Client", MUSIC_CLIENT)
-                            .post(body).build()
-                    ).execute()
-                    response.use { resp ->
-                        val text = resp.body?.string().orEmpty()
-                        if (!resp.isSuccessful) throw IllegalArgumentException("batch rejected")
-                        val arr = json.parseToJsonElement(text).jsonObject["result"]!!.jsonArray
-                        out += arr.mapNotNull(::parseTrack)
-                        true
+            val valid = ids.filter(::plausibleId)
+            val queue = ArrayDeque<List<String>>()
+            valid.chunked(TRACKS_BATCH).forEach(queue::addLast)
+            val found = HashMap<String, Track>()
+            var rejected = 0
+            var splits = 0
+            var accepted = false
+            while (queue.isNotEmpty()) {
+                val batch = queue.removeFirst()
+                val text = postTracks(token, batch)
+                if (text == null) {
+                    rejected++
+                    if (!accepted && rejected > MAX_REJECTED_BEFORE_SUCCESS) {
+                        throw IllegalStateException("сервис отклонил запрос")
                     }
-                } catch (_: IllegalArgumentException) {
-                    false
+                    // Один id делить некуда, а бюджет кончился: такие id станут заглушками.
+                    val half = batch.size / 2
+                    if (half > 0 && splits < SPLIT_BUDGET) {
+                        splits++
+                        queue.addFirst(batch.drop(half))
+                        queue.addFirst(batch.take(half))
+                    }
+                    continue
                 }
-                if (good) {
-                    failed = 0
-                    break
+                accepted = true
+                val result = json.parseToJsonElement(text).jsonObject["result"] as? JsonArray
+                    ?: throw IllegalStateException("неожиданный ответ сервиса")
+                for (element in result) {
+                    // Битый элемент пропускаем, остальные треки остаются (как на десктопе).
+                    val track = parseTrackSafe(element) ?: continue
+                    found.putIfAbsent(track.id, track)
                 }
-                failed++
-                if (batch.size == 1 || failed > 4) break
-                batch = batch.drop(batch.size / 2)
             }
-            out
+            if (!accepted && valid.size > 1) throw IllegalStateException("сервис отклонил запрос")
+            val seen = HashSet<String>()
+            ids.filter { seen.add(it) }.mapNotNull { id ->
+                found[id] ?: if (placeholders) missingTrack(id) else null
+            }
+        }
+    }
+
+    /** Заглушка вместо трека, которого сервис не вернул (как `Track::missing` на десктопе). */
+    private fun missingTrack(id: String) = Track(
+        id = id,
+        sourceTitle = "Без названия",
+        sourceArtists = emptyList(),
+        albumId = null,
+        albumTitle = null,
+        durationMs = null,
+        available = false,
+        sourceCoverUri = null,
+    )
+
+    /** Тело ответа `/tracks`; `null` — сервис ответил 400 (плохой id в пачке). */
+    private fun postTracks(token: String, batch: List<String>): String? {
+        val body = FormBody.Builder()
+            .add("track-ids", batch.joinToString(","))
+            .add("with-positions", "false")
+            .build()
+        val response = http.newCall(
+            Request.Builder()
+                .url("$API_BASE/tracks")
+                .header("Authorization", "OAuth $token")
+                .header("X-Yandex-Music-Client", MUSIC_CLIENT)
+                .post(body).build()
+        ).execute()
+        return response.use { resp ->
+            when {
+                resp.code == 401 || resp.code == 403 -> throw UnauthorizedException()
+                resp.code == 400 -> null
+                !resp.isSuccessful -> throw HttpStatusException(resp.code)
+                else -> resp.body?.string().orEmpty()
+            }
         }
     }
 
@@ -291,9 +345,11 @@ class YandexApi(private val http: OkHttpClient) {
         return SearchResult(
             best = best,
             tracks = tracks.mapNotNull { parseTrackSafe(it) },
-            albums = albums.mapNotNull(::parseAlbumCard),
-            artists = artists.mapNotNull(::parseArtistCard),
-            playlists = playlists.mapNotNull { parsePlaylistCard(it, liked = false) },
+            // Повтор в одной странице сломал бы ключи ленивых списков: первое вхождение остаётся.
+            albums = albums.mapNotNull(::parseAlbumCard).distinctBy { it.id },
+            artists = artists.mapNotNull(::parseArtistCard).distinctBy { it.id },
+            playlists = playlists.mapNotNull { parsePlaylistCard(it, liked = false) }
+                .distinctBy { it.uid to it.kind },
             hasNext = kind != SearchKind.All && rawCount > 0 && perPage > 0 &&
                 (page + 1) * perPage < total && page < SEARCH_MAX_PAGE,
         )
@@ -310,13 +366,33 @@ class YandexApi(private val http: OkHttpClient) {
         token: String,
         trackId: String,
         quality: AudioQuality = AudioQuality.Normal,
+        mp3Only: Boolean = false,
     ): StreamResult =
         withContext(Dispatchers.IO) {
+            // Повтор после ошибки формата: сразу MP3 через download-info, как на десктопе.
+            if (mp3Only) return@withContext fallbackMp3Url(token, trackId)
             val primary = fileInfoUrl(token, trackId, quality)
-            if (primary is StreamResult.Url) return@withContext primary
-            fallbackMp3Url(token, trackId).takeIf { it is StreamResult.Url || it == StreamResult.Unavailable }
-                ?: primary
+            if (primary is StreamResult.Url || primary == StreamResult.Unauthorized) return@withContext primary
+            val fallback = fallbackMp3Url(token, trackId)
+            when {
+                fallback is StreamResult.Url || fallback == StreamResult.Unavailable -> fallback
+                // Сбой сети важнее причины в треке: запрос стоит повторить.
+                fallback is StreamResult.Error && fallback.network -> fallback
+                else -> primary
+            }
         }
+
+    /** Ответ сервера с неуспешным кодом (текст без адреса: только код). */
+    class HttpStatusException(val code: Int) : IllegalStateException("сервер ответил $code")
+
+    /** Сбой сети или сервера, который имеет смысл повторить (а не причина в самом треке). */
+    private fun isTransient(e: Exception): Boolean =
+        e is java.io.IOException ||
+            (e is HttpStatusException && (e.code >= 500 || e.code == 408 || e.code == 429))
+
+    /** Описание сбоя без текста исключения: у него бывает адрес запроса. */
+    private fun describe(e: Exception): String =
+        if (e is HttpStatusException) "сервер ответил ${e.code}" else e.javaClass.simpleName
 
     private fun fileInfoUrl(token: String, trackId: String, audio: AudioQuality): StreamResult {
         val ts = (System.currentTimeMillis() / 1000).toString()
@@ -331,7 +407,7 @@ class YandexApi(private val http: OkHttpClient) {
             .encodeToString(mac.doFinal(message.toByteArray()))
             .trimEnd('=')
         return try {
-            val obj = get(
+            val obj = getStream(
                 token,
                 "$API_BASE/get-file-info?ts=$ts&trackId=$trackId&quality=$quality" +
                     "&codecs=${urlEncode(codecs)}&transports=$TRANSPORT&sign=$sign",
@@ -349,13 +425,13 @@ class YandexApi(private val http: OkHttpClient) {
         } catch (e: UnauthorizedException) {
             StreamResult.Unauthorized
         } catch (e: Exception) {
-            StreamResult.Error(e.message ?: "get-file-info не удался")
+            StreamResult.Error("get-file-info: ${describe(e)}", isTransient(e))
         }
     }
 
     private fun fallbackMp3Url(token: String, trackId: String): StreamResult {
         return try {
-            val obj = get(token, "$API_BASE/tracks/$trackId/download-info")
+            val obj = getStream(token, "$API_BASE/tracks/$trackId/download-info")
             val arr = obj["result"]?.jsonArray ?: return StreamResult.Unavailable
             val best = arr.mapNotNull { item ->
                 val v = item.jsonObject
@@ -368,7 +444,10 @@ class YandexApi(private val http: OkHttpClient) {
 
             // XML с полями подписи
             val xml = http.newCall(Request.Builder().url(best.second).build())
-                .execute().use { resp -> if (resp.isSuccessful) resp.body?.string() else null }
+                .execute().use { resp ->
+                    if (!resp.isSuccessful) throw HttpStatusException(resp.code)
+                    resp.body?.string()
+                }
                 ?: return StreamResult.Error("download-info XML не получен")
             val host = xmlTag(xml, "host") ?: return StreamResult.Error("нет host")
             val path = xmlTag(xml, "path") ?: return StreamResult.Error("нет path")
@@ -382,14 +461,21 @@ class YandexApi(private val http: OkHttpClient) {
             StreamResult.Url(url, best.first, "mp3")
         } catch (e: UnauthorizedException) {
             StreamResult.Unauthorized
+        } catch (e: HttpStatusException) {
+            // 400, 403 и 404: у трека нет потока для этого аккаунта (как на десктопе).
+            if (e.code == 400 || e.code == 403 || e.code == 404) {
+                StreamResult.Unavailable
+            } else {
+                StreamResult.Error("download-info: ${describe(e)}", isTransient(e))
+            }
         } catch (e: Exception) {
-            StreamResult.Error(e.message ?: "download-info не удался")
+            StreamResult.Error("download-info: ${describe(e)}", isTransient(e))
         }
     }
 
     /** Блокирующая версия для ResolvingDataSource (открывается в потоке загрузчика). */
-    fun streamUrlBlocking(token: String, trackId: String): StreamResult =
-        kotlinx.coroutines.runBlocking { streamUrl(token, trackId, Prefs.quality) }
+    fun streamUrlBlocking(token: String, trackId: String, mp3Only: Boolean = false): StreamResult =
+        kotlinx.coroutines.runBlocking { streamUrl(token, trackId, Prefs.quality, mp3Only) }
 
     // -------------------------------------------------------------- волна
 
@@ -638,12 +724,14 @@ class YandexApi(private val http: OkHttpClient) {
                     ?: throw IllegalStateException("нет result у плейлистов")
                 arr.mapNotNull { parsePlaylistCard(it, liked = false) }
                     .filter { it.kind != LIKED_PLAYLIST_KIND }
+                    .distinctBy { it.uid to it.kind }
             }
             val liked = runCatching {
                 val arr = get(token, "$API_BASE/users/$uid/likes/playlists")["result"]?.jsonArray
                     ?: throw IllegalStateException("нет result у понравившихся плейлистов")
                 // Недавно отмеченные первыми, как на десктопе.
                 recentFirst(arr, "playlist").mapNotNull { parsePlaylistCard(it, liked = true) }
+                    .distinctBy { it.uid to it.kind }
             }
             // Ошибка авторизации важнее частичного результата.
             (own.exceptionOrNull() as? UnauthorizedException)?.let { throw it }
@@ -661,14 +749,14 @@ class YandexApi(private val http: OkHttpClient) {
     suspend fun likedAlbums(token: String, uid: Long): List<AlbumCard> = withContext(Dispatchers.IO) {
         val arr = get(token, "$API_BASE/users/$uid/likes/albums?rich=true")["result"] as? JsonArray
             ?: throw IllegalStateException("нет result у альбомов")
-        recentFirst(arr, "album").mapNotNull(::parseAlbumCard)
+        recentFirst(arr, "album").mapNotNull(::parseAlbumCard).distinctBy { it.id }
     }
 
     /** Понравившиеся исполнители, недавние первыми. */
     suspend fun likedArtists(token: String, uid: Long): List<ArtistCard> = withContext(Dispatchers.IO) {
         val arr = get(token, "$API_BASE/users/$uid/likes/artists?with-timestamps=true")["result"] as? JsonArray
             ?: throw IllegalStateException("нет result у исполнителей")
-        recentFirst(arr, "artist").mapNotNull(::parseArtistCard)
+        recentFirst(arr, "artist").mapNotNull(::parseArtistCard).distinctBy { it.id }
     }
 
     /** Альбом с треками: диски склеиваются по порядку. */
@@ -702,7 +790,8 @@ class YandexApi(private val http: OkHttpClient) {
                 // Дозагрузка не удалась: остаются первые альбомы из brief-info.
             }
         }
-        ArtistDetails(card, popular, albums)
+        // На стыке страниц direct-albums альбом может повториться: ключи списка должны быть уникальны.
+        ArtistDetails(card, popular, albums.distinctBy { it.id })
     }
 
     /**
@@ -987,13 +1076,36 @@ class YandexApi(private val http: OkHttpClient) {
         return response.use { resp ->
             when {
                 resp.code == 401 || resp.code == 403 -> throw UnauthorizedException()
-                !resp.isSuccessful -> throw IllegalStateException("сервер ответил ${resp.code}")
+                !resp.isSuccessful -> throw HttpStatusException(resp.code)
                 else -> resp.body?.string().orEmpty()
             }
         }
     }
 
-    private class UnauthorizedException : Exception()
+    /** Токен не принят (401/403): нужен повторный вход. */
+    class UnauthorizedException : Exception("вход больше не действует")
+
+    /**
+     * GET потоковых методов (`get-file-info`, `download-info`). Токен не принят только при 401;
+     * 403 у потока значит «нет прав на трек» (как на десктопе), поэтому это обычный код ответа.
+     */
+    private fun getStream(token: String, url: String): JsonObject {
+        val response = http.newCall(
+            Request.Builder()
+                .url(url)
+                .header("Authorization", "OAuth $token")
+                .header("X-Yandex-Music-Client", MUSIC_CLIENT)
+                .get().build()
+        ).execute()
+        return response.use { resp ->
+            val text = resp.body?.string().orEmpty()
+            when {
+                resp.code == 401 -> throw UnauthorizedException()
+                !resp.isSuccessful -> throw HttpStatusException(resp.code)
+                else -> json.parseToJsonElement(text).jsonObject
+            }
+        }
+    }
 
     private fun get(token: String, url: String): JsonObject {
         val response = http.newCall(
@@ -1007,7 +1119,7 @@ class YandexApi(private val http: OkHttpClient) {
             val text = resp.body?.string().orEmpty()
             when {
                 resp.code == 401 || resp.code == 403 -> throw UnauthorizedException()
-                !resp.isSuccessful -> throw IllegalStateException("сервер ответил ${resp.code}")
+                !resp.isSuccessful -> throw HttpStatusException(resp.code)
                 else -> json.parseToJsonElement(text).jsonObject
             }
         }
@@ -1037,6 +1149,7 @@ class YandexApi(private val http: OkHttpClient) {
             loudness = parseLoudness(t["r128"]),
             explicit = (t["contentWarning"] as? JsonPrimitive)?.content == "explicit",
             clean = (t["contentWarning"] as? JsonPrimitive)?.content == "clean",
+            version = (t["version"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it.isNotBlank() },
         )
     }
 
@@ -1095,6 +1208,19 @@ class YandexApi(private val http: OkHttpClient) {
 
         /** Идентификатор для адреса запроса: только цифры. */
         fun isNumericId(id: String): Boolean = id.length in 1..20 && id.all { it in '0'..'9' }
+
+        private const val TRACKS_BATCH = 250
+        private const val MAX_REJECTED_BEFORE_SUCCESS = 32
+        private const val SPLIT_BUDGET = 128
+
+        /**
+         * Сервис принимает число от 1 до `Int.MAX_VALUE` или UUID (так выглядят загруженные
+         * пользователем треки). Остальное ломает всю пачку (как `plausible_id` на десктопе).
+         */
+        fun plausibleId(id: String): Boolean {
+            if (id.isNotEmpty() && id.all { it in '0'..'9' }) return (id.toIntOrNull() ?: 0) > 0
+            return id.length == 36 && id.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' || it == '-' }
+        }
         private val ALLOWED_HOSTS = listOf(
             "oauth.yandex.ru", "oauth.yandex.com", "ya.ru", "yandex.ru", "yandex.com",
         )

@@ -88,7 +88,7 @@ class LyricsRepository(
      * сразу; иначе «без слов» важнее ошибки, ошибка важнее «текста нет»
      * (чтобы сбой сети не выдавался за отсутствие текста).
      */
-    suspend fun load(track: Track): LyricsResult {
+    suspend fun load(track: Track, yandexId: String = track.id): LyricsResult {
         // Настройка читается один раз: ключ кэша и список источников согласованы.
         val lrclib = Prefs.lyricsLrclib
         val key = cacheKey(track.id, lrclib)
@@ -97,7 +97,7 @@ class LyricsRepository(
         var instrumental = false
         for (source in sources(lrclib)) {
             try {
-                when (val result = fetch(source, track)) {
+                when (val result = fetch(source, track, yandexId)) {
                     is LyricsResult.Found -> {
                         put(key, result)
                         return result
@@ -124,11 +124,11 @@ class LyricsRepository(
         synchronized(cache) { cache[key] = result }
     }
 
-    private suspend fun fetch(source: LyricsSource, track: Track): LyricsResult =
+    private suspend fun fetch(source: LyricsSource, track: Track, yandexId: String): LyricsResult =
         withContext(Dispatchers.IO) {
             try {
                 when (source) {
-                    LyricsSource.Yandex -> fromYandex(track)
+                    LyricsSource.Yandex -> fromYandex(yandexId)
                     LyricsSource.LrcLib -> fromLrcLib(track)
                 }
             } catch (e: IOException) {
@@ -142,9 +142,9 @@ class LyricsRepository(
     // ------------------------------------------------------------- Яндекс
 
     /** Сначала с метками времени; нет меток — обычный текст. */
-    private suspend fun fromYandex(track: Track): LyricsResult {
-        if (!YandexApi.isNumericId(track.id)) return LyricsResult.Missing
-        yandexText(track.id, "LRC")?.let { text ->
+    private suspend fun fromYandex(trackId: String): LyricsResult {
+        if (!YandexApi.isNumericId(trackId)) return LyricsResult.Missing
+        yandexText(trackId, "LRC")?.let { text ->
             val lines = LrcParser.parse(text)
             return if (lines.isNotEmpty()) {
                 LyricsResult.Found(Lyrics(LyricsSource.Yandex, lines, null))
@@ -153,7 +153,7 @@ class LyricsRepository(
                 LyricsResult.Found(Lyrics(LyricsSource.Yandex, null, text))
             }
         }
-        yandexText(track.id, "TEXT")?.let {
+        yandexText(trackId, "TEXT")?.let {
             return LyricsResult.Found(Lyrics(LyricsSource.Yandex, null, it))
         }
         return LyricsResult.Missing
@@ -357,7 +357,7 @@ class LyricsRepository(
 
         /** Текст файла: без BOM и `\r`, пустой — `null`. */
         fun cleanText(text: String): String? {
-            val cleaned = text.removePrefix("﻿").replace("\r", "")
+            val cleaned = text.removePrefix("\uFEFF").replace("\r", "")
             return cleaned.takeIf { it.isNotBlank() }
         }
     }

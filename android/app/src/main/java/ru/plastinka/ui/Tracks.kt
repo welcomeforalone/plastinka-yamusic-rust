@@ -8,6 +8,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,6 +24,7 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import ru.plastinka.playback.QueueHolder
@@ -38,6 +40,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import ru.plastinka.R
 import ru.plastinka.data.FckCensor
+import ru.plastinka.data.Relink
 import ru.plastinka.data.Track
 
 /** Длительность `м:сс`. */
@@ -62,26 +65,39 @@ fun tracksCount(n: Int): String {
 /** Три столбика «играет»: качаются, пока звук идёт, на паузе стоят. */
 @Composable
 fun EqBars(size: Dp, color: Color, animated: Boolean, modifier: Modifier = Modifier) {
+    // Две функции: на паузе бесконечной анимации нет вовсе (лишние кадры не рисуются).
+    if (animated) EqBarsMoving(size, color, modifier) else EqBarsStill(size, color, modifier)
+}
+
+@Composable
+private fun EqBarsMoving(size: Dp, color: Color, modifier: Modifier) {
     val transition = rememberInfiniteTransition(label = "eq")
     val spec = { ms: Int ->
         infiniteRepeatable<Float>(tween(ms, easing = LinearEasing), RepeatMode.Reverse)
     }
-    val a by transition.animateFloat(0.25f, 0.95f, spec(520), label = "eq-a")
-    val b by transition.animateFloat(0.25f, 0.95f, spec(380), label = "eq-b")
-    val c by transition.animateFloat(0.25f, 0.95f, spec(460), label = "eq-c")
-    val heights = if (animated) listOf(a, b, c) else listOf(0.55f, 0.9f, 0.4f)
-    Canvas(modifier.size(size)) {
-        val s = this.size.minDimension
-        val w = s / 6
-        heights.forEachIndexed { i, h ->
-            val x = s * 0.14f + i * (w + s * 0.1f)
-            val top = s * (0.84f - h * 0.68f)
-            drawRect(
-                color,
-                topLeft = Offset(x, top),
-                size = Size(w, s * 0.84f - top),
-            )
-        }
+    val a = transition.animateFloat(0.25f, 0.95f, spec(520), label = "eq-a")
+    val b = transition.animateFloat(0.25f, 0.95f, spec(380), label = "eq-b")
+    val c = transition.animateFloat(0.25f, 0.95f, spec(460), label = "eq-c")
+    // Значения читаются только при отрисовке: перекомпозиции каждый кадр нет.
+    Canvas(modifier.size(size)) { drawEqBars(color, a.value, b.value, c.value) }
+}
+
+@Composable
+private fun EqBarsStill(size: Dp, color: Color, modifier: Modifier) {
+    Canvas(modifier.size(size)) { drawEqBars(color, 0.55f, 0.9f, 0.4f) }
+}
+
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawEqBars(color: Color, a: Float, b: Float, c: Float) {
+    val s = this.size.minDimension
+    val w = s / 6
+    listOf(a, b, c).forEachIndexed { i, h ->
+        val x = s * 0.14f + i * (w + s * 0.1f)
+        val top = s * (0.84f - h * 0.68f)
+        drawRect(
+            color,
+            topLeft = Offset(x, top),
+            size = Size(w, s * 0.84f - top),
+        )
     }
 }
 
@@ -101,8 +117,12 @@ fun TrackRow(
     /** Номер места слева от обложки (топ месяца); `null` — без номера. */
     number: Int? = null,
 ) {
-    val available = track.playable
+    // Копия недоступного трека: видимые строки просят поиск (`want` сам отсекает лишнее).
+    if (!track.available) LaunchedEffect(track.id) { Relink.current?.want(track) }
+    val link = trackLink(track)
+    val available = link != RowLink.Gone
     val ai = rememberIsAi(track)
+    val links = rememberTrackLinks(track)
     Row(
         modifier
             .fillMaxWidth()
@@ -122,7 +142,7 @@ fun TrackRow(
         }
         Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
             Cover(
-                track.coverUrl("100x100"),
+                track.artUrl("100x100"),
                 track.id,
                 48.dp,
                 8.dp,
@@ -141,7 +161,7 @@ fun TrackRow(
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             PlText(
-                track.title,
+                track.displayTitle,
                 if (current && available) PlType.bodyStrong else PlType.body,
                 when {
                     !available -> Pl.textDisabled
@@ -154,12 +174,13 @@ fun TrackRow(
                 if (track.explicit) ExplicitBadge()
                 if (ai) AiTag()
                 if (FckCensor.hasReplacement(track.id)) ReplacedTag()
+                LinkTag(link)
                 PlText(
-                    if (available) track.artistNames else "Недоступен в вашем регионе",
+                    track.artistNames,
                     PlType.secondary,
                     if (available) Pl.text2 else Pl.textDisabled,
                     maxLines = 1,
-                    modifier = Modifier.weight(1f, fill = false),
+                    modifier = Modifier.weight(1f, fill = false).then(links.artists),
                 )
             }
         }
@@ -180,6 +201,55 @@ fun TrackRow(
             iconSize = 20.dp,
             tint = if (available) Pl.text2 else Pl.textDisabled,
         )
+    }
+}
+
+/** Как строка трека показывает доступность (как `Link` в `src/ui/library/copies.rs` на десктопе). */
+enum class RowLink {
+    /** Доступен или звук даёт FckCensor. */
+    Plain,
+
+    /** Недоступен, играет копия из другого релиза. */
+    Copy,
+
+    /** Играть нечем: копии нет или поиск ещё не ответил. */
+    Gone,
+}
+
+/** Состояние строки трека; чтение идёт через снимок Compose: строка перерисуется, когда копия найдётся. */
+fun trackLink(track: Track): RowLink = when {
+    track.available || FckCensor.hasSound(track.id) -> RowLink.Plain
+    Relink.current?.playingCopy(track) != null -> RowLink.Copy
+    else -> RowLink.Gone
+}
+
+/** Обложка трека, а если её нет — найденной копии (как `art_track`); копия известна целиком только в этом сеансе. */
+fun Track.artUrl(size: String): String? =
+    coverUrl(size) ?: Relink.current?.let { relink ->
+        relink.copyOf(id)?.let { relink.copyTrack(it.id) }?.coverUrl(size)
+    }
+
+/** Метка «Копия» акцентом или серая «Недоступен»; у обычного трека её нет. Вид как у [ReplacedTag]. */
+@Composable
+fun LinkTag(link: RowLink) {
+    when (link) {
+        RowLink.Plain -> Unit
+        RowLink.Copy -> RelinkTag("Копия", Pl.accent)
+        RowLink.Gone -> RelinkTag("Недоступен", Pl.textDisabled)
+    }
+}
+
+@Composable
+fun RelinkTag(text: String, color: Color) {
+    val shape = RoundedCornerShape(4.dp)
+    Box(
+        Modifier
+            .height(16.dp)
+            .border(1.dp, color.copy(alpha = 0.6f), shape)
+            .padding(horizontal = 5.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        PlText(text, PlType.micro, color, maxLines = 1)
     }
 }
 

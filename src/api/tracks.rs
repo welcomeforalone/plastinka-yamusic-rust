@@ -558,7 +558,10 @@ pub(super) fn parse_track(value: &Value) -> Option<Track> {
             .get("durationMs")
             .and_then(Value::as_u64)
             .map(Duration::from_millis),
-        available: value.get("available").and_then(Value::as_bool) == Some(true) && !error,
+        // Отладочный хук `PLASTINKA_TEST_UNAVAILABLE` объявляет трек недоступным.
+        available: value.get("available").and_then(Value::as_bool) == Some(true)
+            && !error
+            && !crate::relink::forced_unavailable(&id),
         cover_uri: text("coverUri"),
         warning: Warning::parse(value.get("contentWarning")),
         loudness: Loudness::parse(value.get("r128")),

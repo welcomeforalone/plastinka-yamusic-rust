@@ -129,7 +129,7 @@ private val SETTINGS_INDEX: List<SettingsEntry> = listOf(
         "копировать название формат artist title album буфер обмена плагин",
     ),
     SettingsEntry(
-        SettingsPage.About, "О программе", "Версия, лицензии, авторство",
-        "plastinka пластинка неофициальный клиент яндекс лицензии версия",
+        SettingsPage.About, "О программе", "Версия, лицензии, отчёт о сбое",
+        "plastinka пластинка неофициальный клиент яндекс лицензии версия сбой отчёт ошибка краш завис",
     ),
 )

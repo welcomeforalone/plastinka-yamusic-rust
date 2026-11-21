@@ -466,7 +466,7 @@ async fn store_list(cache: CachedList) {
 }
 
 /// Запись через временный файл: при сбое не остаётся обрезанный файл.
-fn write_atomic(path: &Path, text: &str) -> Result<(), StorageError> {
+pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<(), StorageError> {
     let io_error = |source| StorageError::ConfigIo {
         path: path.to_path_buf(),
         source,
@@ -499,7 +499,8 @@ pub fn normalize(text: &str) -> String {
     out.trim_end().to_owned()
 }
 
-fn same_artist(a: &[ArtistRef], b: &[ArtistRef]) -> bool {
+/// Есть общий исполнитель: по номеру, если он есть у обоих, иначе по имени.
+pub fn same_artist(a: &[ArtistRef], b: &[ArtistRef]) -> bool {
     a.iter().any(|left| {
         b.iter().any(|right| match (&left.id, &right.id) {
             (Some(x), Some(y)) => x == y,

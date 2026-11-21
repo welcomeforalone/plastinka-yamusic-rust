@@ -23,8 +23,26 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.text.BasicText
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.style.TextOverflow
+import kotlin.math.abs
+import kotlin.math.roundToInt
+import kotlinx.coroutines.flow.collectLatest
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -32,6 +50,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -64,7 +83,7 @@ fun RootScreen(
         if (inPip && !allowed) (context as? android.app.Activity)?.let(Pip::close)
     }
     if (!loggedIn) {
-        LoginScreen(login, onLogin = model::startLogin)
+        LoginScreen(login, onLogin = model::startLogin, onRetrySave = model::retrySaveToken)
         return
     }
 
@@ -131,8 +150,40 @@ private fun MainScreen(library: LibraryUi, model: AppViewModel) {
     // Очередь опустела: полноэкранный плеер закрывается, а не остаётся пустым слоем.
     LaunchedEffect(hasTrack) { if (!hasTrack) showPlayer = false }
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    // Вкладки листаются свайпом; `tab` — устоявшаяся страница (по ней прячется мини-плеер).
+    val pagerState = rememberPagerState(initialPage = tab) { NAV_ITEMS.size }
+    // Ключ появления страницы растёт при выборе вкладки меню или кодом, но не при свайпе:
+    // после свайпа `PageAppear` второй раз не играет.
+    var appearKey by remember { mutableIntStateOf(0) }
+    val selectTab = { target: Int ->
+        if (target != tab) {
+            appearKey += 1
+            tab = target
+        }
+    }
+    // Нажатие в меню переключает сразу, без пролёта через промежуточные вкладки.
+    LaunchedEffect(tab) {
+        if (pagerState.currentPage != tab) pagerState.scrollToPage(tab)
+    }
+    // Свайп закончен: новая вкладка становится выбранной.
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.settledPage }.collect { page -> if (page != tab) tab = page }
+    }
+    // «Настройки» при возвращении открываются с главного экрана: после ухода меняем ключ
+    // состояния, и сохранённый подэкран не восстанавливается.
+    var settingsEpoch by remember { mutableIntStateOf(0) }
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.settledPage }.collect { page -> if (page != 3) settingsEpoch += 1 }
+    }
+    // Стек экранов «Поиска» и «Коллекции» (и прокрутка в них) переживает уход на другую
+    // вкладку: без держателя `rememberSaveable` внутри вкладки сбрасывается при её смене.
+    // «Волна» и «Настройки» открываются как раньше, с главного экрана.
+    val tabStates = rememberSaveableStateHolder()
+    // Запрос «открыть маршрут» из плеера: вкладка кладёт маршрут на стек и сбрасывает запрос.
+    var routeRequest by remember { mutableStateOf<RouteRequest?>(null) }
+    var routeSeq by remember { mutableIntStateOf(0) }
     val liked by QueueHolder.likedIds.collectAsStateWithLifecycle()
-    val playing = player?.isPlaying?.collectAsStateWithLifecycle()?.value ?: false
+    val playing = player?.playWhenReady?.collectAsStateWithLifecycle()?.value ?: false
     val likedNow = queue.currentTrack()?.let { liked.contains(it.id) } ?: false
 
     // Мини-плеер PiP: только с треком (а значит, после проверки Плюса).
@@ -160,64 +211,108 @@ private fun MainScreen(library: LibraryUi, model: AppViewModel) {
         if (activity != null && hasTrack) Pip.update(activity, playing, likedNow)
     }
 
-    Box(Modifier.fillMaxSize().background(Pl.bg)) {
-        Column(Modifier.fillMaxSize()) {
-            Box(Modifier.weight(1f).fillMaxWidth().statusBarsPadding()) {
-                when (tab) {
-                    0 -> WaveTab(
-                        model,
-                        player,
-                        onOpenPlayer = { showPlayer = true },
-                        onOpenSettings = { tab = 3 },
-                    )
-                    1 -> SearchTab(model, player)
-                    2 -> CollectionTab(library, model, player, onOpenSettings = { tab = 3 })
-                    else -> SettingsScreen(library, model)
+    // Переход из любого места (плеер, мини-плеер, строки треков): как на десктопе,
+    // страница открывается, полноэкранный плеер сворачивается.
+    val openRoute = { route: CollectionRoute ->
+        val target = tabForRouteOpen(tab)
+        routeSeq += 1
+        routeRequest = RouteRequest(route, target, routeSeq)
+        selectTab(target)
+        showPlayer = false
+    }
+    androidx.compose.runtime.CompositionLocalProvider(LocalOpenRoute provides openRoute) {
+        Box(Modifier.fillMaxSize().background(Pl.bg)) {
+            Column(Modifier.fillMaxSize()) {
+                Box(Modifier.weight(1f).fillMaxWidth().statusBarsPadding()) {
+                    PageAppear(appearKey) {
+                        HorizontalPager(
+                            state = pagerState,
+                            beyondViewportPageCount = 0,
+                            // Горизонтальные списки, перемотка, ползунки и обложки забирают свои жесты сами.
+                            modifier = Modifier.fillMaxSize(),
+                        ) { page ->
+                            androidx.compose.runtime.CompositionLocalProvider(
+                                LocalTabActive provides (page == pagerState.settledPage),
+                            ) {
+                                when (page) {
+                                    0 -> WaveTab(
+                                        model,
+                                        player,
+                                        onOpenPlayer = { showPlayer = true },
+                                        onOpenSettings = { selectTab(3) },
+                                    )
+                                    1 -> tabStates.SaveableStateProvider(1) {
+                                        SearchTab(
+                                            model,
+                                            player,
+                                            request = routeRequest?.takeIf { it.tab == 1 },
+                                            onRequestHandled = { routeRequest = null },
+                                        )
+                                    }
+                                    2 -> tabStates.SaveableStateProvider(2) {
+                                        CollectionTab(
+                                            library,
+                                            model,
+                                            player,
+                                            onOpenSettings = { selectTab(3) },
+                                            request = routeRequest?.takeIf { it.tab == 2 },
+                                            onRequestHandled = { routeRequest = null },
+                                        )
+                                    }
+                                    else -> androidx.compose.runtime.key(settingsEpoch) { SettingsScreen(library, model) }
+                                }
+                            }
+                        }
+                    }
                 }
-            }
-            // Мини-плеер над нижним меню. Под полноэкранным плеером его не прячем:
-            // плеер закрывает всё окно, а список под ним не должен менять высоту.
-            // На вкладке «Волна» мини-плеер заменяет сам экран волны, когда он показывает трек.
-            val waveStarting by model.waveStarting.collectAsStateWithLifecycle()
-            val waveError by model.waveError.collectAsStateWithLifecycle()
-            queue.currentTrack()?.let { track ->
-                AnimatedVisibility(visible = !(tab == 0 && waveScreenShowsTrack(queue, waveStarting, waveError != null))) {
-                    MiniPlayer(
-                        track = track,
-                        player = player,
-                        liked = liked.contains(track.id),
-                        onLike = { model.toggleLike(track) },
-                        onOpen = { showPlayer = true },
-                    )
+                // Мини-плеер над нижним меню. Под полноэкранным плеером его не прячем:
+                // плеер закрывает всё окно, а список под ним не должен менять высоту.
+                // На вкладке «Волна» мини-плеер заменяет сам экран волны, когда он показывает трек.
+                val waveStarting by model.waveStarting.collectAsStateWithLifecycle()
+                val waveError by model.waveError.collectAsStateWithLifecycle()
+                queue.currentTrack()?.let { track ->
+                    AnimatedVisibility(visible = !(tab == 0 && waveScreenShowsTrack(queue, waveStarting, waveError != null))) {
+                        MiniPlayer(
+                            track = track,
+                            player = player,
+                            liked = liked.contains(track.id),
+                            onLike = { model.toggleLike(track) },
+                            onOpen = { showPlayer = true },
+                        )
+                    }
                 }
+                BottomNav(
+                    // Положение таблетки: страница плюс доля свайпа, читается только при отрисовке.
+                    rawPosition = { pagerState.currentPage + pagerState.currentPageOffsetFraction },
+                    onSelect = selectTab,
+                )
             }
-            BottomNav(selected = tab, onSelect = { tab = it })
+            // Плеер выезжает снизу и проявляется, 320 мс (как FULLSCREEN на десктопе).
+            AnimatedVisibility(
+                visible = showPlayer && hasTrack,
+                enter = slideInVertically(tween(320, easing = FastOutSlowInEasing)) { it } +
+                    fadeIn(tween(320, easing = FastOutSlowInEasing)),
+                exit = slideOutVertically(tween(320, easing = FastOutSlowInEasing)) { it } +
+                    fadeOut(tween(320, easing = FastOutSlowInEasing)),
+            ) {
+                FullPlayer(
+                    queue = queue,
+                    player = player,
+                    model = model,
+                    onClose = { showPlayer = false },
+                    backEnabled = transition.targetState == EnterExitState.Visible,
+                    onMiniPlayer = if (pipSupported) {
+                        { Pip.enter(activity, playing, likedNow) }
+                    } else {
+                        null
+                    },
+                )
+            }
+            // В режиме PiP вместо интерфейса — компактный мини-плеер. Основной экран под ним
+            // остаётся в композиции, чтобы выбранная вкладка и плеер сохранились до возврата.
+            val inPip by Pip.inPip.collectAsStateWithLifecycle()
+            if (inPip) queue.currentTrack()?.let { PipScreen(it, player) }
         }
-        // Плеер выезжает снизу и проявляется, 320 мс (как FULLSCREEN на десктопе).
-        AnimatedVisibility(
-            visible = showPlayer && hasTrack,
-            enter = slideInVertically(tween(320, easing = FastOutSlowInEasing)) { it } +
-                fadeIn(tween(320, easing = FastOutSlowInEasing)),
-            exit = slideOutVertically(tween(320, easing = FastOutSlowInEasing)) { it } +
-                fadeOut(tween(320, easing = FastOutSlowInEasing)),
-        ) {
-            FullPlayer(
-                queue = queue,
-                player = player,
-                model = model,
-                onClose = { showPlayer = false },
-                backEnabled = transition.targetState == EnterExitState.Visible,
-                onMiniPlayer = if (pipSupported) {
-                    { Pip.enter(activity, playing, likedNow) }
-                } else {
-                    null
-                },
-            )
-        }
-        // В режиме PiP вместо интерфейса — компактный мини-плеер. Основной экран под ним
-        // остаётся в композиции, чтобы выбранная вкладка и плеер сохранились до возврата.
-        val inPip by Pip.inPip.collectAsStateWithLifecycle()
-        if (inPip) queue.currentTrack()?.let { PipScreen(it, player) }
     }
 }
 
@@ -230,41 +325,114 @@ private val NAV_ITEMS = listOf(
     NavItem("Настройки", R.drawable.ic_settings),
 )
 
-/** Нижнее меню: линия сверху, «таблетка» 60×32 под значком активного пункта. */
+/** Пружина переезда таблетки при нажатии в меню (пейджер прыгает сразу): мягкая, с лёгким перелётом. */
+private const val PILL_JUMP_DAMPING = 0.75f
+private const val PILL_JUMP_STIFFNESS = 450f
+
+/** Разница положения, после которой изменение считается прыжком (нажатие), а не движением пальца. */
+private const val PILL_JUMP_THRESHOLD = 0.6f
+
+/** Таблетка на ходу вытягивается по ширине максимум на столько (доля от 60 dp). */
+private const val PILL_STRETCH = 0.4f
+
+private val PILL_WIDTH = 60.dp
+private val PILL_HEIGHT = 32.dp
+
+/** Состояние переезда таблетки: откуда и куда идёт прыжок (читается только при отрисовке). */
+private class PillMotion {
+    var jumping = false
+    var from = 0f
+    var to = 0f
+}
+
+/**
+ * Нижнее меню: линия сверху и одна «таблетка» 60×32 под значком активного пункта.
+ * Таблетка едет за пальцем при свайпе вкладок ([rawPosition] — страница плюс доля свайпа),
+ * а по нажатию в меню плавно переезжает пружиной. Положение и цвета читаются в фазе
+ * отрисовки, меню не перекомпонуется на каждом кадре.
+ */
 @Composable
-private fun BottomNav(selected: Int, onSelect: (Int) -> Unit) {
+private fun BottomNav(rawPosition: () -> Float, onSelect: (Int) -> Unit) {
+    val rawNow by rememberUpdatedState(rawPosition)
+    val pos = remember { Animatable(rawNow()) }
+    val motion = remember { PillMotion() }
+    LaunchedEffect(Unit) {
+        snapshotFlow { rawNow() }.collectLatest { raw ->
+            if (abs(raw - pos.targetValue) > PILL_JUMP_THRESHOLD) {
+                // Нажатие в меню: пейджер перескочил, таблетка переезжает плавно.
+                motion.from = pos.value
+                motion.to = raw
+                motion.jumping = true
+                pos.animateTo(raw, spring(PILL_JUMP_DAMPING, PILL_JUMP_STIFFNESS))
+                motion.jumping = false
+            } else {
+                // Палец ведёт вкладки: таблетка точно под ним, без отставания.
+                motion.jumping = false
+                pos.snapTo(raw)
+            }
+        }
+    }
+    // Жирная подпись у ближайшего пункта, без смешивания: смешанная жирность дёргает текст.
+    val nearest by remember { derivedStateOf { pos.value.roundToInt() } }
+    val pillColor = Pl.surface3
+    val activeIcon = Pl.accent
+    val idleIcon = Pl.text2
+    val activeText = Pl.text
+    val idleText = Pl.text3
+
     Box(Modifier.fillMaxWidth().background(Pl.bg).navigationBarsPadding()) {
-        Row(
-            Modifier.fillMaxWidth().height(68.dp).padding(start = 8.dp, end = 8.dp, top = 8.dp),
-        ) {
-            NAV_ITEMS.forEachIndexed { index, item ->
-                val on = index == selected
-                Column(
-                    Modifier
-                        .weight(1f)
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                        ) { onSelect(index) },
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(4.dp),
-                ) {
-                    Box(
-                        Modifier
-                            .width(60.dp)
-                            .height(32.dp)
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(if (on) Pl.surface3 else androidx.compose.ui.graphics.Color.Transparent),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        PlIcon(item.icon, 22.dp, if (on) Pl.accent else Pl.text2, Modifier.size(22.dp))
+        Box(Modifier.fillMaxWidth().height(68.dp).padding(start = 8.dp, end = 8.dp, top = 8.dp)) {
+            // Одна таблетка на всё меню, под значками.
+            Box(
+                Modifier.fillMaxWidth().height(PILL_HEIGHT).drawBehind {
+                    val p = pos.value
+                    // Чем дальше от пунктов, тем шире: эффект «капли». В покое ровно 60 dp.
+                    val away = if (motion.jumping) {
+                        minOf(abs(p - motion.from), abs(p - motion.to))
+                    } else {
+                        abs(p - p.roundToInt())
                     }
-                    PlText(
-                        item.label,
-                        if (on) PlType.captionStrong else PlType.caption,
-                        if (on) Pl.text else Pl.text3,
-                        maxLines = 1,
+                    val width = PILL_WIDTH.toPx() * (1f + PILL_STRETCH * minOf(1f, away * 2f))
+                    val centerX = (p + 0.5f) * size.width / NAV_ITEMS.size
+                    drawRoundRect(
+                        pillColor,
+                        topLeft = Offset(centerX - width / 2f, 0f),
+                        size = Size(width, PILL_HEIGHT.toPx()),
+                        cornerRadius = CornerRadius(PILL_HEIGHT.toPx() / 2f),
                     )
+                },
+            )
+            Row(Modifier.fillMaxSize()) {
+                NAV_ITEMS.forEachIndexed { index, item ->
+                    val painter = painterResource(item.icon)
+                    // Близость положения к пункту: 1 — таблетка точно под ним, 0 — за пункт и дальше.
+                    val closeness = { (1f - abs(pos.value - index)).coerceIn(0f, 1f) }
+                    Column(
+                        Modifier
+                            .weight(1f)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                            ) { onSelect(index) },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(4.dp),
+                    ) {
+                        Box(Modifier.width(PILL_WIDTH).height(PILL_HEIGHT), contentAlignment = Alignment.Center) {
+                            Box(
+                                Modifier.size(22.dp).drawBehind {
+                                    val tint = lerp(idleIcon, activeIcon, closeness())
+                                    with(painter) { draw(size, colorFilter = ColorFilter.tint(tint)) }
+                                },
+                            )
+                        }
+                        BasicText(
+                            item.label,
+                            style = if (nearest == index) PlType.captionStrong else PlType.caption,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = { lerp(idleText, activeText, closeness()) },
+                        )
+                    }
                 }
             }
         }

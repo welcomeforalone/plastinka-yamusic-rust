@@ -1,5 +1,7 @@
 package ru.plastinka.ui
 
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -95,6 +97,10 @@ private fun WaveHeader(onOpenSettings: () -> Unit) {
     }
 }
 
+/** Масштаб кольца: `1 + 0,06 · (0,5 − 0,5 · cos(2π · (фаза + сдвиг)))`, фаза 0…1 за 2,4 с (`PULSE_SCALE` на десктопе). */
+private fun waveRingScale(phase: Float, shift: Float): Float =
+    1f + 0.06f * (0.5f - 0.5f * kotlin.math.cos(2.0 * Math.PI * (phase + shift)).toFloat())
+
 @Composable
 private fun WaveIdle(model: AppViewModel, player: PlayerController?, onOpenSettings: () -> Unit) {
     val starting by model.waveStarting.collectAsStateWithLifecycle()
@@ -114,13 +120,41 @@ private fun WaveIdle(model: AppViewModel, player: PlayerController?, onOpenSetti
             WaveHeader(onOpenSettings)
             // Кольца: верх первого на 92 dp ниже заголовка (макет 03).
             Spacer(Modifier.height(92.dp))
+            // Кольца медленно дышат (десктоп: 2,4 с, +6 %); фаза читается только при отрисовке.
+            val pulse = androidx.compose.animation.core.rememberInfiniteTransition(label = "wavePulse").animateFloat(
+                0f,
+                1f,
+                androidx.compose.animation.core.infiniteRepeatable(
+                    androidx.compose.animation.core.tween(2400, easing = androidx.compose.animation.core.LinearEasing),
+                ),
+                label = "wavePulsePhase",
+            )
             Box(Modifier.fillMaxWidth().height(272.dp), contentAlignment = Alignment.Center) {
                 Canvas(Modifier.size(272.dp)) {
                     val stroke = Stroke(1.dp.toPx())
-                    drawCircle(Color.White.copy(alpha = 0.06f), radius = 136.dp.toPx(), style = stroke)
-                    drawCircle(Color.White.copy(alpha = 0.10f), radius = 104.dp.toPx(), style = stroke)
+                    drawCircle(
+                        Color.White.copy(alpha = 0.06f),
+                        radius = 136.dp.toPx() * waveRingScale(pulse.value, 0.5f),
+                        style = stroke,
+                    )
+                    drawCircle(
+                        Color.White.copy(alpha = 0.10f),
+                        radius = 104.dp.toPx() * waveRingScale(pulse.value, 0.25f),
+                        style = stroke,
+                    )
                 }
-                Box(Modifier.size(152.dp).background(Pl.accent.copy(alpha = 0.22f), CircleShape))
+                Box(
+                    Modifier
+                        .size(152.dp)
+                        .graphicsLayer {
+                            val scale = waveRingScale(pulse.value, 0f)
+                            scaleX = scale
+                            scaleY = scale
+                        }
+                        .background(Pl.accent.copy(alpha = 0.22f), CircleShape),
+                )
+                val startSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                val startColor by rememberPressedColor(Pl.accent, startSource)
                 Box(
                     Modifier
                         .size(100.dp)
@@ -132,8 +166,12 @@ private fun WaveIdle(model: AppViewModel, player: PlayerController?, onOpenSetti
                             spotColor = Pl.accent.copy(alpha = 0.6f),
                         )
                         .clip(CircleShape)
-                        .background(Pl.accent, CircleShape)
-                        .clickable(enabled = !starting) { model.startWave(player) },
+                        .background(startColor, CircleShape)
+                        .clickable(
+                            interactionSource = startSource,
+                            indication = androidx.compose.foundation.LocalIndication.current,
+                            enabled = !starting,
+                        ) { model.startWave(player) },
                     contentAlignment = Alignment.Center,
                 ) {
                     if (starting) {
@@ -185,11 +223,14 @@ private fun WavePlaying(
 ) {
     val track = queue.currentTrack() ?: return
     val tint = rememberTint(queue, track)
-    val playing = player?.isPlaying?.collectAsStateWithLifecycle()?.value ?: false
+    val playing = player?.playWhenReady?.collectAsStateWithLifecycle()?.value ?: false
+    val buffering = player?.buffering?.collectAsStateWithLifecycle()?.value ?: false
     val liked by QueueHolder.likedIds.collectAsStateWithLifecycle()
     val progress by rememberProgress(player, track)
     var preview by remember { mutableStateOf<Float?>(null) }
     val next = queue.tracks.getOrNull(queue.current + 1)
+    // Свайп по обложке: влево — следующий (в волне тот же пропуск, что у кнопки), вправо — предыдущий.
+    val coverSwipe = rememberSwipeOffset()
     // Повтор и перемешивание — режимы плеера: те же, что у кнопок в полноэкранном плеере.
     val repeat = player?.repeatMode?.collectAsStateWithLifecycle()?.value ?: Player.REPEAT_MODE_OFF
     val shuffle = player?.shuffle?.collectAsStateWithLifecycle()?.value ?: false
@@ -220,6 +261,13 @@ private fun WavePlaying(
                     // Обложка 232 с рамкой 2 dp снаружи (цвет трека, 70 %) и тенью цвета трека.
                     Box(
                         Modifier
+                            .trackSwipe(
+                                coverSwipe,
+                                canPrevious = player != null,
+                                canNext = player != null,
+                                onPrevious = { player?.previous() },
+                                onNext = { player?.next() },
+                            )
                             .size(236.dp)
                             .shadow(
                                 24.dp,
@@ -233,26 +281,29 @@ private fun WavePlaying(
                             .clip(RoundedCornerShape(24.dp))
                             .clickable(onClick = onOpenPlayer),
                     ) {
-                        Cover(track.coverUrl("600x600"), track.id, 232.dp, 24.dp)
+                        Cover(track.coverUrl("600x600"), track.id, 232.dp, 24.dp, fadeMs = COVER_FADE_MS)
                     }
                 }
                 Spacer(Modifier.height(24.dp))
-                PlText(
-                    track.title,
-                    PlType.title,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
-                    textAlign = TextAlign.Center,
-                    maxLines = 2,
-                )
-                Spacer(Modifier.height(4.dp))
-                PlText(
-                    track.artistNames,
-                    PlType.body,
-                    Pl.text2,
-                    Modifier.fillMaxWidth().padding(horizontal = 24.dp),
-                    textAlign = TextAlign.Center,
-                    maxLines = 1,
-                )
+                // Не помещается — бегущая строка (пауза 2 с, 40 dp/с), как на экране волны десктопа.
+                val links = rememberTrackLinks(track)
+                Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                    MarqueeText(
+                        track.displayTitle,
+                        PlType.title,
+                        Pl.text,
+                        Modifier.padding(horizontal = 24.dp).then(links.title),
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    MarqueeText(
+                        track.artistNames,
+                        PlType.body,
+                        Pl.text2,
+                        Modifier.padding(horizontal = 24.dp).then(links.artists),
+                        textAlign = TextAlign.Center,
+                    )
+                }
                 Spacer(Modifier.height(12.dp))
                 Column(Modifier.padding(horizontal = 32.dp)) {
                     // VibeColorizer красит фон, кольцо и ореол; перемотка и кнопки — акцент.
@@ -313,7 +364,7 @@ private fun WavePlaying(
                         }
                         Spacer(Modifier.width(6.dp))
                     }
-                    PlayButton(76.dp, playing, onClick = { player?.toggle() })
+                    PlayButton(76.dp, playing, onClick = { player?.toggle() }, loading = buffering)
                     Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                         Spacer(Modifier.width(6.dp))
                         Box(Modifier.size(40.dp).clip(CircleShape).clickable { player?.next() }, Alignment.Center) {
@@ -345,7 +396,7 @@ private fun WavePlaying(
                     // У чужой очереди строки «Далее» нет (как на десктопе): порядок зависит от перемешивания.
                     next?.takeIf { !foreign }?.let {
                         PlText(
-                            "Далее: ${it.title} — ${it.artistNames}",
+                            "Далее: ${it.displayTitle} — ${it.artistNames}",
                             PlType.caption,
                             Pl.text3,
                             Modifier.fillMaxWidth().padding(horizontal = 24.dp),

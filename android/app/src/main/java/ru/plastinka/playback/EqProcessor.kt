@@ -21,6 +21,7 @@ object EqControl {
  * побайтно. Без выделений памяти на буфер и без блокировок; ошибка расчёта не
  * глушит звук: буфер уходит как есть. Результат зажат в допустимый диапазон.
  */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class EqProcessor : BaseAudioProcessor() {
 
     private var eq: Equalizer? = null

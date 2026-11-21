@@ -45,8 +45,13 @@ impl Library {
             return Vec::new();
         };
         let censor = self.plugins.fckcensor.then_some(&self.censor);
+        let relinks = &self.relinks;
         let shuffle = !self.in_wave() && self.player.shuffle;
-        queue.upcoming(shuffle, &|track| plugins::playable(censor, track), UPCOMING)
+        queue.upcoming(
+            shuffle,
+            &|track| plugins::playable(censor, relinks, track),
+            UPCOMING,
+        )
     }
 
     /// Обложки строк панели (для загрузки), пока она открыта.
@@ -62,7 +67,7 @@ impl Library {
         self.recent_tracks()
             .into_iter()
             .chain(next)
-            .filter_map(|track| self.shown(track).cover_uri.as_deref())
+            .filter_map(|track| self.art_track(track).cover_uri.as_deref())
             .collect()
     }
 
@@ -72,6 +77,7 @@ impl Library {
     pub fn recent_tracks(&self) -> Vec<&Track> {
         let session: Vec<&Track> = self.history.tracks().collect();
         let censor = self.plugins.fckcensor.then_some(&self.censor);
+        let relinks = &self.relinks;
         let shuffle = !self.in_wave() && self.player.shuffle;
         let before: Vec<&Track> = self
             .queue
@@ -80,7 +86,7 @@ impl Library {
                 queue
                     .before(
                         shuffle,
-                        &|track| plugins::playable(censor, track),
+                        &|track| plugins::playable(censor, relinks, track),
                         crate::ui::history::LIMIT,
                     )
                     .into_iter()
@@ -210,10 +216,22 @@ impl Library {
         on_press: Option<App>,
     ) -> Element<'a, App> {
         let track = self.shown(original);
+        // «Копия» перед названием, если вместо недоступного трека играет копия.
+        let mut name = row![].spacing(6).align_y(Alignment::Center);
+        if let Some(tag) = super::copies::tag(self.link(original)) {
+            name = name.push(tag);
+        }
+        let name = name.push(
+            container(theme::line(track.display_title(), Style::Body, title_color)).clip(true),
+        );
         let content = row![
-            widgets::cover(cover_art(covers, track), COVER, widgets::RADIUS_S),
+            widgets::cover(
+                cover_art(covers, self.art_track(original)),
+                COVER,
+                widgets::RADIUS_S
+            ),
             column![
-                container(theme::line(track.display_title(), Style::Body, title_color)).clip(true),
+                name,
                 container(theme::line(
                     track.artists_text(),
                     Style::Secondary,

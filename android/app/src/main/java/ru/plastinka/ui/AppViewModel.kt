@@ -7,7 +7,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import ru.plastinka.PlastinkaApp
 import ru.plastinka.data.AccountInfo
@@ -15,6 +18,8 @@ import ru.plastinka.data.DeviceCode
 import ru.plastinka.data.Prefs
 import ru.plastinka.data.WaveActivity
 import ru.plastinka.data.WaveSettings
+import ru.plastinka.data.YandexApi
+import ru.plastinka.playback.AuthEvents
 import ru.plastinka.data.SearchKind
 import ru.plastinka.data.Track
 import ru.plastinka.playback.QueueHolder
@@ -24,6 +29,10 @@ data class LoginUi(
     val phase: LoginPhase = LoginPhase.Idle,
     val code: DeviceCode? = null,
     val error: String? = null,
+    /** Пометка над кодом («Вход больше не действует…»). */
+    val notice: String? = null,
+    /** Токен получен, но не сохранён: экран предлагает «Повторить» сохранение. */
+    val retrySave: Boolean = false,
 )
 
 sealed interface LoginPhase {
@@ -38,6 +47,12 @@ data class LibraryUi(
     val tracks: List<Track> = emptyList(),
     val error: String? = null,
     val account: AccountInfo? = null,
+    /** Идёт загрузка «Мне нравится» (отдельно от проверки аккаунта). */
+    val likesLoading: Boolean = false,
+    /** Список лайков загружен: только тогда его правят по изменениям сердец. */
+    val likesLoaded: Boolean = false,
+    /** Готовый текст ошибки «Мне нравится», только если показать нечего. */
+    val likesError: String? = null,
 )
 
 /**
@@ -102,6 +117,10 @@ data class Keyed<T>(
     val data: T? = null,
     val error: String? = null,
 )
+
+/** Хранилище ключей Android не приняло токен (как `token_saved` на десктопе). */
+private const val KEYSTORE_UNAVAILABLE =
+    "Хранилище ключей Android недоступно. Без него Plastinka не запомнит вход. Перезапустите телефон и повторите."
 
 /** Сообщение об ошибке поиска. */
 private const val SEARCH_FAILED = "Не удалось выполнить поиск. Проверьте соединение."
@@ -169,7 +188,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val plastinka = app as PlastinkaApp
 
     private val _login = MutableStateFlow(LoginUi())
-    val login: StateFlow<LoginUi> = _login
+
+    /** Пометка экрана входа («Вход больше не действует…»): живёт, пока не войдём или не выйдем. */
+    private val _loginNotice = MutableStateFlow<String?>(null)
+    val login: StateFlow<LoginUi> = combine(_login, _loginNotice) { ui, notice -> ui.copy(notice = notice) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, LoginUi())
+
+    /** Полученный токен, который не удалось сохранить: только в памяти, до успеха или нового входа. */
+    private var unsavedToken: String? = null
 
     private val _library = MutableStateFlow(LibraryUi())
     val library: StateFlow<LibraryUi> = _library
@@ -276,6 +302,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun startLogin() {
         if (_login.value.phase == LoginPhase.Requesting) return
         pollJob?.cancel()
+        unsavedToken = null
         _login.value = LoginUi(phase = LoginPhase.Requesting)
         viewModelScope.launch {
             try {
@@ -297,16 +324,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         var failures = 0
         while (System.currentTimeMillis() < deadline) {
             delay(code.intervalSec * 1000)
+            var token: String? = null
             try {
-                val token = plastinka.api.pollToken(code)
-                if (token != null) {
-                    plastinka.tokenStore.save(token)
-                    _loggedIn.value = true
-                    _login.value = LoginUi(phase = LoginPhase.Done)
-                    loadLibrary()
-                    return
-                }
-                failures = 0
+                token = plastinka.api.pollToken(code)
+                if (token == null) failures = 0
             } catch (e: IllegalStateException) {
                 _login.value = LoginUi(
                     phase = LoginPhase.Waiting,
@@ -325,8 +346,36 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     return
                 }
             }
+            // Сохранение вне try: его сбой не сетевой, опрос кода повторять незачем.
+            if (token != null) {
+                finishLogin(token)
+                return
+            }
         }
         _login.value = LoginUi(error = "код истёк, начните заново")
+    }
+
+    /** Токен получен: сохраняем в хранилище ключей; не вышло — экран с «Повторить», токен остаётся в памяти. */
+    private suspend fun finishLogin(token: String) {
+        val saved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            plastinka.tokenStore.save(token)
+        }
+        if (!saved) {
+            unsavedToken = token
+            _login.value = LoginUi(error = KEYSTORE_UNAVAILABLE, retrySave = true)
+            return
+        }
+        unsavedToken = null
+        _loginNotice.value = null
+        _loggedIn.value = true
+        _login.value = LoginUi(phase = LoginPhase.Done)
+        loadLibrary()
+    }
+
+    /** «Повторить» на экране «Не удалось сохранить вход»: то же сохранение того же токена. */
+    fun retrySaveToken() {
+        val token = unsavedToken ?: return
+        viewModelScope.launch { finishLogin(token) }
     }
 
     private var waveJob: Job? = null
@@ -337,6 +386,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val waveError: StateFlow<String?> = _waveError
 
     init {
+        // Сервис воспроизведения получил 401 от потока: токен не принят.
+        viewModelScope.launch { AuthEvents.relogin.collect { relogin() } }
+        viewModelScope.launch { QueueHolder.likedIds.collect(::syncLikedList) }
         // Ошибка запуска волны устаревает, когда пользователь включил другой список:
         // иначе вкладка «Волна» так и показывала бы её вместо играющего трека.
         viewModelScope.launch {
@@ -671,36 +723,108 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private var libraryJob: Job? = null
 
+    /** Загружает библиотеку, только если её ещё нет и загрузка не идёт (например, не после поворота экрана). */
+    fun ensureLibrary() {
+        if (!loggedIn) return
+        if (_library.value.account != null || libraryJob?.isActive == true) return
+        loadLibrary()
+    }
+
+    /**
+     * Сначала статус аккаунта: Плюс есть — главный экран открывается сразу, не дожидаясь
+     * лайков. Ошибка статуса не считается подпиской (правило 2). Уже подтверждённый
+     * аккаунт сбой сети не выбрасывает: `AccountHolder` очищается только при выходе,
+     * отсутствии Плюса и повторном входе.
+     */
     fun loadLibrary() {
         val token = plastinka.tokenStore.load() ?: return
         _library.value = _library.value.copy(loading = true, error = null)
         libraryJob?.cancel()
         libraryJob = viewModelScope.launch {
-            try {
-                val status = plastinka.api.accountStatus(token)
-                // Сообщения о прослушивании разрешены только при подтверждённом Плюсе.
-                if (status.hasPlus) {
-                    ru.plastinka.playback.AccountHolder.allow(status.uid)
-                    loadAvatar(token)
-                } else {
-                    ru.plastinka.playback.AccountHolder.clear()
-                }
-                val ids = plastinka.api.likedIds(token, status.uid)
-                val tracks = plastinka.api.tracks(token, ids)
-                QueueHolder.setLikes(ids.toSet())
-                _library.value = LibraryUi(
-                    loading = false,
-                    tracks = tracks,
-                    account = status,
-                )
+            val known = _library.value.account != null
+            val status = try {
+                plastinka.api.accountStatus(token)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
-                ru.plastinka.playback.AccountHolder.clear()
-                _library.value = LibraryUi(loading = false, error = e.message ?: "ошибка загрузки")
+                if (e is YandexApi.UnauthorizedException) {
+                    relogin()
+                } else if (known) {
+                    _library.value = _library.value.copy(loading = false)
+                    toast("Не удалось обновить данные аккаунта. Проверьте соединение")
+                } else {
+                    _library.value = LibraryUi(loading = false, error = e.message ?: "ошибка загрузки")
+                }
+                return@launch
             }
+            if (!status.hasPlus) {
+                ru.plastinka.playback.AccountHolder.clear()
+                _library.value = LibraryUi(account = status)
+                return@launch
+            }
+            // Сообщения о прослушивании разрешены только при подтверждённом Плюсе.
+            ru.plastinka.playback.AccountHolder.allow(status.uid)
+            loadAvatar(token)
+            _library.value = _library.value.copy(
+                loading = false,
+                error = null,
+                account = status,
+                likesLoading = true,
+                likesError = null,
+            )
+            fetchLikes(token, status.uid)
         }
         viewModelScope.launch { plastinka.fckCensor.refresh() }
+    }
+
+    /** «Повторить» в «Мне нравится»: перезагружаются только лайки. */
+    fun retryLikes() {
+        val token = plastinka.tokenStore.load() ?: return
+        val uid = _library.value.account?.uid ?: return
+        if (libraryJob?.isActive == true) return
+        _library.value = _library.value.copy(likesLoading = true, likesError = null)
+        libraryJob = viewModelScope.launch { fetchLikes(token, uid) }
+    }
+
+    private suspend fun fetchLikes(token: String, uid: Long) {
+        try {
+            val ids = plastinka.api.likedIds(token, uid)
+            val tracks = plastinka.api.tracks(token, ids)
+            // Пока набор сердец заменяется, список не сверяем с ним (likesLoaded = false).
+            _library.value = _library.value.copy(likesLoaded = false)
+            QueueHolder.setLikes(ids.toSet())
+            _library.value = _library.value.copy(
+                tracks = tracks,
+                likesLoaded = true,
+                likesLoading = false,
+                likesError = null,
+            )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (e is YandexApi.UnauthorizedException) {
+                relogin()
+                return
+            }
+            // Список уже был — остаётся, ошибка только тостом; иначе экран покажет блок с «Повторить».
+            val had = _library.value.tracks.isNotEmpty()
+            _library.value = _library.value.copy(
+                likesLoading = false,
+                likesError = if (had) null else likesErrorText(e),
+            )
+            if (had) toast("Не удалось обновить «Мне нравится»")
+        }
+    }
+
+    private fun likesErrorText(e: Exception): String =
+        if (e is java.io.IOException) {
+            "Нет соединения с сервером. Проверьте интернет и попробуйте ещё раз."
+        } else {
+            e.message?.takeIf { it.isNotBlank() } ?: "Неизвестная ошибка"
+        }
+
+    private fun toast(text: String) {
+        android.widget.Toast.makeText(getApplication<PlastinkaApp>(), text, android.widget.Toast.LENGTH_SHORT).show()
     }
 
     /** Один запрос после подтверждения входа и Плюса; уже полученный адрес не перезапрашивается. */
@@ -710,11 +834,32 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun logout() {
+        plastinka.tokenStore.clear()
+        resetSession(clearHistory = true)
+        _loginNotice.value = null
+    }
+
+    /**
+     * Токен не принят (401): как на десктопе, экран входа с пометкой и сразу запрос кода.
+     * Токен из хранилища не удаляется: новый вход его перезапишет, а при перезапуске
+     * приложение проверит его ещё раз. Не в аккаунте — ничего не делает.
+     */
+    fun relogin() {
+        if (!_loggedIn.value) return
+        resetSession(clearHistory = false)
+        _loginNotice.value = "Вход больше не действует. Войдите заново."
+        startLogin()
+    }
+
+    /** Общий сброс состояния аккаунта для выхода и повторного входа (очередь останавливает уход с главного экрана). */
+    private fun resetSession(clearHistory: Boolean) {
         avatarJob?.cancel()
         _avatarUrl.value = null
-        plastinka.tokenStore.clear()
         ru.plastinka.playback.AccountHolder.clear() // отложенные play-audio отменяются
         _loggedIn.value = false
+        unsavedToken = null
+        knownTracks.clear()
+        removedLikes.clear()
         libraryJob?.cancel() // запоздавший ответ не должен вернуть аккаунт после выхода
         QueueHolder.set(emptyList(), -1, "")
         _library.value = LibraryUi()
@@ -723,7 +868,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         monthTopJob?.cancel()
         _monthTop.value = MonthTopUi()
         _history.value = HistoryUi()
-        ru.plastinka.data.PlayLog.clear()
+        if (clearHistory) ru.plastinka.data.PlayLog.clear()
         playlist.reset()
         album.reset()
         artist.reset()
@@ -736,7 +881,51 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun toggleLike(track: Track) {
+        knownTracks[track.id] = track
         ru.plastinka.playback.TrackActions.toggleLike(plastinka, viewModelScope, track.id)
+    }
+
+    /** Треки, которые нажимали в приложении: из них строка встаёт в «Мне нравится», когда сердце поставлено. */
+    private val knownTracks = HashMap<String, Track>()
+
+    /** Строки, ушедшие из списка при снятии сердца: при откате возвращаются на то же место. */
+    private val removedLikes = HashMap<String, Pair<Int, Track>>()
+
+    /**
+     * «Мне нравится» меняется сразу, как `edit_likes` на десктопе. Источник правды —
+     * [QueueHolder.likedIds]: его меняют и приложение, и шторка. Ушёл id — строка исчезает,
+     * добавился — трек встаёт в начало (откат ошибки — на прежнее место), если он известен
+     * (из нажатия в приложении или из очереди); неизвестный появится при следующей загрузке.
+     */
+    private fun syncLikedList(ids: Set<String>) {
+        val lib = _library.value
+        if (!lib.likesLoaded) return
+        var list = lib.tracks
+        val gone = list.withIndex().filter { it.value.id !in ids }
+        var changed = gone.isNotEmpty()
+        if (changed) {
+            gone.forEach { removedLikes[it.value.id] = it.index to it.value }
+            list = list.filter { it.id in ids }
+        }
+        val have = list.mapTo(HashSet()) { it.id }
+        for (id in ids) {
+            if (id in have) continue
+            val rolledBack = QueueHolder.consumeRollback(id)
+            val old = removedLikes.remove(id)
+            if (rolledBack && old != null) {
+                list = list.toMutableList().also { it.add(old.first.coerceIn(0, it.size), old.second) }
+                have.add(id)
+                changed = true
+                continue
+            }
+            val track = knownTracks[id] ?: old?.second
+                ?: QueueHolder.state.value.tracks.firstOrNull { it.id == id }
+                ?: continue
+            list = listOf(track) + list
+            have.add(id)
+            changed = true
+        }
+        if (changed) _library.value = _library.value.copy(tracks = list)
     }
 
     private fun deviceId(): String {

@@ -19,6 +19,26 @@ class PlayerController(val controller: MediaController) {
     private val _isPlaying = MutableStateFlow(controller.isPlaying)
     val isPlaying: StateFlow<Boolean> = _isPlaying
 
+    /**
+     * Пользователь хочет звук: плеер должен играть (`playWhenReady`), пока ждёт сеть — тоже.
+     * По нему значок паузы на кнопках Play и действие [toggle]: во время буферизации паузу
+     * ставить можно. Остановленный плеер (ошибка, конец очереди) — «не хочет».
+     */
+    private val _playWhenReady = MutableStateFlow(wantsSound())
+    val playWhenReady: StateFlow<Boolean> = _playWhenReady
+
+    /** Звук ждёт данных (сеть): на кнопке Play крутится тонкий ободок. */
+    private val _buffering = MutableStateFlow(isBuffering())
+    val buffering: StateFlow<Boolean> = _buffering
+
+    private fun wantsSound(): Boolean =
+        controller.playWhenReady &&
+            controller.playbackState != Player.STATE_IDLE &&
+            controller.playbackState != Player.STATE_ENDED
+
+    private fun isBuffering(): Boolean =
+        controller.playWhenReady && controller.playbackState == Player.STATE_BUFFERING
+
     /** Перемешивание и повтор: настоящие режимы MediaController. */
     private val _shuffle = MutableStateFlow(controller.shuffleModeEnabled)
     val shuffle: StateFlow<Boolean> = _shuffle
@@ -29,6 +49,16 @@ class PlayerController(val controller: MediaController) {
         controller.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 _isPlaying.value = isPlaying
+            }
+
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                _playWhenReady.value = wantsSound()
+                _buffering.value = isBuffering()
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                _playWhenReady.value = wantsSound()
+                _buffering.value = isBuffering()
             }
 
             override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
@@ -76,10 +106,33 @@ class PlayerController(val controller: MediaController) {
     ) {
         // Пустой список или индекс вне списка: текущую очередь не трогаем.
         if (tracks.getOrNull(startIndex) == null) return
-        // Недоступные треки в очередь не попадают; индекс пересчитывается:
-        // стартуем с нажатого трека или с ближайшего доступного после него.
-        val target = tracks.drop(startIndex).firstOrNull { it.playable } ?: return
-        val playable = tracks.filter { it.playable }
+        // Волна не повторяет треки: одинаковые в первой порции отбрасываются (нажатый остаётся).
+        var from = startIndex
+        val tracks = if (isWave) {
+            // Нажатый трек остаётся на своём месте, из его копий и прочих дублей — первый.
+            val seen = hashSetOf(tracks.getOrNull(startIndex)?.id.orEmpty())
+            val kept = ArrayList<Track>()
+            tracks.forEachIndexed { i, t ->
+                if (i == startIndex) {
+                    from = kept.size
+                    kept += t
+                } else if (seen.add(t.id)) {
+                    kept += t
+                }
+            }
+            kept
+        } else {
+            tracks
+        }
+        val startIndex = from
+        // Недоступные треки без звука и без копии в очередь не попадают; индекс пересчитывается:
+        // стартуем с нажатого трека или с ближайшего играбельного после него. Недоступный трек,
+        // у которого копию ещё не искали, остаётся: сервис найдёт её перед воспроизведением
+        // (иначе трек, до которого не докрутили, выпал бы из очереди, хотя копия у него есть).
+        val relink = ru.plastinka.data.Relink.current
+        val queueable = { t: Track -> t.playable || relink?.worthQueueing(t) == true }
+        val target = tracks.drop(startIndex).firstOrNull(queueable) ?: return
+        val playable = tracks.filter(queueable)
         val index = playable.indexOfFirst { it === target }
         if (index < 0) return
         val wasWave = QueueHolder.state.value.isWave
@@ -95,18 +148,40 @@ class PlayerController(val controller: MediaController) {
         }
         QueueHolder.chosenId = if (isWave) null else target.id
         QueueHolder.set(playable, index, title, isWave, source)
+        if (isWave) PlaybackService.waveQueued(playable.map { it.id })
         val items = playable.map(PlaybackService::mediaItemOf)
         controller.setMediaItems(items, index, 0)
         controller.prepare()
         controller.play()
     }
 
+    /**
+     * Play/пауза по `playWhenReady`: во время буферизации тоже можно поставить на паузу.
+     * Плеер, остановленный ошибкой, перед Play готовится заново (позиция сохранена).
+     */
     fun toggle() {
-        if (controller.isPlaying) controller.pause() else controller.play()
+        if (_playWhenReady.value) {
+            controller.pause()
+        } else {
+            if (controller.playbackState == Player.STATE_IDLE) controller.prepare()
+            controller.play()
+        }
     }
 
-    fun next() = controller.seekToNextMediaItem()
-    fun previous() = controller.seekToPreviousMediaItem()
+    /**
+     * «Следующий»: на последнем треке волны ждём порцию и переходим к первому новому
+     * (как на десктопе), в остальных случаях — обычный переход.
+     */
+    fun next() {
+        if (QueueHolder.state.value.isWave && !controller.hasNextMediaItem()) {
+            PlaybackService.requestNextInWave()
+        } else {
+            controller.seekToNextMediaItem()
+        }
+    }
+
+    /** «Назад»: после 3 секунд трека — к его началу, раньше — к предыдущему (как на десктопе). */
+    fun previous() = controller.seekToPrevious()
     fun seekTo(positionMs: Long) = controller.seekTo(positionMs)
     fun seekTo(index: Int, positionMs: Long) {
         // Выбор из очереди — осознанный: ИИ-трек не пропускаем.

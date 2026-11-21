@@ -149,7 +149,7 @@ private fun TrackMenuSheet(track: Track, actions: List<TrackAction>, host: Track
                 Modifier.padding(start = 20.dp, end = 20.dp, bottom = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                PlText(track.title, PlType.headline, maxLines = 1)
+                PlText(track.displayTitle, PlType.headline, maxLines = 1)
                 PlText(track.artistNames, PlType.secondary, Pl.text2, maxLines = 1)
             }
             for (action in actions) {
