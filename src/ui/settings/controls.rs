@@ -101,8 +101,6 @@ pub fn switch<'a>(on: bool, on_toggle: impl Fn(bool) -> App + 'a) -> Element<'a,
 }
 
 /// Сегменты: выбор одного из нескольких значений в общей плашке.
-// Пока не используются: понадобятся разделам этапа 11.
-#[allow(dead_code)]
 pub fn segments<'a, T>(
     items: impl IntoIterator<Item = (T, &'a str)>,
     selected: T,

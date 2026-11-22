@@ -242,6 +242,26 @@ pub struct PluginsConfig {
     pub copy_track_name_format: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub vibe_colorizer: Option<bool>,
+    /// YandexMusicTime: плагин, время в заголовке, период, секунды, подписи,
+    /// серия, огонёк вместо текста, пункт «Статистика» в меню.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub listen_time: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub listen_timer: Option<bool>,
+    /// `total`, `year`, `month`, `week`, `day` или `session`; другое — как
+    /// будто не задано.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub listen_period: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub listen_seconds: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub listen_label: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub listen_streak: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub listen_flame: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub listen_menu: Option<bool>,
 }
 
 impl PluginsConfig {

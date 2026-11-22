@@ -10,6 +10,7 @@
 mod browse;
 mod copies;
 mod history_screen;
+mod listen;
 mod lyrics;
 mod mini;
 mod pages;
@@ -61,6 +62,7 @@ use crate::sync::service::Repeat as TogetherRepeat;
 use crate::texts::{self, sentence};
 use iced::animation::Animation;
 use iced::time::Instant;
+pub use listen::Msg as ListenMsg;
 pub use pages::Target;
 use pages::{Collected, Collections, Entry, Loaded, PlaylistTab, SearchState, ShelfId};
 pub use plugins::Msg as PluginMsg;
@@ -257,6 +259,8 @@ pub enum Section {
     Albums,
     Artists,
     History,
+    /// YandexMusicTime: время прослушивания и серия.
+    Stats,
     Settings,
 }
 
@@ -270,6 +274,7 @@ impl Section {
             Self::Albums => "Альбомы",
             Self::Artists => "Исполнители",
             Self::History => "История",
+            Self::Stats => "Статистика",
             Self::Settings => "Настройки",
         }
     }
@@ -283,6 +288,7 @@ impl Section {
             Self::Albums => Icon::Album,
             Self::Artists => Icon::Artist,
             Self::History => Icon::History,
+            Self::Stats => Icon::Stats,
             Self::Settings => Icon::Settings,
         }
     }
@@ -386,6 +392,8 @@ pub enum Message {
     PlayHistoryItem(usize, usize, usize),
     /// Прослушивания прошлых запусков прочитаны с диска.
     LocalPlaysLoaded(Vec<history::LocalPlay>),
+    /// YandexMusicTime: файл прочитан, тик, запись закончилась.
+    Listen(listen::Msg),
     /// Аватар аккаунта из Яндекс ID (`None` — нет или не загрузился).
     AvatarLoaded(Option<Arc<Avatar>>),
     /// Играть с трека очереди (панель «Очередь»).
@@ -415,6 +423,10 @@ pub enum Effect {
     Toast(String),
     /// Новое сопряжение: запомнить в `config.toml`.
     TogetherPaired(crate::storage::config::PairedDevice),
+    /// Открыть диалог (подтверждение восстановления статистики).
+    OpenDialog(super::Dialog),
+    /// Закрыть диалог и показать сообщение, если оно есть.
+    DialogDone(Option<String>),
 }
 
 enum Likes {
@@ -570,6 +582,8 @@ pub struct Library {
     plays: api::PlayTracker,
     /// «Слушать вместе»: служба, связь, ведущий и ведомый.
     together: together::Together,
+    /// YandexMusicTime: время прослушивания и серия дней.
+    listen: listen::Listen,
 }
 
 /// Анимации плеера.
@@ -691,6 +705,7 @@ fn test_start() -> Vec<Task<Message>> {
             Task::done(Message::Lyrics(lyrics::Msg::Toggle)),
         ],
         Ok("history") => vec![Task::done(Message::Nav(Section::History))],
+        Ok("stats") => vec![Task::done(Message::Nav(Section::Stats))],
         Ok("queue") => vec![
             Task::done(Message::PlayList(ListKey::Liked)),
             Task::done(Message::Lyrics(lyrics::Msg::ToggleQueue)),
@@ -810,6 +825,7 @@ impl Library {
             play_context: history_screen::liked_context(),
             plays: api::PlayTracker::default(),
             together: together::Together::new(),
+            listen: listen::Listen::new(),
         };
         let task = library.load_likes(http);
         let plugins = library.plugins_changed(plugins);
@@ -826,13 +842,17 @@ impl Library {
         let stations = library.wave_load_stations();
         // Аватар из Яндекс ID грузится отдельно и экран не задерживает.
         let avatar = library.avatar_load(http);
+        // Статистика прослушиваний — с диска, в фоне.
+        let listen = Library::listen_load();
         // Кэш копий недоступных треков — с диска, в фоне.
         let relinks = Task::perform(crate::relink::load(), |cache| {
             Message::Plugin(plugins::Msg::RelinkDisk(Box::new(cache)))
         });
         (
             library,
-            Task::batch([task, plugins, history, restored, stations, avatar, relinks]),
+            Task::batch([
+                task, plugins, history, restored, stations, avatar, relinks, listen,
+            ]),
         )
     }
 
@@ -962,6 +982,7 @@ impl Library {
             || self.loading_on_screen()
             || self.lyrics_loading()
             || self.history_loading()
+            || self.listen_loading()
             || self.wave_animating()
     }
 
@@ -1093,7 +1114,7 @@ impl Library {
         } else {
             Subscription::none()
         };
-        Subscription::batch([audio, tick])
+        Subscription::batch([audio, tick, self.listen_subscription()])
     }
 
     fn send(&self, command: Command) {
@@ -1127,6 +1148,8 @@ impl Library {
         self.wave_pump();
         // Что у нас изменилось, уходит собеседнику.
         self.together_sync();
+        // Время прослушивания: старт и остановка звука.
+        self.listen_sync();
         let queued = Task::batch(std::mem::take(&mut self.tasks));
         // Текст песни: открыли панель или сменился трек — запрашиваем.
         let lyrics = self.lyrics_sync();
@@ -1144,6 +1167,7 @@ impl Library {
         }
         let effect = match message {
             Message::Together(msg) => return self.together_msg(msg, http),
+            Message::Listen(msg) => return self.listen_msg(msg),
             Message::Nav(section) => {
                 self.close_wave_menu();
                 return (self.nav(section, http), None);
@@ -2082,6 +2106,7 @@ impl Library {
                 width,
             ),
             (None, Section::History) => self.history_view(covers, turn),
+            (None, Section::Stats) => self.listen_view(turn),
             (None, Section::Search) => self.search_view(covers, turn, moment.now),
             (None, Section::Playlists | Section::Albums | Section::Artists) => {
                 self.collection_view(covers, turn, moment.now)
@@ -2346,7 +2371,7 @@ impl Library {
             })
             .into()
         };
-        let menu = column![
+        let mut menu = column![
             brand,
             Space::new().height(12),
             item(Section::Wave),
@@ -2357,22 +2382,29 @@ impl Library {
             item(Section::Albums),
             item(Section::Artists),
             item(Section::History),
-            Space::new().height(Length::Fill),
-            item(Section::Settings),
-            Space::new().height(8),
-            self.account_card(compact, pixel_scale),
-        ]
-        .spacing(2)
-        .width(width)
-        .padding(Padding {
-            top: 4.0,
-            right: SIDEBAR_PAD,
-            bottom: 12.0,
-            left: SIDEBAR_PAD,
-        });
+        ];
+        // «Статистика» (YandexMusicTime) видна, только если плагин и пункт
+        // включены; без неё меню на один пункт короче.
+        let stats_visible = listen::stats_in_menu(&self.plugins);
+        if stats_visible {
+            menu = menu.push(item(Section::Stats));
+        }
+        let menu = menu
+            .push(Space::new().height(Length::Fill))
+            .push(item(Section::Settings))
+            .push(Space::new().height(8))
+            .push(self.account_card(compact, pixel_scale))
+            .spacing(2)
+            .width(width)
+            .padding(Padding {
+                top: 4.0,
+                right: SIDEBAR_PAD,
+                bottom: 12.0,
+                left: SIDEBAR_PAD,
+            });
         let menu = anim::nav_highlight(
             menu,
-            menu_index(self.section),
+            menu_index(self.section, stats_visible),
             self.nav_glide.map(|(_, started)| started),
             glide,
             theme::surface_3(),
@@ -3289,9 +3321,11 @@ fn sidebar_toggle<'a>(collapsed: bool) -> Element<'a, App> {
 
 /// Номер пункта `section` в колонке меню ([`Library::sidebar`]): под ним
 /// рисуется подсветка. Порядок тот же, что у детей колонки.
-fn menu_index(section: Section) -> usize {
-    // 0 — шапка, 1 — отступ, 4 — «Коллекция», 10 — распорка, 12 — отступ,
-    // 13 — карточка аккаунта.
+fn menu_index(section: Section, stats_visible: bool) -> usize {
+    // 0 — шапка, 1 — отступ, 4 — «Коллекция», потом (если виден пункт
+    // «Статистика» — 10) распорка, настройки, отступ, карточка аккаунта.
+    // Скрытый пункт не сдвигает остальные; раздел, которого нет в меню,
+    // получает номер несуществующего ребёнка, подсветки у него нет.
     match section {
         Section::Wave => 2,
         Section::Search => 3,
@@ -3300,7 +3334,9 @@ fn menu_index(section: Section) -> usize {
         Section::Albums => 7,
         Section::Artists => 8,
         Section::History => 9,
-        Section::Settings => 11,
+        Section::Stats if stats_visible => 10,
+        Section::Stats => usize::MAX,
+        Section::Settings => 11 + usize::from(stats_visible),
     }
 }
 
@@ -3772,6 +3808,22 @@ fn skeleton<'a>(turn: f32) -> Element<'a, App> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_stats_item_does_not_shift_the_highlight() {
+        // С пунктом «Статистика»: он 10-й, настройки на одну позицию ниже.
+        assert_eq!(menu_index(Section::History, true), 9);
+        assert_eq!(menu_index(Section::Stats, true), 10);
+        assert_eq!(menu_index(Section::Settings, true), 12);
+        // Без него: порядок прежний, у скрытого раздела подсветки нет.
+        assert_eq!(menu_index(Section::History, false), 9);
+        assert_eq!(menu_index(Section::Settings, false), 11);
+        assert_eq!(menu_index(Section::Stats, false), usize::MAX);
+        assert_eq!(
+            menu_index(Section::Wave, false),
+            menu_index(Section::Wave, true)
+        );
+    }
 
     /// Библиотека без сети и звука: плеер не создаётся, `launch` сразу
     /// «останавливается», но запись истории и сообщения о прослушивании идут

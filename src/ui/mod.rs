@@ -383,6 +383,10 @@ pub enum Dialog {
     ConfirmResetSettings,
     /// Согласие: Slopless ставит «Не нравится» ИИ-трекам (запись в аккаунт).
     SloplessConsent,
+    /// Сбросить время прослушивания (серия остаётся).
+    ConfirmListenReset,
+    /// Заменить статистику данными из выбранной копии.
+    ConfirmListenRestore,
 }
 
 #[derive(Clone)]
@@ -928,6 +932,12 @@ impl App {
     }
 
     fn close_dialog(&mut self) {
+        // Копия статистики, которую не подтвердили, выбрасывается.
+        if self.dialog == Some(Dialog::ConfirmListenRestore)
+            && let Screen::Main(library) = &mut self.screen
+        {
+            library.listen_discard_restore();
+        }
         if self.dialog.take().is_some() {
             self.dialog_anim.go_mut(false, Instant::now());
         }
@@ -1017,7 +1027,13 @@ impl App {
                     self.with_window(|id| window::mode(id).map(Message::WindowMode)),
                 ]);
             }
-            Message::Minimized(state) => self.minimized = state.unwrap_or(false),
+            Message::Minimized(state) => {
+                self.minimized = state.unwrap_or(false);
+                // Свёрнутое окно серию дней не отмечает.
+                if let Screen::Main(library) = &mut self.screen {
+                    library.listen_minimized(self.minimized);
+                }
+            }
             Message::Maximized(maximized) => self.maximized = maximized,
             Message::WindowMode(mode) => self.fullscreen = mode == window::Mode::Fullscreen,
             Message::DragWindow => {
@@ -1330,6 +1346,17 @@ impl App {
                             self.show_toast(text);
                             Task::none()
                         }
+                        Some(library::Effect::OpenDialog(dialog)) => {
+                            self.open_dialog(dialog);
+                            Task::none()
+                        }
+                        Some(library::Effect::DialogDone(toast)) => {
+                            self.close_dialog();
+                            if let Some(text) = toast {
+                                self.show_toast(text);
+                            }
+                            Task::none()
+                        }
                         Some(library::Effect::OpenMini) => self.open_mini(),
                         Some(library::Effect::WaveSettings(settings)) => {
                             self.wave_settings = settings;
@@ -1591,6 +1618,10 @@ impl App {
     fn close(&mut self) -> Task<Message> {
         // Статус в Discord очищается до закрытия окна и больше не появляется.
         self.discord = None;
+        // Время прослушивания: файл небольшой, пишем до выхода синхронно.
+        if let Screen::Main(library) = &mut self.screen {
+            library.listen_shutdown();
+        }
         // Собеседник узнаёт о выходе (`bye shutdown`), служба останавливается.
         self.sync = None;
         // Мини-плеер закрывается вместе с главным окном: положение
@@ -2165,7 +2196,12 @@ impl App {
     /// Заголовок окна, края для изменения размера, диалог и сообщение.
     fn decorate<'a>(&'a self, content: Element<'a, Message>) -> Element<'a, Message> {
         let with_brand = !matches!(self.screen, Screen::Main(_));
-        let window = container(column![gate::title_bar(with_brand), content])
+        // Таймер YandexMusicTime — по центру заголовка главного окна.
+        let timer = match &self.screen {
+            Screen::Main(library) => library.listen_title(),
+            _ => None,
+        };
+        let window = container(column![gate::title_bar(with_brand, timer), content])
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| container::Style {
@@ -2185,7 +2221,7 @@ impl App {
                         self.compact(),
                         self.size,
                         self.turn(),
-                        gate::title_bar(false),
+                        gate::title_bar(false, library.listen_title()),
                     )
                     .map(dark::scope)
             });
@@ -2227,7 +2263,11 @@ impl App {
         }
         if let Some(dialog) = self.dialog_shown {
             let shown = anim::progress(&self.dialog_anim, self.now);
-            layers = layers.push(gate::dialog(dialog, shown, self.dialog.is_some()));
+            let detail = match &self.screen {
+                Screen::Main(library) => library.listen_restore_text(),
+                _ => "",
+            };
+            layers = layers.push(gate::dialog(dialog, shown, self.dialog.is_some(), detail));
         }
         // Переходам — кадры с частотой экрана, спиннерам и спектру хватает 30
         // в секунду. Когда ничего не движется, кадров нет вовсе.

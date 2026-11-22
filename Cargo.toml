@@ -17,6 +17,9 @@ path = "src/main.rs"
 aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys"] }
 # Подпись запроса get-file-info (HMAC-SHA256 и base64). Все три — MIT/Apache-2.0.
 base64 = "0.23"
+# Местная полночь для границы дня в YandexMusicTime (`Local::now`). MIT OR Apache-2.0;
+# только `clock`; часовой пояс в Linux и macOS берёт iana-time-zone (MIT OR Apache-2.0).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.6.7", features = ["derive"] }
 directories = "6.0.0"
 hmac = "0.13"

@@ -24,6 +24,7 @@ pub enum Icon {
     Expand,
     Expired,
     ExternalLink,
+    Flame,
     Forward,
     Heart,
     HeartFilled,
@@ -52,6 +53,7 @@ pub enum Icon {
     Settings,
     Shuffle,
     Spinner,
+    Stats,
     /// Сдвиг в топе: вверх, вниз, новый.
     TrendDown,
     TrendNew,
@@ -94,6 +96,7 @@ impl Icon {
             Self::Expand => file!("expand"),
             Self::Expired => file!("expired"),
             Self::ExternalLink => file!("external-link"),
+            Self::Flame => include_bytes!("../../assets/icons/flame.svg"),
             Self::Forward => file!("forward"),
             Self::Heart => file!("heart"),
             Self::HeartFilled => file!("heart-filled"),
@@ -123,6 +126,7 @@ impl Icon {
             Self::Settings => file!("settings"),
             Self::Shuffle => file!("shuffle"),
             Self::Spinner => file!("spinner"),
+            Self::Stats => include_bytes!("../../assets/icons/chart-column.svg"),
             // Свои простые фигуры: треугольники, черта и точка.
             Self::TrendDown => include_bytes!("../../assets/icons/trend-down.svg"),
             Self::TrendNew => include_bytes!("../../assets/icons/trend-new.svg"),

@@ -8,11 +8,13 @@
 //!   автопропуск.
 //! - [`copy_name`] — «Исполнитель — Название» в буфер обмена.
 //! - [`vibe`] — цвет «Моей волны» под обложку текущего трека.
+//! - [`listen_time`] — время прослушивания по дням и серия дней подряд.
 //!
 //! На диск плагины кэшируют только метаданные (правило 1).
 
 pub mod copy_name;
 pub mod fckcensor;
+pub mod listen_time;
 pub mod slopless;
 pub mod vibe;
 
@@ -39,6 +41,20 @@ pub struct PluginSettings {
     pub copy_format: String,
     /// VibeColorizer: цвет «Моей волны» под обложку.
     pub vibe: bool,
+    /// YandexMusicTime: время прослушивания и серия дней.
+    pub listen_time: bool,
+    /// Время (и серия) в заголовке окна.
+    pub listen_timer: bool,
+    pub listen_period: listen_time::Period,
+    pub listen_seconds: bool,
+    /// Подписи «За день:» и «Дней подряд:».
+    pub listen_label: bool,
+    /// Серия дней подряд рядом со временем.
+    pub listen_streak: bool,
+    /// Серия огоньком вместо текста.
+    pub listen_flame: bool,
+    /// Пункт «Статистика» в меню.
+    pub listen_menu: bool,
 }
 
 impl Default for PluginSettings {
@@ -53,6 +69,14 @@ impl Default for PluginSettings {
             copy_name: false,
             copy_format: copy_name::DEFAULT_FORMAT.to_owned(),
             vibe: false,
+            listen_time: false,
+            listen_timer: true,
+            listen_period: listen_time::Period::Total,
+            listen_seconds: true,
+            listen_label: true,
+            listen_streak: true,
+            listen_flame: false,
+            listen_menu: true,
         }
     }
 }
@@ -76,6 +100,18 @@ impl PluginSettings {
                 .map(|format| copy_name::limit(&format))
                 .unwrap_or(defaults.copy_format),
             vibe: config.vibe_colorizer.unwrap_or(defaults.vibe),
+            listen_time: config.listen_time.unwrap_or(defaults.listen_time),
+            listen_timer: config.listen_timer.unwrap_or(defaults.listen_timer),
+            listen_period: config
+                .listen_period
+                .as_deref()
+                .and_then(listen_time::Period::parse)
+                .unwrap_or(defaults.listen_period),
+            listen_seconds: config.listen_seconds.unwrap_or(defaults.listen_seconds),
+            listen_label: config.listen_label.unwrap_or(defaults.listen_label),
+            listen_streak: config.listen_streak.unwrap_or(defaults.listen_streak),
+            listen_flame: config.listen_flame.unwrap_or(defaults.listen_flame),
+            listen_menu: config.listen_menu.unwrap_or(defaults.listen_menu),
         }
     }
 
@@ -88,6 +124,14 @@ impl PluginSettings {
         config.copy_track_name = Some(self.copy_name);
         config.copy_track_name_format = Some(self.copy_format.clone());
         config.vibe_colorizer = Some(self.vibe);
+        config.listen_time = Some(self.listen_time);
+        config.listen_timer = Some(self.listen_timer);
+        config.listen_period = Some(self.listen_period.key().to_owned());
+        config.listen_seconds = Some(self.listen_seconds);
+        config.listen_label = Some(self.listen_label);
+        config.listen_streak = Some(self.listen_streak);
+        config.listen_flame = Some(self.listen_flame);
+        config.listen_menu = Some(self.listen_menu);
     }
 
     /// Все плагины включены: для отладочного хука `PLASTINKA_TEST_PLUGINS`.
@@ -98,6 +142,7 @@ impl PluginSettings {
             slopless: true,
             copy_name: true,
             vibe: true,
+            listen_time: true,
             ..Self::default()
         }
     }
@@ -181,6 +226,30 @@ mod tests {
         let mut config = PluginsConfig::default();
         changed.write(&mut config);
         assert_eq!(PluginSettings::from_config(&config), changed);
+
+        // YandexMusicTime: по умолчанию выключен, остальное включено, кроме огонька.
+        assert!(!defaults.listen_time && defaults.listen_timer && defaults.listen_menu);
+        assert!(!defaults.listen_flame && defaults.listen_label && defaults.listen_streak);
+        assert_eq!(defaults.listen_period, listen_time::Period::Total);
+        changed = PluginSettings {
+            listen_time: true,
+            listen_period: listen_time::Period::Week,
+            listen_seconds: false,
+            listen_flame: true,
+            ..changed
+        };
+        changed.write(&mut config);
+        assert_eq!(PluginSettings::from_config(&config), changed);
+        // Неизвестный период — по умолчанию, остальное сохраняется.
+        config.listen_period = Some("century".to_owned());
+        let parsed = PluginSettings::from_config(&config);
+        assert_eq!(parsed.listen_period, listen_time::Period::Total);
+        assert!(parsed.listen_flame);
+        config.listen_period = Some("session".to_owned());
+        assert_eq!(
+            PluginSettings::from_config(&config).listen_period,
+            listen_time::Period::Session
+        );
 
         changed.copy_format = "   ".to_owned();
         changed.write(&mut config);
