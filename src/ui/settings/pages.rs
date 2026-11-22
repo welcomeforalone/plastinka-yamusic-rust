@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 
+use iced::border::Radius;
 use iced::widget::{Space, button, center, column, container, row, toggler, tooltip};
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding};
 
@@ -65,8 +66,8 @@ fn swatch<'a>(
             background: Some(fill),
             border: Border {
                 color: match (selected, status) {
-                    (true, _) => theme::TEXT_PRIMARY,
-                    (false, button::Status::Hovered) => theme::TEXT_SECONDARY,
+                    (true, _) => theme::text_primary(),
+                    (false, button::Status::Hovered) => theme::text_secondary(),
                     _ => Color::TRANSPARENT,
                 },
                 width: 2.0,
@@ -78,7 +79,219 @@ fn swatch<'a>(
     widgets::with_tooltip(swatch, tip, tooltip::Position::Top)
 }
 
-/// «Оформление»: акцент, масштаб, визуализатор.
+/// Ширина превью темы без рамки карточки.
+const THEME_PREVIEW_WIDTH: f32 = 120.0;
+/// Высота превью темы.
+const THEME_PREVIEW_HEIGHT: f32 = 72.0;
+/// Высота полосы плеера в превью.
+const THEME_PREVIEW_PLAYER: f32 = 14.0;
+
+/// Закрашенный прямоугольник с заданными скруглениями.
+fn patch<'a>(
+    width: impl Into<Length>,
+    height: impl Into<Length>,
+    color: Color,
+    radius: Radius,
+) -> Element<'a, App> {
+    container(Space::new())
+        .width(width)
+        .height(height)
+        .style(move |_| container::Style {
+            background: Some(color.into()),
+            border: Border {
+                radius,
+                ..Border::default()
+            },
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// Превью темы: окно в миниатюре, нарисованное цветами этого семейства.
+fn theme_preview<'a>(family: theme::Family, tone: theme::Tone) -> Element<'a, App> {
+    let c = *family.colors(tone);
+    let accent = theme::legible_on(theme::current_accent().color(), c.bg, tone);
+    // Рамка превью 1 px: внутренние области скругляются на радиус меньше.
+    let corner = widgets::RADIUS_M - 1.0;
+    let round = Radius::from;
+
+    let menu_line = || patch(14, 3, c.text_disabled, round(1.5));
+    let menu = container(
+        column![menu_line(), menu_line(), menu_line()]
+            .spacing(4)
+            .padding(7),
+    )
+    .width(30)
+    .height(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(c.surface_1.into()),
+        border: Border {
+            radius: Radius {
+                top_left: corner,
+                top_right: 0.0,
+                bottom_right: 0.0,
+                bottom_left: 0.0,
+            },
+            ..Border::default()
+        },
+        ..container::Style::default()
+    });
+    let content = column![
+        row![
+            patch(Length::FillPortion(45), 6, c.text_primary, round(3.0)),
+            Space::new().width(Length::FillPortion(55)),
+        ],
+        row![
+            patch(Length::FillPortion(80), 4, c.text_tertiary, round(2.0)),
+            Space::new().width(Length::FillPortion(20)),
+        ],
+        row![
+            patch(Length::FillPortion(60), 4, c.text_tertiary, round(2.0)),
+            Space::new().width(Length::FillPortion(40)),
+        ],
+    ]
+    .spacing(5)
+    .padding(8)
+    .width(Length::Fill);
+    let progress = row![
+        patch(Length::FillPortion(35), 2, accent, round(1.0)),
+        patch(Length::FillPortion(65), 2, c.surface_4, round(1.0)),
+    ]
+    .width(Length::Fill);
+    let player = container(
+        row![patch(6, 6, c.text_tertiary, round(3.0)), progress]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .padding([0, 8]),
+    )
+    .width(Length::Fill)
+    .height(THEME_PREVIEW_PLAYER)
+    .style(move |_| container::Style {
+        background: Some(c.surface_2.into()),
+        border: Border {
+            radius: Radius {
+                top_left: 0.0,
+                top_right: 0.0,
+                bottom_right: corner,
+                bottom_left: corner,
+            },
+            ..Border::default()
+        },
+        ..container::Style::default()
+    });
+    container(column![row![menu, content].height(Length::Fill), player])
+        .width(THEME_PREVIEW_WIDTH)
+        .height(THEME_PREVIEW_HEIGHT)
+        .padding(1)
+        .style(move |_| container::Style {
+            background: Some(c.bg.into()),
+            border: Border {
+                color: c.outline,
+                width: 1.0,
+                radius: widgets::RADIUS_M.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// Карточка семейства: превью, название, рамка у выбранной и при наведении.
+fn theme_card<'a>(family: theme::Family, selected: bool, tone: theme::Tone) -> Element<'a, App> {
+    let (title_style, title_color) = if selected {
+        (Style::CaptionStrong, theme::text_primary())
+    } else {
+        (Style::Caption, theme::text_secondary())
+    };
+    button(
+        column![
+            theme_preview(family, tone),
+            theme::line(family.title(), title_style, title_color),
+        ]
+        .spacing(6),
+    )
+    .padding(4)
+    .style(move |_, status| button::Style {
+        background: None,
+        border: Border {
+            color: match (selected, status) {
+                (true, _) => theme::accent(),
+                (false, button::Status::Hovered | button::Status::Pressed) => {
+                    theme::text_tertiary()
+                }
+                _ => Color::TRANSPARENT,
+            },
+            width: 2.0,
+            radius: (widgets::RADIUS_M + 4.0).into(),
+        },
+        ..button::Style::default()
+    })
+    .on_press(App::SetTheme(family))
+    .into()
+}
+
+/// Запись «Тема»: режим тона и сетка семейств.
+fn theme_entry<'a>(prefs: Prefs) -> Entry<'a> {
+    let tone = theme::current_tone();
+    let hint = match prefs.theme_mode {
+        theme::ThemeMode::System => {
+            format!("{}, {} (по системе)", prefs.theme.title(), tone.title())
+        }
+        _ => format!("{}, {}", prefs.theme.title(), tone.title()),
+    };
+    let modes = row(theme::ThemeMode::ALL.into_iter().map(|mode| {
+        let selected = mode == prefs.theme_mode;
+        button(theme::line(
+            mode.title(),
+            Style::CaptionStrong,
+            if selected {
+                theme::on_accent()
+            } else {
+                theme::text_secondary()
+            },
+        ))
+        .padding([6, 14])
+        .style(move |_, status| button::Style {
+            background: Some(
+                match (selected, status) {
+                    (true, _) => theme::accent(),
+                    (false, button::Status::Hovered | button::Status::Pressed) => {
+                        theme::surface_4()
+                    }
+                    (false, _) => theme::surface_3(),
+                }
+                .into(),
+            ),
+            border: Border::default().rounded(widgets::ROUND),
+            ..button::Style::default()
+        })
+        .on_press(App::SetThemeMode(mode))
+        .into()
+    }))
+    .spacing(8);
+    let grid = row(theme::Family::ALL
+        .into_iter()
+        .map(|family| theme_card(family, family == prefs.theme, tone)))
+    .spacing(12)
+    .wrap()
+    .vertical_spacing(12);
+    let view = column![
+        setting_row("Тема", hint.clone(), modes.into()),
+        container(grid).padding(Padding {
+            top: 0.0,
+            right: 0.0,
+            bottom: 16.0,
+            left: 0.0,
+        }),
+    ];
+    Entry::new(
+        "Тема",
+        hint,
+        "оформление тёмная светлая белая системная ночная классика графит кофе сланец полночь океан лес матча янтарь закат сакура бархат",
+        view.into(),
+    )
+}
+
+/// «Оформление»: тема, акцент, масштаб, визуализатор.
 fn appearance<'a>(prefs: Prefs, palette: &'a palette::State) -> Vec<Entry<'a>> {
     let current = prefs.accent;
     let mut swatches = row(theme::Accent::PRESETS.into_iter().map(|accent| {
@@ -147,7 +360,7 @@ fn appearance<'a>(prefs: Prefs, palette: &'a palette::State) -> Vec<Entry<'a>> {
         container(theme::line(
             format!("{scale} %"),
             Style::BodyStrong,
-            theme::TEXT_PRIMARY
+            theme::text_primary()
         ))
         .center_x(56),
         widgets::icon_button(
@@ -167,10 +380,11 @@ fn appearance<'a>(prefs: Prefs, palette: &'a palette::State) -> Vec<Entry<'a>> {
     .align_y(Alignment::Center);
 
     vec![
+        theme_entry(prefs),
         Entry::new(
             "Акцент",
             hint,
-            "цвет тема палитра красный бирюзовый оранжевый фиолетовый синий свой",
+            "цвет палитра красный оранжевый жёлтый зелёный бирюзовый синий фиолетовый розовый свой",
             accent.into(),
         ),
         item(
@@ -227,8 +441,8 @@ fn quality_list<'a>(prefs: Prefs) -> Element<'a, App> {
             button(
                 row![
                     column![
-                        theme::line(title, Style::BodyStrong, theme::TEXT_PRIMARY),
-                        theme::label(hint, Style::Secondary, theme::TEXT_SECONDARY),
+                        theme::line(title, Style::BodyStrong, theme::text_primary()),
+                        theme::label(hint, Style::Secondary, theme::text_secondary()),
                     ]
                     .spacing(2)
                     .width(Length::Fill),
@@ -242,7 +456,7 @@ fn quality_list<'a>(prefs: Prefs) -> Element<'a, App> {
             .style(|_, status| button::Style {
                 background: match status {
                     button::Status::Hovered | button::Status::Pressed => {
-                        Some(theme::SURFACE_3.into())
+                        Some(theme::surface_3().into())
                     }
                     _ => None,
                 },
@@ -280,7 +494,7 @@ fn sound<'a>(prefs: Prefs) -> Vec<Entry<'a>> {
             hint,
             "поток битрейт lossless flac mp3 aac",
             column![
-                theme::line("Качество звука", Style::BodyStrong, theme::TEXT_PRIMARY),
+                theme::line("Качество звука", Style::BodyStrong, theme::text_primary()),
                 quality_list(prefs),
             ]
             .spacing(8)
@@ -331,10 +545,10 @@ fn discord<'a>(prefs: Prefs) -> Vec<Entry<'a>> {
                             | toggler::Status::Disabled { is_toggled: true }
                     );
                     toggler::Style {
-                        background: theme::SURFACE_3.into(),
+                        background: theme::surface_3().into(),
                         background_border_width: 0.0,
                         background_border_color: Color::TRANSPARENT,
-                        foreground: theme::TEXT_DISABLED.into(),
+                        foreground: theme::text_disabled().into(),
                         foreground_border_width: 0.0,
                         foreground_border_color: Color::TRANSPARENT,
                         text_color: None,
@@ -353,21 +567,21 @@ fn discord<'a>(prefs: Prefs) -> Vec<Entry<'a>> {
                 title,
                 Style::CaptionStrong,
                 match (selected, ready) {
-                    (_, false) => theme::TEXT_DISABLED,
+                    (_, false) => theme::text_disabled(),
                     (true, true) => theme::on_accent(),
-                    (false, true) => theme::TEXT_SECONDARY,
+                    (false, true) => theme::text_secondary(),
                 },
             ))
             .padding([6, 14])
             .style(move |_, status| button::Style {
                 background: Some(
                     match (selected, status) {
-                        (true, _) if !ready => theme::SURFACE_4,
+                        (true, _) if !ready => theme::surface_4(),
                         (true, _) => theme::accent(),
                         (false, button::Status::Hovered | button::Status::Pressed) if ready => {
-                            theme::SURFACE_4
+                            theme::surface_4()
                         }
-                        (false, _) => theme::SURFACE_3,
+                        (false, _) => theme::surface_3(),
                     }
                     .into(),
                 ),
@@ -434,7 +648,7 @@ fn discord<'a>(prefs: Prefs) -> Vec<Entry<'a>> {
             container(theme::line(
                 "Не задан Application ID Discord",
                 Style::Caption,
-                theme::TEXT_TERTIARY,
+                theme::text_tertiary(),
             ))
             .padding(Padding::from([12, 0]))
             .into(),
@@ -509,7 +723,7 @@ fn account<'a>(ctx: &Ctx<'a>) -> Vec<Entry<'a>> {
     let view = row![
         avatar(initial, 44.0, ctx.library.avatar(), ctx.pixel_scale),
         column![
-            theme::line(name.clone(), Style::BodyStrong, theme::TEXT_PRIMARY),
+            theme::line(name.clone(), Style::BodyStrong, theme::text_primary()),
             theme::line(plus.clone(), Style::Secondary, theme::accent()),
         ]
         .spacing(2)
@@ -542,8 +756,8 @@ fn about<'a>() -> Vec<Entry<'a>> {
     let product = row![
         widgets::logo(44.0),
         column![
-            theme::line(crate::APP_NAME, Style::Headline, theme::TEXT_PRIMARY),
-            theme::line(VERSION, Style::Secondary, theme::TEXT_TERTIARY),
+            theme::line(crate::APP_NAME, Style::Headline, theme::text_primary()),
+            theme::line(VERSION, Style::Secondary, theme::text_tertiary()),
         ]
         .spacing(2)
         .width(Length::Fill),
@@ -558,8 +772,8 @@ fn about<'a>() -> Vec<Entry<'a>> {
     .align_y(Alignment::Center)
     .padding(Padding::from([16, 0]));
     let notice = column![
-        theme::label(crate::DISCLAIMER, Style::BodyStrong, theme::TEXT_PRIMARY),
-        theme::label(STREAMING, Style::Secondary, theme::TEXT_SECONDARY),
+        theme::label(crate::DISCLAIMER, Style::BodyStrong, theme::text_primary()),
+        theme::label(STREAMING, Style::Secondary, theme::text_secondary()),
     ]
     .spacing(14)
     .padding(Padding::from([16, 0]));

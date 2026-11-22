@@ -193,15 +193,17 @@ fun SeekBar(
             },
         contentAlignment = Alignment.CenterStart,
     ) {
+        val railColor = Pl.text.copy(alpha = 0.18f)
+        val thumbColor = Pl.text
         androidx.compose.foundation.Canvas(Modifier.fillMaxWidth().height(16.dp)) {
             widthPx = size.width.coerceAtLeast(1f)
             val h = 4.dp.toPx()
             val y = size.height / 2
-            drawLine(Color.White.copy(alpha = 0.18f), Offset(0f, y), Offset(size.width, y), h, StrokeCap.Round)
+            drawLine(railColor, Offset(0f, y), Offset(size.width, y), h, StrokeCap.Round)
             drawLine(color, Offset(0f, y), Offset(size.width * shown, y), h, StrokeCap.Round)
             // Тень ползунка (макет: 0 2 6, чёрный 40 %) и сам ползунок 14 dp.
             drawCircle(Color.Black.copy(alpha = 0.25f), 8.5.dp.toPx(), Offset(size.width * shown, y + 2.dp.toPx()))
-            drawCircle(Color.White, 7.dp.toPx(), Offset(size.width * shown, y))
+            drawCircle(thumbColor, 7.dp.toPx(), Offset(size.width * shown, y))
         }
     }
 }
@@ -235,6 +237,8 @@ fun MiniPlayer(
     // VibeColorizer красит только спектр; полоса прогресса, сердце и кнопка — акцент.
     val tint = rememberTint(queue, track)
     val shape = RoundedCornerShape(18.dp)
+    val fade = Pl.bg
+    val trackColor = Pl.text.copy(alpha = 0.08f)
     Box(
         Modifier
             .fillMaxWidth()
@@ -242,7 +246,7 @@ fun MiniPlayer(
                 // Затухание списка под плеером (макет: 56 dp над карточкой и вся зона под ней).
                 val top = -56.dp.toPx()
                 drawRect(
-                    Brush.verticalGradient(listOf(Color.Transparent, Color.Black), startY = top, endY = size.height),
+                    Brush.verticalGradient(listOf(Color.Transparent, fade), startY = top, endY = size.height),
                     topLeft = Offset(0f, top),
                     size = Size(size.width, size.height - top),
                 )
@@ -261,11 +265,11 @@ fun MiniPlayer(
                     shape,
                     clip = false,
                     ambientColor = Color.Transparent,
-                    spotColor = Color.Black.copy(alpha = 0.5f),
+                    spotColor = Color.Black.copy(alpha = Pl.shadowAlpha(0.5f)),
                 )
                 .clip(shape)
                 .background(Pl.surface2, shape)
-                .border(1.dp, Color(0xFF262626), shape)
+                .border(1.dp, Pl.edge, shape)
                 .clickable(onClick = onOpen),
         ) {
             // Приглушённые столбики за содержимым (макет: нижние 34 dp карточки, цвет 18 %).
@@ -298,7 +302,7 @@ fun MiniPlayer(
                     .align(Alignment.BottomStart)
                     .fillMaxWidth()
                     .height(2.dp)
-                    .background(Color.White.copy(alpha = 0.08f)),
+                    .background(trackColor),
             ) {
                 Box(Modifier.fillMaxWidth(progress.fraction).fillMaxHeight().background(Pl.accent))
             }
@@ -429,7 +433,7 @@ internal fun PlayerControls(
                     CircleShape,
                     clip = false,
                     ambientColor = Color.Transparent,
-                    spotColor = Pl.accent.copy(alpha = 0.6f),
+                    spotColor = Pl.accent.copy(alpha = Pl.shadowAlpha(0.6f)),
                 ),
                 color = Pl.accent,
                 onColor = Pl.onAccent,
@@ -789,12 +793,13 @@ internal fun PlBottomSheet(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+    val edge = Pl.edge
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
         containerColor = Pl.surface1,
         shape = shape,
-        scrimColor = Color.Black.copy(alpha = 0.72f),
+        scrimColor = Pl.scrim,
         dragHandle = null,
     ) {
         Column(
@@ -807,7 +812,7 @@ internal fun PlBottomSheet(
                 val radius = 28.dp.toPx()
                 clipRect {
                     drawRoundRect(
-                        color = Color(0xFF262626),
+                        color = edge,
                         topLeft = Offset(stroke / 2, stroke / 2),
                         size = Size(size.width - stroke, size.height + radius),
                         cornerRadius = CornerRadius(radius - stroke / 2),
@@ -864,7 +869,7 @@ private fun QueueLabel(text: String) {
 /** Чип «Перемешать» в шапке листа: 36 dp, рамка, значок 16; включённый — заливка. */
 @Composable
 private fun ShuffleChip(selected: Boolean, onClick: () -> Unit) {
-    val color = if (selected) Pl.darkText else Pl.text
+    val color = if (selected) Pl.bg else Pl.text
     Row(
         Modifier
             .height(36.dp)

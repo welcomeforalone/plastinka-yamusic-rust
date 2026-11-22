@@ -153,7 +153,7 @@ impl Library {
                     container(theme::line(
                         "Дальше ничего нет",
                         Style::Secondary,
-                        theme::TEXT_TERTIARY,
+                        theme::text_tertiary(),
                     ))
                     .padding([12, 8]),
                 );
@@ -177,7 +177,7 @@ impl Library {
         self.row_content(
             covers,
             original,
-            (theme::TEXT_SECONDARY, theme::TEXT_TERTIARY),
+            (theme::text_secondary(), theme::text_tertiary()),
             Some(Lib(Message::PlayHistory(index))),
         )
     }
@@ -194,14 +194,14 @@ impl Library {
             return self.row_content(
                 covers,
                 original,
-                (theme::accent(), theme::TEXT_SECONDARY),
+                (theme::accent(), theme::text_secondary()),
                 None,
             );
         }
         self.row_content(
             covers,
             original,
-            (theme::TEXT_PRIMARY, theme::TEXT_SECONDARY),
+            (theme::text_primary(), theme::text_secondary()),
             Some(Lib(Message::PlayQueueAt(index))),
         )
     }
@@ -241,7 +241,11 @@ impl Library {
             ]
             .spacing(2)
             .width(Length::Fill),
-            theme::line(track.duration_text(), Style::Caption, theme::TEXT_TERTIARY),
+            theme::line(
+                track.duration_text(),
+                Style::Caption,
+                theme::text_tertiary()
+            ),
         ]
         .spacing(12)
         .align_y(Alignment::Center);
@@ -254,7 +258,7 @@ impl Library {
             .style(|_, status| button::Style {
                 background: match status {
                     button::Status::Hovered | button::Status::Pressed => {
-                        Some(theme::SURFACE_3.into())
+                        Some(theme::surface_3().into())
                     }
                     _ => None,
                 },
@@ -298,7 +302,7 @@ fn section<'a>(title: &'a str) -> Element<'a, App> {
     container(theme::line(
         title,
         Style::CaptionStrong,
-        theme::TEXT_TERTIARY,
+        theme::text_tertiary(),
     ))
     .padding([8, 8])
     .into()

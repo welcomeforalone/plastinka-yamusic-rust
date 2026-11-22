@@ -295,29 +295,32 @@ private fun MainScreen(library: LibraryUi, model: AppViewModel) {
                 exit = slideOutVertically(tween(320, easing = FastOutSlowInEasing)) { it } +
                     fadeOut(tween(320, easing = FastOutSlowInEasing)),
             ) {
-                FullPlayer(
-                    queue = queue,
-                    player = player,
-                    model = model,
-                    onClose = { showPlayer = false },
-                    backEnabled = transition.targetState == EnterExitState.Visible,
-                    onMiniPlayer = if (pipSupported) {
-                        { Pip.enter(activity, playing, likedNow) }
-                    } else {
-                        null
-                    },
-                    onOpenSyncSettings = {
-                        showPlayer = false
-                        selectTab(3)
-                    },
-                )
+                // Фон плеера — затемнённая обложка, поэтому он тёмный при любой теме окна.
+                PlDarkScope {
+                    FullPlayer(
+                        queue = queue,
+                        player = player,
+                        model = model,
+                        onClose = { showPlayer = false },
+                        backEnabled = transition.targetState == EnterExitState.Visible,
+                        onMiniPlayer = if (pipSupported) {
+                            { Pip.enter(activity, playing, likedNow) }
+                        } else {
+                            null
+                        },
+                        onOpenSyncSettings = {
+                            showPlayer = false
+                            selectTab(3)
+                        },
+                    )
+                }
             }
             // Код сопряжения показывается поверх любого экрана, и для входящего подключения тоже.
             SyncPairingDialog()
             // В режиме PiP вместо интерфейса — компактный мини-плеер. Основной экран под ним
             // остаётся в композиции, чтобы выбранная вкладка и плеер сохранились до возврата.
             val inPip by Pip.inPip.collectAsStateWithLifecycle()
-            if (inPip) queue.currentTrack()?.let { PipScreen(it, player) }
+            if (inPip) queue.currentTrack()?.let { PlDarkScope { PipScreen(it, player) } }
         }
     }
 }

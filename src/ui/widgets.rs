@@ -28,12 +28,12 @@ impl Kind {
     /// Цвет подписи и иконки.
     fn content(self, enabled: bool) -> Color {
         if !enabled {
-            return theme::TEXT_DISABLED;
+            return theme::text_disabled();
         }
         match self {
             Self::Primary => theme::on_accent(),
-            Self::Secondary => theme::TEXT_PRIMARY,
-            Self::Danger => theme::ERROR,
+            Self::Secondary => theme::text_primary(),
+            Self::Danger => theme::error(),
         }
     }
 
@@ -45,20 +45,20 @@ impl Kind {
             (Self::Primary, Pressed) => Some(theme::accent_pressed()),
             // «Таблетка» с рамкой: без заливки, при наведении — лёгкий фон.
             (Self::Secondary, Active) => None,
-            (Self::Secondary, Hovered) => Some(theme::SURFACE_3),
-            (Self::Secondary, Pressed) => Some(theme::SURFACE_4),
-            (Self::Danger, Active) => Some(theme::ERROR_SOFT),
-            (Self::Danger, Hovered) => Some(theme::ERROR_HOVER),
-            (Self::Danger, Pressed) => Some(theme::ERROR_PRESSED),
+            (Self::Secondary, Hovered) => Some(theme::surface_3()),
+            (Self::Secondary, Pressed) => Some(theme::surface_4()),
+            (Self::Danger, Active) => Some(theme::error_soft()),
+            (Self::Danger, Hovered) => Some(theme::error_hover()),
+            (Self::Danger, Pressed) => Some(theme::error_pressed()),
             (Self::Secondary, Disabled) => None,
-            (_, Disabled) => Some(theme::SURFACE_2),
+            (_, Disabled) => Some(theme::surface_2()),
         }
     }
 
     fn border(self, status: button::Status) -> Color {
         match (self, status) {
-            (Self::Secondary, button::Status::Disabled) => theme::SURFACE_3,
-            (Self::Secondary, _) => theme::OUTLINE,
+            (Self::Secondary, button::Status::Disabled) => theme::surface_3(),
+            (Self::Secondary, _) => theme::outline(),
             _ => Color::TRANSPARENT,
         }
     }
@@ -208,11 +208,11 @@ pub fn icon_button<'a>(
     let enabled = on_press.is_some();
     let make = move |hovered: bool, on_press: Option<Message>| -> Element<'a, Message> {
         let color = match (enabled, active, hovered) {
-            (false, _, _) => theme::TEXT_DISABLED,
+            (false, _, _) => theme::text_disabled(),
             (true, true, false) => theme::accent(),
             (true, true, true) => theme::accent_hover(),
-            (true, false, false) => theme::TEXT_SECONDARY,
-            (true, false, true) => theme::TEXT_PRIMARY,
+            (true, false, false) => theme::text_secondary(),
+            (true, false, true) => theme::text_primary(),
         };
         button(center(icon(name, glyph, color)))
             .width(side)
@@ -220,7 +220,7 @@ pub fn icon_button<'a>(
             .padding(0)
             .style(move |_, status| button::Style {
                 background: match status {
-                    button::Status::Pressed => Some(theme::SURFACE_4.into()),
+                    button::Status::Pressed => Some(theme::surface_4().into()),
                     _ => None,
                 },
                 border: Border::default().rounded(ROUND),
@@ -232,8 +232,8 @@ pub fn icon_button<'a>(
     if enabled {
         anim::hover_fill(
             hover(make(false, None), make(true, on_press)),
-            theme::clear(theme::SURFACE_3),
-            theme::SURFACE_3,
+            theme::clear(theme::surface_3()),
+            theme::surface_3(),
             ROUND,
         )
         .into()
@@ -250,10 +250,10 @@ pub fn with_tooltip<'a>(
 ) -> Element<'a, Message> {
     tooltip(
         content,
-        container(theme::line(tip, Style::Caption, theme::TEXT_PRIMARY))
+        container(theme::line(tip, Style::Caption, theme::text_primary()))
             .padding([6, 10])
             .style(|_| container::Style {
-                background: Some(theme::SURFACE_3.into()),
+                background: Some(theme::surface_3().into()),
                 border: Border::default().rounded(RADIUS_S),
                 shadow: raised_shadow(),
                 ..container::Style::default()
@@ -267,7 +267,7 @@ pub fn with_tooltip<'a>(
 /// `Shadow/Raised`.
 pub fn raised_shadow() -> Shadow {
     Shadow {
-        color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+        color: Color::from_rgba(0.0, 0.0, 0.0, theme::shadow_alpha(0.35)),
         offset: Vector::new(0.0, 4.0),
         blur_radius: 12.0,
     }
@@ -276,7 +276,7 @@ pub fn raised_shadow() -> Shadow {
 /// `Shadow/Popover`.
 pub fn popover_shadow() -> Shadow {
     Shadow {
-        color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
+        color: Color::from_rgba(0.0, 0.0, 0.0, theme::shadow_alpha(0.5)),
         offset: Vector::new(0.0, 12.0),
         blur_radius: 32.0,
     }
@@ -289,11 +289,11 @@ pub fn popover_card(alpha: f32, radius: f32) -> container::Style {
     let mut shadow = popover_shadow();
     shadow.color.a *= alpha;
     container::Style {
-        background: Some(theme::alpha(theme::SURFACE_2, alpha).into()),
+        background: Some(theme::alpha(theme::surface_2(), alpha).into()),
         border: Border::default()
             .rounded(radius)
             .width(1)
-            .color(theme::alpha(theme::BORDER, alpha)),
+            .color(theme::alpha(theme::border(), alpha)),
         shadow,
         ..container::Style::default()
     }
@@ -319,18 +319,18 @@ pub fn block<'a>(
 
 /// Горизонтальный разделитель 1 px.
 pub fn divider<'a>() -> Element<'a, Message> {
-    block(Length::Fill, 1, theme::BORDER, 0.0)
+    block(Length::Fill, 1, theme::border(), 0.0)
 }
 
 /// Вертикальный разделитель 1 px.
 pub fn vertical_divider<'a>() -> Element<'a, Message> {
-    block(1, Length::Fill, theme::BORDER, 0.0)
+    block(1, Length::Fill, theme::border(), 0.0)
 }
 
 /// Тень большой обложки в шапке.
 pub fn cover_shadow() -> Shadow {
     Shadow {
-        color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
+        color: Color::from_rgba(0.0, 0.0, 0.0, theme::shadow_alpha(0.5)),
         offset: Vector::new(0.0, 8.0),
         blur_radius: 24.0,
     }
@@ -342,9 +342,9 @@ pub fn card<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message
         .width(480)
         .padding(40)
         .style(|_| container::Style {
-            background: Some(theme::SURFACE_1.into()),
+            background: Some(theme::surface_1().into()),
             border: Border {
-                color: theme::BORDER,
+                color: theme::border(),
                 width: 1.0,
                 radius: RADIUS_XL.into(),
             },
@@ -369,12 +369,12 @@ pub fn badge<'a>(name: Icon, color: Color, background: Color) -> Element<'a, Mes
 /// Плашка с иконкой и текстом: ошибка (`error-soft`) или пояснение (`surface-2`).
 pub fn notice<'a>(name: Icon, message: String, error: bool) -> Element<'a, Message> {
     let (icon_color, text_color, background) = if error {
-        (theme::ERROR, theme::TEXT_PRIMARY, theme::ERROR_SOFT)
+        (theme::error(), theme::text_primary(), theme::error_soft())
     } else {
         (
-            theme::TEXT_SECONDARY,
-            theme::TEXT_SECONDARY,
-            theme::SURFACE_2,
+            theme::text_secondary(),
+            theme::text_secondary(),
+            theme::surface_2(),
         )
     };
     container(
@@ -420,12 +420,12 @@ pub fn logo<'a>(size: f32) -> Element<'a, Message> {
         disc(
             size,
             Some(Color::from_rgb8(0x08, 0x09, 0x0B)),
-            Some(theme::SURFACE_4)
+            Some(theme::surface_4())
         ),
-        disc(22.0 * scale, None, Some(theme::SURFACE_3)),
-        disc(17.0 * scale, None, Some(theme::SURFACE_3)),
+        disc(22.0 * scale, None, Some(theme::surface_3())),
+        disc(17.0 * scale, None, Some(theme::surface_3())),
         disc(11.0 * scale, Some(theme::accent()), None),
-        disc((3.0 * scale).max(2.0), Some(theme::BG), None),
+        disc((3.0 * scale).max(2.0), Some(theme::bg()), None),
     ])
     .width(size)
     .height(size)
@@ -463,7 +463,7 @@ pub fn cover<'a>(art: CoverArt<'_>, size: f32, radius: f32) -> Element<'a, Messa
                 picture
             } else {
                 // Свежая обложка проявляется поверх заглушки загрузки.
-                stack![block(size, size, theme::SURFACE_3, radius), picture].into()
+                stack![block(size, size, theme::surface_3(), radius), picture].into()
             }
         }
         CoverArt::Placeholder(background) => container(Space::new())
@@ -475,7 +475,7 @@ pub fn cover<'a>(art: CoverArt<'_>, size: f32, radius: f32) -> Element<'a, Messa
                 ..container::Style::default()
             })
             .into(),
-        CoverArt::Loading => block(size, size, theme::SURFACE_3, radius),
+        CoverArt::Loading => block(size, size, theme::surface_3(), radius),
     }
 }
 
@@ -483,7 +483,7 @@ pub fn cover<'a>(art: CoverArt<'_>, size: f32, radius: f32) -> Element<'a, Messa
 pub fn waiting<'a>(caption: String, turn: f32) -> Element<'a, Message> {
     row![
         spinner(16.0, theme::accent(), turn),
-        theme::line(caption, Style::Secondary, theme::TEXT_SECONDARY),
+        theme::line(caption, Style::Secondary, theme::text_secondary()),
     ]
     .spacing(8)
     .align_y(Alignment::Center)
@@ -518,8 +518,8 @@ pub fn link<'a>(caption: String, style: Style, on_press: Message) -> Element<'a,
 /// Заголовок и текст карточки по центру.
 pub fn heading<'a>(title: String, body: String) -> Element<'a, Message> {
     column![
-        theme::label(title, Style::Title, theme::TEXT_PRIMARY).center(),
-        theme::label(body, Style::Body, theme::TEXT_SECONDARY)
+        theme::label(title, Style::Title, theme::text_primary()).center(),
+        theme::label(body, Style::Body, theme::text_secondary())
             .center()
             .width(Length::Fill),
     ]

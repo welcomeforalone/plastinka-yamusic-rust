@@ -320,7 +320,8 @@ impl Library {
             Side::Queue => ("Очередь", (self.queue_content(covers), None)),
         };
         let header = row![
-            container(theme::line(title, Style::Headline, theme::TEXT_PRIMARY)).width(Length::Fill),
+            container(theme::line(title, Style::Headline, theme::text_primary()))
+                .width(Length::Fill),
             widgets::icon_button(
                 Icon::Close,
                 Size::S,
@@ -340,8 +341,8 @@ impl Library {
         .height(Length::Fill);
         inner = inner.push(
             container(match footer {
-                Some(text) => theme::line(text, Style::Caption, theme::TEXT_TERTIARY),
-                None => theme::line("", Style::Caption, theme::TEXT_TERTIARY),
+                Some(text) => theme::line(text, Style::Caption, theme::text_tertiary()),
+                None => theme::line("", Style::Caption, theme::text_tertiary()),
             })
             .padding([12.0, PAD]),
         );
@@ -364,7 +365,7 @@ impl Library {
         let mut column = column![body].height(Length::Fill);
         if let Some(text) = footer {
             column = column.push(
-                container(theme::line(text, Style::Caption, theme::TEXT_TERTIARY))
+                container(theme::line(text, Style::Caption, theme::text_tertiary()))
                     .padding([8.0, 0.0]),
             );
         }
@@ -417,7 +418,7 @@ impl Library {
             ),
             // Идёт загрузка (или ответ про прошлый трек): спиннер.
             _ => (
-                center(spinner(28.0, theme::TEXT_SECONDARY, turn)).into(),
+                center(spinner(28.0, theme::text_secondary(), turn)).into(),
                 None,
             ),
         }
@@ -428,9 +429,9 @@ impl Library {
         key.hash(&mut hasher);
         let id = hasher.finish();
         let colors = Colors {
-            past: theme::TEXT_TERTIARY,
-            active: theme::TEXT_PRIMARY,
-            future: theme::TEXT_SECONDARY,
+            past: theme::text_tertiary(),
+            active: theme::text_primary(),
+            future: theme::text_secondary(),
         };
         if let Some(lines) = &found.synced {
             let texts: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();
@@ -473,9 +474,9 @@ pub(super) fn note<'a>(
     action: Option<Element<'a, App>>,
 ) -> Element<'a, App> {
     let mut content = column![
-        icon(name, 40.0, theme::TEXT_TERTIARY),
-        theme::line(title, Style::Title, theme::TEXT_PRIMARY),
-        theme::label(text, Style::Secondary, theme::TEXT_SECONDARY)
+        icon(name, 40.0, theme::text_tertiary()),
+        theme::line(title, Style::Title, theme::text_primary()),
+        theme::label(text, Style::Secondary, theme::text_secondary())
             .center()
             .width(260),
     ]

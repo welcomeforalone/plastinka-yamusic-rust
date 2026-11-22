@@ -22,9 +22,9 @@ pub fn header<'a>(title: &str, summary: &'a str) -> Element<'a, App> {
         theme::line(
             title.to_uppercase(),
             Style::CaptionStrong,
-            theme::TEXT_PRIMARY
+            theme::text_primary()
         ),
-        theme::line(summary, Style::Secondary, theme::TEXT_TERTIARY),
+        theme::line(summary, Style::Secondary, theme::text_tertiary()),
         Space::new().height(12),
         widgets::divider(),
     ]
@@ -50,8 +50,8 @@ pub fn padded_row<'a>(
 ) -> Element<'a, App> {
     row![
         column![
-            theme::line(title, Style::BodyStrong, theme::TEXT_PRIMARY),
-            theme::label(hint, Style::Secondary, theme::TEXT_TERTIARY),
+            theme::line(title, Style::BodyStrong, theme::text_primary()),
+            theme::label(hint, Style::Secondary, theme::text_tertiary()),
         ]
         .spacing(2)
         .width(Length::Fill),
@@ -78,8 +78,8 @@ pub fn switch<'a>(on: bool, on_toggle: impl Fn(bool) -> App + 'a) -> Element<'a,
                 background: match (on, hovered) {
                     (true, false) => theme::accent(),
                     (true, true) => theme::accent_hover(),
-                    (false, false) => theme::SURFACE_4,
-                    (false, true) => theme::OUTLINE,
+                    (false, false) => theme::surface_4(),
+                    (false, true) => theme::outline(),
                 }
                 .into(),
                 background_border_width: 0.0,
@@ -87,7 +87,7 @@ pub fn switch<'a>(on: bool, on_toggle: impl Fn(bool) -> App + 'a) -> Element<'a,
                 foreground: (if on {
                     theme::on_accent()
                 } else {
-                    theme::TEXT_SECONDARY
+                    theme::text_secondary()
                 })
                 .into(),
                 foreground_border_width: 0.0,
@@ -114,18 +114,18 @@ where
     let buttons = items.into_iter().map(|(value, title)| {
         let chosen = value == selected;
         let (font, color) = if chosen {
-            (Style::BodyStrong, theme::TEXT_PRIMARY)
+            (Style::BodyStrong, theme::text_primary())
         } else {
-            (Style::Body, theme::TEXT_SECONDARY)
+            (Style::Body, theme::text_secondary())
         };
         button(container(theme::line(title, font, color)).center_y(Length::Fill))
             .height(36)
             .padding([0, 16])
             .style(move |_, status| button::Style {
                 background: match (chosen, status) {
-                    (true, _) => Some(theme::SURFACE_3.into()),
+                    (true, _) => Some(theme::surface_3().into()),
                     (false, button::Status::Hovered | button::Status::Pressed) => {
-                        Some(theme::SURFACE_2.into())
+                        Some(theme::surface_2().into())
                     }
                     _ => None,
                 },
@@ -138,7 +138,7 @@ where
     container(row(buttons).spacing(2))
         .padding(2)
         .style(|_| container::Style {
-            background: Some(theme::SURFACE_1.into()),
+            background: Some(theme::surface_1().into()),
             border: Border::default().rounded(RADIUS),
             ..container::Style::default()
         })
@@ -166,21 +166,25 @@ pub fn value_slider<'a>(
         .height(16)
         .style(|_, _| slider::Style {
             rail: slider::Rail {
-                backgrounds: (theme::accent().into(), theme::SURFACE_3.into()),
+                backgrounds: (theme::accent().into(), theme::surface_3().into()),
                 width: 4.0,
                 border: Border::default().rounded(2),
             },
             handle: slider::Handle {
                 shape: slider::HandleShape::Circle { radius: 8.0 },
-                background: theme::TEXT_PRIMARY.into(),
+                background: theme::text_primary().into(),
                 border_width: 0.0,
                 border_color: Color::TRANSPARENT,
             },
         });
     row![
-        container(theme::line(value_text, Style::Body, theme::TEXT_SECONDARY))
-            .width(VALUE_WIDTH)
-            .align_x(Alignment::End),
+        container(theme::line(
+            value_text,
+            Style::Body,
+            theme::text_secondary()
+        ))
+        .width(VALUE_WIDTH)
+        .align_x(Alignment::End),
         bar,
     ]
     .spacing(12)
@@ -221,18 +225,18 @@ pub fn text_field<'a>(
         })
         .width(field.width)
         .style(|_, status| text_input::Style {
-            background: theme::SURFACE_1.into(),
+            background: theme::surface_1().into(),
             border: Border {
                 color: match status {
                     text_input::Status::Focused { .. } => theme::accent(),
-                    _ => theme::OUTLINE,
+                    _ => theme::outline(),
                 },
                 width: 1.0,
                 radius: RADIUS.into(),
             },
-            icon: theme::TEXT_TERTIARY,
-            placeholder: theme::TEXT_TERTIARY,
-            value: theme::TEXT_PRIMARY,
+            icon: theme::text_tertiary(),
+            placeholder: theme::text_tertiary(),
+            value: theme::text_primary(),
             selection: theme::alpha(theme::accent(), 0.35),
         });
     if let Some(id) = field.id {
@@ -240,7 +244,7 @@ pub fn text_field<'a>(
     }
     let mut layers = stack![input].width(field.width).height(FIELD_HEIGHT);
     if let Some(name) = field.icon {
-        let glyph: Element<'a, App> = icon(name, 18.0, theme::TEXT_TERTIARY).into();
+        let glyph: Element<'a, App> = icon(name, 18.0, theme::text_tertiary()).into();
         layers = layers.push(
             container(glyph)
                 .height(FIELD_HEIGHT)

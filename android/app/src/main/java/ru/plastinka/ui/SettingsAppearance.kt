@@ -7,6 +7,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -14,6 +16,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -33,18 +40,62 @@ import androidx.compose.ui.unit.dp
 import ru.plastinka.R
 import ru.plastinka.data.Prefs
 
-/** «Оформление»: акцент (готовый или свой), плеер, предпросмотр. */
+/** «Оформление»: тема (режим и 12 семейств), акцент (готовый или свой), плеер, предпросмотр. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AppearanceScreen(onBack: () -> Unit) {
     var picking by remember { mutableStateOf(false) }
+    val tone = rememberWindowTone()
     SettingsPageScaffold("Оформление", onBack) {
+        SectionTitle("Тема")
+        Spacer(Modifier.height(10.dp))
+        GroupCard {
+            // Режим тона: три равные «таблетки»; выбранная залита цветом текста (как чипы).
+            Row(
+                Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                for (mode in ThemeMode.entries) {
+                    Chip(
+                        label = mode.title,
+                        selected = ThemeState.mode == mode,
+                        onClick = { ThemeState.selectMode(mode) },
+                        modifier = Modifier.weight(1f),
+                        compact = true,
+                    )
+                }
+            }
+            PlText(
+                themeSummary(ThemeState.family, ThemeState.mode, tone),
+                PlType.caption,
+                Pl.text3,
+                Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 12.dp),
+            )
+            // Сетка 12 семейств по три в ряд; миниатюры в текущем тоне.
+            Column(
+                Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                for (line in Family.entries.chunked(THEME_COLUMNS)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        for (family in line) {
+                            ThemeCard(family, tone, Modifier.weight(1f))
+                        }
+                        // Неполный последний ряд не растягивает карточки.
+                        repeat(THEME_COLUMNS - line.size) { Spacer(Modifier.weight(1f)) }
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(22.dp))
         SectionTitle("Акцент")
         Spacer(Modifier.height(10.dp))
         GroupCard {
-            Row(
+            // 8 готовых и «свой»: девять кружков по 48 dp переходят на вторую строку.
+            FlowRow(
                 Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 6.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 for (accent in Accent.entries) {
                     Swatch(
@@ -119,7 +170,7 @@ fun AppearanceScreen(onBack: () -> Unit) {
 
     if (picking) {
         AccentPickerDialog(
-            initial = AccentState.color.toRgbInt(),
+            initial = AccentState.rgb,
             onDismiss = { picking = false },
             onDone = {
                 AccentState.selectCustom(it)
@@ -129,10 +180,110 @@ fun AppearanceScreen(onBack: () -> Unit) {
     }
 }
 
-private fun Color.toRgbInt(): Int =
-    (Math.round(red * 255f) shl 16) or (Math.round(green * 255f) shl 8) or Math.round(blue * 255f)
+/** Карточек темы в ряду. */
+private const val THEME_COLUMNS = 3
 
-/** Кружок акцента 48 dp: цвет 34 dp, у выбранного кольцо цвета текста. */
+/** Подпись выбранной темы: «Полночь, светлая»; в режиме системы с пометкой «(по системе)». */
+private fun themeSummary(family: Family, mode: ThemeMode, tone: Tone): String {
+    val toneTitle = if (tone == Tone.Dark) "тёмная" else "светлая"
+    val suffix = if (mode == ThemeMode.System) " (по системе)" else ""
+    return "${family.title}, $toneTitle$suffix"
+}
+
+/**
+ * Карточка темы: миниатюра в текущем тоне и название под ней. Выбранная — рамка
+ * акцентом 2 dp, остальные — контур 1 dp.
+ */
+@Composable
+private fun ThemeCard(family: Family, tone: Tone, modifier: Modifier = Modifier) {
+    val selected = ThemeState.family == family
+    Column(
+        modifier
+            .clip(RoundedCornerShape(12.dp))
+            .selectable(selected = selected, role = Role.RadioButton, onClick = { ThemeState.selectFamily(family) }),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        ThemePreview(family.colors(tone), tone, selected)
+        Spacer(Modifier.height(6.dp))
+        PlText(
+            family.title,
+            if (selected) PlType.captionStrong else PlType.caption,
+            if (selected) Pl.text else Pl.text2,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+        )
+    }
+}
+
+private fun paletteColor(rgb: Int) = Color(0xFF000000.toInt() or (rgb and 0xFFFFFF))
+
+/**
+ * Миниатюра окна в палитре [colors]: фон, полоски текста, мини-плеер на surface2 с акцентным
+ * прогрессом, нижнее меню на surface1 и рамка контуром (выбранная — акцентом 2 dp).
+ * Цвета берутся из палитры, а не из текущей темы окна.
+ */
+@Composable
+private fun ThemePreview(colors: PlColors, tone: Tone, selected: Boolean) {
+    val shape = RoundedCornerShape(12.dp)
+    val accent = paletteColor(resolveFor(AccentState.rgb, colors.bg, tone))
+    val strong = paletteColor(colors.textPrimary)
+    val soft = paletteColor(colors.textTertiary)
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .aspectRatio(0.72f)
+            .clip(shape)
+            .background(paletteColor(colors.bg)),
+    ) {
+        Column(Modifier.fillMaxSize()) {
+            Column(
+                Modifier.weight(1f).fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Box(Modifier.fillMaxWidth(0.55f).height(6.dp).background(strong, CircleShape))
+                for (width in listOf(0.9f, 0.7f, 0.8f)) {
+                    Box(Modifier.fillMaxWidth(width).height(4.dp).background(soft, CircleShape))
+                }
+            }
+            // Мини-плеер: карточка surface2 с акцентным прогрессом снизу.
+            Box(
+                Modifier
+                    .padding(horizontal = 5.dp)
+                    .fillMaxWidth()
+                    .height(14.dp)
+                    .clip(RoundedCornerShape(5.dp))
+                    .background(paletteColor(colors.surface2)),
+            ) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth(0.55f)
+                        .height(2.dp)
+                        .background(accent),
+                )
+            }
+            Spacer(Modifier.height(5.dp))
+            // Нижнее меню: четыре пункта на surface1, первый активный.
+            Row(
+                Modifier.fillMaxWidth().height(16.dp).background(paletteColor(colors.surface1)),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                for (index in 0 until 4) {
+                    Box(Modifier.size(5.dp).background(if (index == 0) accent else soft, CircleShape))
+                }
+            }
+        }
+        // Рамка поверх содержимого: полоса меню не перекрывает нижний край.
+        Box(
+            Modifier
+                .matchParentSize()
+                .border(if (selected) 2.dp else 1.dp, if (selected) accent else paletteColor(colors.outline), shape),
+        )
+    }
+}
+
+/** Кружок акцента 48 dp: исходный цвет 34 dp (не затемнённый под светлый тон), у выбранного кольцо цвета текста. */
 @Composable
 private fun Swatch(fill: Color, selected: Boolean, onClick: () -> Unit) {
     Box(
@@ -148,7 +299,7 @@ private fun Swatch(fill: Color, selected: Boolean, onClick: () -> Unit) {
 }
 
 /**
- * Шестой кружок: пунктирный «+», пока свой цвет не выбран; потом закрашен
+ * Последний кружок: пунктирный «+», пока свой цвет не выбран; потом закрашен
  * своим цветом и выбран. Нажатие всегда открывает выбор цвета.
  */
 @Composable

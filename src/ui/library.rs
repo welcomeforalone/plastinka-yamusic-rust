@@ -1828,7 +1828,7 @@ impl Library {
             container(theme::line(
                 "Настройки звука",
                 Style::Title,
-                theme::TEXT_PRIMARY
+                theme::text_primary()
             ))
             .width(Length::Fill),
             widgets::icon_button(
@@ -1842,7 +1842,7 @@ impl Library {
         // Появление: карточка проступает из прозрачности, поднимаясь на
         // несколько пикселей и чуть вырастая, за ней — содержимое.
         let content = anim::motion(column![header, settings::sound_options(prefs)].spacing(12))
-            .reveal(theme::SURFACE_2, frame.content);
+            .reveal(theme::surface_2(), frame.content);
         let card = container(content)
             .width(Length::Fill)
             .max_width(SOUND_PANEL_WIDTH)
@@ -2167,7 +2167,7 @@ impl Library {
                         ..container::Style::default()
                     }),
                     fill(|| container::Style {
-                        background: Some(theme::alpha(theme::BG, PLACEHOLDER_DIM).into()),
+                        background: Some(theme::alpha(theme::bg(), PLACEHOLDER_DIM).into()),
                         ..container::Style::default()
                     }),
                 ]
@@ -2192,7 +2192,7 @@ impl Library {
             None => base,
         };
         let cover = container(cover).style(move |_| container::Style {
-            background: Some(theme::SURFACE_2.into()),
+            background: Some(theme::surface_2().into()),
             border: Border::default().rounded(radius),
             shadow: widgets::cover_shadow(),
             ..container::Style::default()
@@ -2207,23 +2207,29 @@ impl Library {
                 container(browse::artist_lines(
                     &track.artists,
                     Style::Headline,
-                    theme::TEXT_SECONDARY,
+                    theme::text_secondary(),
                 ))
                 .width(side)
                 .max_height(line * 2.0)
                 .clip(true)
                 .into()
             }
-            Some(track) => {
-                marquee(track.artists_text(), Style::Headline, theme::TEXT_SECONDARY).into()
-            }
+            Some(track) => marquee(
+                track.artists_text(),
+                Style::Headline,
+                theme::text_secondary(),
+            )
+            .into(),
             None => Space::new().into(),
         };
         let about = column![
             cover,
-            column![marquee(title, Style::Display, theme::TEXT_PRIMARY), artist]
-                .spacing(6)
-                .width(side),
+            column![
+                marquee(title, Style::Display, theme::text_primary()),
+                artist
+            ]
+            .spacing(6)
+            .width(side),
         ]
         .spacing(28)
         .width(side);
@@ -2257,13 +2263,13 @@ impl Library {
         );
         let layers = iced::widget::stack![
             fill(|| container::Style {
-                background: Some(theme::BG.into()),
+                background: Some(theme::bg().into()),
                 ..container::Style::default()
             }),
             backdrop,
             // Вуаль: на светлой обложке текст и кнопки должны читаться.
             fill(|| container::Style {
-                background: Some(theme::alpha(theme::BG, FULLSCREEN_SCRIM).into()),
+                background: Some(theme::alpha(theme::bg(), FULLSCREEN_SCRIM).into()),
                 ..container::Style::default()
             }),
             column![title_bar, close, body, player],
@@ -2313,7 +2319,7 @@ impl Library {
             hover(
                 row![
                     widgets::logo(28.0),
-                    theme::line(super::APP_NAME, Style::Headline, theme::TEXT_PRIMARY),
+                    theme::line(super::APP_NAME, Style::Headline, theme::text_primary()),
                 ]
                 .spacing(10)
                 .padding([0, 8])
@@ -2330,7 +2336,7 @@ impl Library {
             container(theme::line(
                 "Коллекция",
                 Style::Caption,
-                theme::TEXT_TERTIARY,
+                theme::text_tertiary(),
             ))
             .padding(Padding {
                 top: 16.0,
@@ -2369,7 +2375,7 @@ impl Library {
             menu_index(self.section),
             self.nav_glide.map(|(_, started)| started),
             glide,
-            theme::SURFACE_3,
+            theme::surface_3(),
             widgets::RADIUS_M,
         );
         container(menu).width(width).clip(true).into()
@@ -2427,7 +2433,7 @@ impl Library {
         let card = row![
             avatar,
             column![
-                theme::line(name, Style::BodyStrong, theme::TEXT_PRIMARY),
+                theme::line(name, Style::BodyStrong, theme::text_primary()),
                 theme::line("Плюс активен", Style::Caption, theme::accent()),
             ]
             .width(Length::Fill),
@@ -2439,14 +2445,20 @@ impl Library {
             .width(Length::Fill)
             .style(|_, status| button::Style {
                 background: match status {
-                    button::Status::Pressed => Some(theme::SURFACE_3.into()),
+                    button::Status::Pressed => Some(theme::surface_3().into()),
                     _ => None,
                 },
                 border: Border::default().rounded(12),
                 ..button::Style::default()
             })
             .on_press(open);
-        anim::hover_fill(card, theme::clear(theme::SURFACE_2), theme::SURFACE_2, 12.0).into()
+        anim::hover_fill(
+            card,
+            theme::clear(theme::surface_2()),
+            theme::surface_2(),
+            12.0,
+        )
+        .into()
     }
 
     fn liked<'a>(&'a self, covers: &'a Covers, turn: f32) -> Element<'a, App> {
@@ -2464,7 +2476,7 @@ impl Library {
                     (Icon::Error, sentence(&failure.text))
                 };
                 state_block(
-                    widgets::badge(badge, theme::ERROR, theme::ERROR_SOFT),
+                    widgets::badge(badge, theme::error(), theme::error_soft()),
                     "Не удалось загрузить «Мне нравится»",
                     text,
                     widgets::action(
@@ -2483,7 +2495,7 @@ impl Library {
                     left: PAGE_SIDE,
                 }),
                 state_block(
-                    widgets::badge(Icon::Heart, theme::TEXT_SECONDARY, theme::SURFACE_2),
+                    widgets::badge(Icon::Heart, theme::text_secondary(), theme::surface_2()),
                     "Здесь пока пусто",
                     "Отмечайте треки сердцем — они появятся в «Мне нравится».".to_owned(),
                     widgets::action(
@@ -2498,7 +2510,7 @@ impl Library {
             Likes::Ready(tracks) => {
                 let body: Element<'a, App> = if self.shown_count() == 0 {
                     state_block(
-                        widgets::badge(Icon::Search, theme::TEXT_SECONDARY, theme::SURFACE_2),
+                        widgets::badge(Icon::Search, theme::text_secondary(), theme::surface_2()),
                         "Ничего не нашлось",
                         format!(
                             "В «Мне нравится» нет треков по запросу «{}».",
@@ -2598,7 +2610,7 @@ impl Library {
                 track.artists_text(),
             ),
             None => (
-                container(center(icon(Icon::Empty, 24.0, theme::TEXT_SECONDARY)))
+                container(center(icon(Icon::Empty, 24.0, theme::text_secondary())))
                     .width(56)
                     .height(56)
                     .style(|_| surface_2(8.0))
@@ -2610,12 +2622,12 @@ impl Library {
         // Щелчок по обложке открывает полноэкранный плеер; при наведении на
         // ней проступает значок «развернуть».
         let cover: Element<'a, App> = if has_track && !fullscreen {
-            let glyph: Element<'a, App> = icon(Icon::Expand, 20.0, theme::TEXT_PRIMARY).into();
+            let glyph: Element<'a, App> = icon(Icon::Expand, 20.0, theme::text_primary()).into();
             let badge = container(center(glyph))
                 .width(56)
                 .height(56)
                 .style(|_| container::Style {
-                    background: Some(theme::alpha(theme::BG, 0.5).into()),
+                    background: Some(theme::alpha(theme::bg(), 0.5).into()),
                     border: Border::default().rounded(8.0),
                     ..container::Style::default()
                 });
@@ -2643,13 +2655,13 @@ impl Library {
                     marquee_element(browse::artist_links(
                         &track.artists,
                         Style::Secondary,
-                        theme::TEXT_SECONDARY,
+                        theme::text_secondary(),
                     ))
                 }
-                _ => marquee(artist, Style::Secondary, theme::TEXT_SECONDARY).into(),
+                _ => marquee(artist, Style::Secondary, theme::text_secondary()).into(),
             };
             let mut lines = column![
-                marquee(title, Style::BodyStrong, theme::TEXT_PRIMARY),
+                marquee(title, Style::BodyStrong, theme::text_primary()),
                 artist
             ]
             .spacing(2)
@@ -2662,8 +2674,8 @@ impl Library {
         } else {
             container(
                 column![
-                    theme::line(title, Style::BodyStrong, theme::TEXT_PRIMARY),
-                    theme::line(artist, Style::Secondary, theme::TEXT_SECONDARY),
+                    theme::line(title, Style::BodyStrong, theme::text_primary()),
+                    theme::line(artist, Style::Secondary, theme::text_secondary()),
                 ]
                 .spacing(2),
             )
@@ -2685,7 +2697,7 @@ impl Library {
         let glyph_color = if has_track {
             theme::on_accent()
         } else {
-            theme::TEXT_DISABLED
+            theme::text_disabled()
         };
         // Пока звук ждёт сеть — спиннер, как в макете.
         let glyph = match (player.playing, player.buffering) {
@@ -2700,7 +2712,7 @@ impl Library {
             .style(|_, status| button::Style {
                 background: match status {
                     button::Status::Pressed => Some(theme::accent_pressed().into()),
-                    button::Status::Disabled => Some(theme::SURFACE_3.into()),
+                    button::Status::Disabled => Some(theme::surface_3().into()),
                     _ => None,
                 },
                 border: Border::default().rounded(widgets::ROUND),
@@ -2790,7 +2802,7 @@ impl Library {
         };
         let range_end = total.unwrap_or(0.0).max(1.0);
         let seek = row![
-            theme::line(clock(position), Style::Caption, theme::TEXT_TERTIARY)
+            theme::line(clock(position), Style::Caption, theme::text_tertiary())
                 .width(36)
                 .align_x(Alignment::End),
             mouse_area(bar(
@@ -2803,7 +2815,7 @@ impl Library {
             ))
             .on_enter(Lib(Message::SeekHover(true)))
             .on_exit(Lib(Message::SeekHover(false))),
-            theme::line(total_text, Style::Caption, theme::TEXT_TERTIARY).width(36),
+            theme::line(total_text, Style::Caption, theme::text_tertiary()).width(36),
         ]
         .spacing(10)
         .align_y(Alignment::Center);
@@ -2997,7 +3009,7 @@ impl Library {
             .height(VOLUME_SLIDER_HEIGHT)
             .style(|_, _| slider::Style {
                 rail: slider::Rail {
-                    backgrounds: (theme::accent().into(), theme::SURFACE_4.into()),
+                    backgrounds: (theme::accent().into(), theme::surface_4().into()),
                     width: 4.0,
                     border: Border::default().rounded(2),
                 },
@@ -3007,7 +3019,7 @@ impl Library {
                         width: 6,
                         border_radius: 3.0.into(),
                     },
-                    background: theme::TEXT_PRIMARY.into(),
+                    background: theme::text_primary().into(),
                     border_width: 0.0,
                     border_color: Color::TRANSPARENT,
                 },
@@ -3017,7 +3029,7 @@ impl Library {
                 theme::line(
                     format!("{percent}%"),
                     Style::CaptionStrong,
-                    theme::TEXT_SECONDARY
+                    theme::text_secondary()
                 ),
                 slider,
             ]
@@ -3029,11 +3041,11 @@ impl Library {
         .padding([16.0, 0.0])
         .center_x(VOLUME_PANEL_WIDTH)
         .style(|_| container::Style {
-            background: Some(theme::SURFACE_2.into()),
+            background: Some(theme::surface_2().into()),
             border: Border::default()
                 .rounded(VOLUME_PANEL_WIDTH / 2.0)
                 .width(1)
-                .color(theme::BORDER),
+                .color(theme::border()),
             shadow: widgets::popover_shadow(),
             ..container::Style::default()
         });
@@ -3043,7 +3055,7 @@ impl Library {
         let card = anim::motion(card)
             .offset(0.0, 8.0 * hidden)
             .scale(0.94 + 0.06 * shown)
-            .veil(theme::alpha(theme::BG, hidden), VOLUME_PANEL_WIDTH / 2.0);
+            .veil(theme::alpha(theme::bg(), hidden), VOLUME_PANEL_WIDTH / 2.0);
         // Прозрачная полоса под панелью закрывает зазор до значка: курсор
         // идёт со значка на панель, не покидая общую область.
         let region = column![card, Space::new().height(VOLUME_PANEL_GAP)];
@@ -3109,10 +3121,10 @@ fn scrolling<'a>(library: &Library, list: Element<'a, App>, total: f32) -> Eleme
             horizontal_rail: rail,
             gap: None,
             auto_scroll: scrollable::AutoScroll {
-                background: theme::SURFACE_3.into(),
+                background: theme::surface_3().into(),
                 border: Border::default().rounded(widgets::ROUND),
                 shadow: widgets::raised_shadow(),
-                icon: theme::TEXT_PRIMARY,
+                icon: theme::text_primary(),
             },
         }
     });
@@ -3146,7 +3158,7 @@ fn clock(seconds: f32) -> String {
 
 fn surface_2(radius: f32) -> container::Style {
     container::Style {
-        background: Some(theme::SURFACE_2.into()),
+        background: Some(theme::surface_2().into()),
         border: Border::default().rounded(radius),
         ..container::Style::default()
     }
@@ -3170,14 +3182,18 @@ pub(super) fn avatar<'a>(
             .border_radius(size / 2.0)
             .into();
     }
-    container(theme::line(initial, Style::BodyStrong, theme::TEXT_PRIMARY))
-        .center(size)
-        .style(|_| container::Style {
-            background: Some(theme::avatar()),
-            border: Border::default().rounded(widgets::ROUND),
-            ..container::Style::default()
-        })
-        .into()
+    container(theme::line(
+        initial,
+        Style::BodyStrong,
+        theme::text_primary(),
+    ))
+    .center(size)
+    .style(|_| container::Style {
+        background: Some(theme::avatar()),
+        border: Border::default().rounded(widgets::ROUND),
+        ..container::Style::default()
+    })
+    .into()
 }
 
 /// Обложка, под которой тает обложка прежнего трека `from`. `shown` — доля
@@ -3252,15 +3268,15 @@ fn sidebar_toggle<'a>(collapsed: bool) -> Element<'a, App> {
     } else {
         (Icon::Back, "Свернуть меню")
     };
-    let toggle = button(center(icon(name, 16.0, theme::TEXT_PRIMARY)))
+    let toggle = button(center(icon(name, 16.0, theme::text_primary())))
         .width(TOGGLE)
         .height(TOGGLE)
         .padding(0)
         .style(|_, status| button::Style {
             background: Some(
                 match status {
-                    button::Status::Hovered | button::Status::Pressed => theme::SURFACE_3,
-                    _ => theme::SURFACE_2,
+                    button::Status::Hovered | button::Status::Pressed => theme::surface_3(),
+                    _ => theme::surface_2(),
                 }
                 .into(),
             ),
@@ -3294,11 +3310,15 @@ fn menu_index(section: Section) -> usize {
 fn nav_item<'a>(section: Section, selected: bool, active: f32, compact: bool) -> Element<'a, App> {
     let make = move |hovered: bool| -> Element<'a, App> {
         let (icon_color, text_color, font) = if hovered && !selected {
-            (theme::TEXT_PRIMARY, theme::TEXT_PRIMARY, Style::BodyStrong)
+            (
+                theme::text_primary(),
+                theme::text_primary(),
+                Style::BodyStrong,
+            )
         } else {
             (
-                theme::mix(theme::TEXT_SECONDARY, theme::accent(), active),
-                theme::mix(theme::TEXT_SECONDARY, theme::TEXT_PRIMARY, active),
+                theme::mix(theme::text_secondary(), theme::accent(), active),
+                theme::mix(theme::text_secondary(), theme::text_primary(), active),
                 Style::BodyStrong,
             )
         };
@@ -3317,7 +3337,7 @@ fn nav_item<'a>(section: Section, selected: bool, active: f32, compact: bool) ->
             .padding([0, 12])
             .style(move |_, status| button::Style {
                 background: match (selected, status) {
-                    (false, button::Status::Pressed) => Some(theme::SURFACE_3.into()),
+                    (false, button::Status::Pressed) => Some(theme::surface_3().into()),
                     _ => None,
                 },
                 border: Border::default().rounded(widgets::RADIUS_M),
@@ -3331,8 +3351,8 @@ fn nav_item<'a>(section: Section, selected: bool, active: f32, compact: bool) ->
     } else {
         anim::hover_fill(
             hover(make(false), make(true)),
-            theme::clear(theme::SURFACE_2),
-            theme::SURFACE_2,
+            theme::clear(theme::surface_2()),
+            theme::surface_2(),
             widgets::RADIUS_M,
         )
         .into()
@@ -3396,9 +3416,9 @@ fn liked_header<'a>(tracks: &[Track], with_actions: bool) -> Element<'a, App> {
             ..container::Style::default()
         });
     let mut info = column![
-        theme::line("Коллекция", Style::Body, theme::TEXT_SECONDARY),
-        theme::line("Мне нравится", Style::Hero, theme::TEXT_PRIMARY),
-        theme::line(subtitle, Style::Body, theme::TEXT_SECONDARY),
+        theme::line("Коллекция", Style::Body, theme::text_secondary()),
+        theme::line("Мне нравится", Style::Hero, theme::text_primary()),
+        theme::line(subtitle, Style::Body, theme::text_secondary()),
     ]
     .spacing(4)
     .width(Length::Fill);
@@ -3493,15 +3513,15 @@ fn search_field<'a>(
         .style(|_, _| text_input::Style {
             background: Color::TRANSPARENT.into(),
             border: Border::default(),
-            icon: theme::TEXT_TERTIARY,
-            placeholder: theme::TEXT_TERTIARY,
-            value: theme::TEXT_PRIMARY,
+            icon: theme::text_tertiary(),
+            placeholder: theme::text_tertiary(),
+            value: theme::text_primary(),
             selection: theme::alpha(theme::accent(), 0.35),
         });
     if let Some(message) = on_submit {
         input = input.on_submit(message);
     }
-    let glyph: Element<'a, App> = icon(Icon::Search, 18.0, theme::TEXT_TERTIARY).into();
+    let glyph: Element<'a, App> = icon(Icon::Search, 18.0, theme::text_tertiary()).into();
     let mut row = row![glyph, input].spacing(12).align_y(Alignment::Center);
     let right = if query.is_empty() {
         16.0
@@ -3526,7 +3546,7 @@ fn search_field<'a>(
         })
         .style(|_| container::Style {
             border: Border {
-                color: theme::OUTLINE,
+                color: theme::outline(),
                 width: 1.0,
                 radius: widgets::ROUND.into(),
             },
@@ -3536,7 +3556,7 @@ fn search_field<'a>(
 }
 
 fn list_header<'a>() -> Element<'a, App> {
-    let caption = |text: &'a str| theme::line(text, Style::Caption, theme::TEXT_TERTIARY);
+    let caption = |text: &'a str| theme::line(text, Style::Caption, theme::text_tertiary());
     column![
         container(columns(
             caption("#").into(),
@@ -3544,7 +3564,7 @@ fn list_header<'a>() -> Element<'a, App> {
             caption("НАЗВАНИЕ").into(),
             caption("АЛЬБОМ").into(),
             Space::new().into(),
-            icon(Icon::Clock, 16.0, theme::TEXT_TERTIARY).into(),
+            icon(Icon::Clock, 16.0, theme::text_tertiary()).into(),
         ))
         .height(36)
         .center_y(36)
@@ -3594,13 +3614,13 @@ fn bar<'a>(
                 (true, _) => hover,
             };
             let filled = if enabled {
-                theme::mix(theme::TEXT_SECONDARY, theme::accent(), engaged)
+                theme::mix(theme::text_secondary(), theme::accent(), engaged)
             } else {
-                theme::SURFACE_4
+                theme::surface_4()
             };
             slider::Style {
                 rail: slider::Rail {
-                    backgrounds: (filled.into(), theme::SURFACE_4.into()),
+                    backgrounds: (filled.into(), theme::surface_4().into()),
                     width: 4.0,
                     border: Border::default().rounded(2),
                 },
@@ -3608,7 +3628,7 @@ fn bar<'a>(
                     shape: slider::HandleShape::Circle {
                         radius: 6.0 * engaged,
                     },
-                    background: theme::TEXT_PRIMARY.into(),
+                    background: theme::text_primary().into(),
                     border_width: 0.0,
                     border_color: Color::TRANSPARENT,
                 },
@@ -3639,19 +3659,19 @@ fn quality_badge<'a>(info: StreamInfo, full: bool) -> Element<'a, App> {
     let badge = button(theme::line(
         text,
         Style::CaptionStrong,
-        theme::TEXT_SECONDARY,
+        theme::text_secondary(),
     ))
     .padding([3, 8])
     .style(|_, status| button::Style {
         background: match status {
-            button::Status::Hovered | button::Status::Pressed => Some(theme::SURFACE_3.into()),
+            button::Status::Hovered | button::Status::Pressed => Some(theme::surface_3().into()),
             _ => None,
         },
-        text_color: theme::TEXT_SECONDARY,
+        text_color: theme::text_secondary(),
         border: Border::default()
             .rounded(widgets::RADIUS_S)
             .width(1)
-            .color(theme::BORDER),
+            .color(theme::border()),
         ..button::Style::default()
     })
     .on_press(Lib(Message::ToggleSoundPanel));
@@ -3677,8 +3697,8 @@ fn state_block<'a>(
     center(
         column![
             badge,
-            theme::line(title, Style::Title, theme::TEXT_PRIMARY),
-            theme::label(text, Style::Body, theme::TEXT_SECONDARY)
+            theme::line(title, Style::Title, theme::text_primary()),
+            theme::label(text, Style::Body, theme::text_secondary())
                 .center()
                 .width(380),
             Space::new().height(4),
@@ -3695,7 +3715,7 @@ fn skeleton<'a>(turn: f32) -> Element<'a, App> {
     let alpha = 0.75 + 0.25 * (turn * std::f32::consts::TAU).cos();
     let shade = Color {
         a: alpha,
-        ..theme::SURFACE_2
+        ..theme::surface_2()
     };
     let bar =
         move |width: f32, height: f32| widgets::block(width, height, shade, widgets::RADIUS_S);

@@ -247,8 +247,8 @@ pub fn entries<'a>(ctx: &Ctx<'a>) -> Vec<Entry<'a>> {
             preamp_hint.clone(),
             "звук громкость уровень предусилитель",
             column![
-                theme::line("Предусилитель", Style::BodyStrong, theme::TEXT_PRIMARY),
-                theme::label(preamp_hint, Style::Secondary, theme::TEXT_TERTIARY),
+                theme::line("Предусилитель", Style::BodyStrong, theme::text_primary()),
+                theme::label(preamp_hint, Style::Secondary, theme::text_tertiary()),
                 Space::new().height(6),
                 container(slider).width(Length::Fill).max_width(SLIDER_ROW),
             ]
@@ -322,7 +322,7 @@ fn presets_view<'a>(eq: &'a EqState, name: &'a NameField) -> Element<'a, App> {
     let wrapped = row(pills).spacing(8).wrap().vertical_spacing(8);
 
     let mut content = column![
-        theme::line("Пресет", Style::BodyStrong, theme::TEXT_PRIMARY),
+        theme::line("Пресет", Style::BodyStrong, theme::text_primary()),
         wrapped,
     ]
     .spacing(12);
@@ -337,9 +337,9 @@ fn pill_colors(selected: bool, status: button::Status) -> (iced::Color, iced::Co
     match (selected, status) {
         (true, _) => (theme::accent(), theme::on_accent()),
         (false, button::Status::Hovered | button::Status::Pressed) => {
-            (theme::SURFACE_4, theme::TEXT_PRIMARY)
+            (theme::surface_4(), theme::text_primary())
         }
-        (false, _) => (theme::SURFACE_3, theme::TEXT_SECONDARY),
+        (false, _) => (theme::surface_3(), theme::text_secondary()),
     }
 }
 
@@ -403,11 +403,11 @@ fn custom_pill<'a>(name: &'a str, selected: bool) -> Element<'a, App> {
 fn add_pill<'a>(open: bool) -> Element<'a, App> {
     button(
         row![
-            icon(Icon::Plus, 14.0, theme::TEXT_SECONDARY),
+            icon(Icon::Plus, 14.0, theme::text_secondary()),
             theme::line(
                 "Сохранить как…",
                 Style::CaptionStrong,
-                theme::TEXT_SECONDARY
+                theme::text_secondary()
             ),
         ]
         .spacing(6)
@@ -416,12 +416,14 @@ fn add_pill<'a>(open: bool) -> Element<'a, App> {
     .padding([6, 14])
     .style(move |_, status| button::Style {
         background: None,
-        text_color: theme::TEXT_SECONDARY,
+        text_color: theme::text_secondary(),
         border: Border {
             color: match (open, status) {
                 (true, _) => theme::accent(),
-                (false, button::Status::Hovered | button::Status::Pressed) => theme::TEXT_SECONDARY,
-                _ => theme::OUTLINE,
+                (false, button::Status::Hovered | button::Status::Pressed) => {
+                    theme::text_secondary()
+                }
+                _ => theme::outline(),
             },
             width: 1.0,
             radius: widgets::ROUND.into(),
@@ -459,7 +461,7 @@ fn name_form<'a>(name: &'a NameField) -> Element<'a, App> {
         form = form.push(theme::label(
             error.to_string(),
             Style::Caption,
-            theme::ERROR,
+            theme::error(),
         ));
     }
     form.into()

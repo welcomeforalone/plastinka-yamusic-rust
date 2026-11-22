@@ -165,6 +165,6 @@ pub(super) fn tag<'a>(link: Link<'_>) -> Option<Element<'a, App>> {
                 tooltip::Position::Top,
             ))
         }
-        Link::Gone => Some(plugins::tag("Недоступен", theme::TEXT_DISABLED)),
+        Link::Gone => Some(plugins::tag("Недоступен", theme::text_disabled())),
     }
 }

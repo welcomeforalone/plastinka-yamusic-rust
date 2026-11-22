@@ -344,14 +344,14 @@ impl Library {
             HistoryLoad::Idle | HistoryLoad::Loading => container(iced::widget::center(
                 column![
                     spinner(40.0, theme::accent(), turn),
-                    theme::line("Загружаем историю…", Style::Body, theme::TEXT_SECONDARY),
+                    theme::line("Загружаем историю…", Style::Body, theme::text_secondary()),
                 ]
                 .spacing(14)
                 .align_x(Alignment::Center),
             ))
             .into(),
             HistoryLoad::Failed(failure) => state_block(
-                widgets::badge(Icon::Offline, theme::ERROR, theme::ERROR_SOFT),
+                widgets::badge(Icon::Offline, theme::error(), theme::error_soft()),
                 "Не удалось загрузить историю",
                 failure.text.clone(),
                 widgets::action(
@@ -362,7 +362,7 @@ impl Library {
                 ),
             ),
             HistoryLoad::Ready(_) if self.history_shown.is_empty() => state_block(
-                widgets::badge(Icon::History, theme::TEXT_SECONDARY, theme::SURFACE_2),
+                widgets::badge(Icon::History, theme::text_secondary(), theme::surface_2()),
                 "История пуста",
                 "Здесь появятся треки, которые вы слушали".to_owned(),
                 Space::new().into(),
@@ -391,14 +391,18 @@ impl Library {
     fn history_list<'a>(&'a self, covers: &'a Covers, days: &'a [HistoryDay]) -> Element<'a, App> {
         let today = api::today_utc();
         let rows = history_rows(days);
-        let title = container(theme::line("История", Style::Display, theme::TEXT_PRIMARY))
-            .padding(Padding::default().top(PAGE_TOP - LIST_TOP));
+        let title = container(theme::line(
+            "История",
+            Style::Display,
+            theme::text_primary(),
+        ))
+        .padding(Padding::default().top(PAGE_TOP - LIST_TOP));
         self.scroller(self.history_body(), Some(title.into()), move |index| {
             let element: Element<'a, App> = match *rows.get(index)? {
                 HistoryRow::Day(day) => container(theme::line(
                     api::day_label(days.get(day)?.date, today),
                     Style::Title,
-                    theme::TEXT_PRIMARY,
+                    theme::text_primary(),
                 ))
                 .height(Length::Fill)
                 .align_y(Alignment::End)
@@ -458,11 +462,11 @@ impl Library {
                 COVER,
                 widgets::RADIUS_S,
             ),
-            _ => widgets::block(COVER, COVER, theme::SURFACE_3, widgets::RADIUS_S),
+            _ => widgets::block(COVER, COVER, theme::surface_3(), widgets::RADIUS_S),
         };
         let content = row![
             container(cover).width(COVER).height(COVER).clip(true),
-            theme::line(context.label(), Style::BodyStrong, theme::TEXT_PRIMARY),
+            theme::line(context.label(), Style::BodyStrong, theme::text_primary()),
         ]
         .spacing(12)
         .align_y(Alignment::Center);
@@ -503,9 +507,9 @@ impl Library {
         );
         let link = self.link(original);
         let (title_color, other_color) = if link != Link::Gone || track.id != original.id {
-            (theme::TEXT_PRIMARY, theme::TEXT_SECONDARY)
+            (theme::text_primary(), theme::text_secondary())
         } else {
-            (theme::TEXT_DISABLED, theme::TEXT_DISABLED)
+            (theme::text_disabled(), theme::text_disabled())
         };
         // Метка перед названием: «Копия» или «Недоступен».
         let mut name = row![].spacing(6).align_y(Alignment::Center);
@@ -533,9 +537,13 @@ impl Library {
             .spacing(2)
             .width(Length::Fill),
             heart,
-            theme::line(track.duration_text(), Style::Caption, theme::TEXT_TERTIARY)
-                .width(56)
-                .align_x(Alignment::End),
+            theme::line(
+                track.duration_text(),
+                Style::Caption,
+                theme::text_tertiary()
+            )
+            .width(56)
+            .align_x(Alignment::End),
         ]
         .spacing(12)
         .align_y(Alignment::Center);
@@ -545,7 +553,7 @@ impl Library {
             .style(|_, status| button::Style {
                 background: match status {
                     button::Status::Hovered | button::Status::Pressed => {
-                        Some(theme::SURFACE_3.into())
+                        Some(theme::surface_3().into())
                     }
                     _ => None,
                 },

@@ -4,19 +4,25 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import ru.plastinka.ui.AppViewModel
+import ru.plastinka.ui.DarkAreas
 import ru.plastinka.ui.PlastinkaTheme
 import ru.plastinka.ui.Pip
 import ru.plastinka.ui.RootScreen
+import ru.plastinka.ui.Tone
+import ru.plastinka.ui.rememberWindowTone
 
 class MainActivity : ComponentActivity() {
 
@@ -38,6 +44,18 @@ class MainActivity : ComponentActivity() {
         // Поворот экрана не перезапускает загрузку: библиотека уже есть или грузится.
         if (model.loggedIn) model.ensureLibrary()
         setContent {
+            // Значки системных панелей: тёмные на светлой теме, светлые на тёмной и поверх
+            // тёмных областей (полноэкранный плеер). Меняются сразу вместе с темой.
+            val lightBars = rememberWindowTone() == Tone.Light && DarkAreas.count == 0
+            DisposableEffect(lightBars) {
+                val style = if (lightBars) {
+                    SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
+                } else {
+                    SystemBarStyle.dark(Color.TRANSPARENT)
+                }
+                enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+                onDispose {}
+            }
             PlastinkaTheme {
                 val login by model.login.collectAsStateWithLifecycle()
                 val library by model.library.collectAsStateWithLifecycle()

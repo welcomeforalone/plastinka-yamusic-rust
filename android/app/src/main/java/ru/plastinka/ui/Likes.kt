@@ -119,13 +119,17 @@ fun BoxScope.DetailGlow() {
 }
 
 /** Тень большой обложки в шапке списка (макет: 0 8 24, чёрный 35 %). */
+@Composable
 fun Modifier.coverShadow(radius: Dp): Modifier = shadow(
     12.dp,
     RoundedCornerShape(radius),
     clip = false,
     ambientColor = Color.Transparent,
-    spotColor = Color.Black.copy(alpha = 0.35f),
+    spotColor = Color.Black.copy(alpha = Pl.shadowAlpha(0.35f)),
 )
+
+/** Тёмный конец градиента плитки «Мне нравится»: тот же 0x1A1033, что на десктопе (liked_tile). */
+private val LIKED_TILE_DARK = Color(0xFF1A1033)
 
 /** Плитка с сердцем на градиенте акцента. */
 @Composable
@@ -138,7 +142,7 @@ fun GradientHeart(size: Dp, radius: Dp, icon: Dp, shadow: Boolean = false) {
             .clip(RoundedCornerShape(radius))
             .background(
                 Brush.linearGradient(
-                    listOf(accent, lerp(accent, Color(0xFF1A1033), 0.7f)),
+                    listOf(accent, lerp(accent, LIKED_TILE_DARK, 0.7f)),
                     start = Offset.Zero,
                     end = Offset.Infinite,
                 ),

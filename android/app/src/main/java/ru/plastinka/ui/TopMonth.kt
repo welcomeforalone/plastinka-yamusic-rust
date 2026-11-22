@@ -111,6 +111,7 @@ private fun trendIcon(trend: Trend): Int = when (trend) {
     Trend.Same -> R.drawable.ic_trend_same
 }
 
+@Composable
 private fun trendMark(trend: Trend?): Pair<Int, androidx.compose.ui.graphics.Color>? = trend?.let {
     trendIcon(it) to when (it) {
         Trend.Up -> Pl.growth

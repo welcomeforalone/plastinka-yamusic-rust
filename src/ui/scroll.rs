@@ -617,9 +617,9 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Rail<'_, Message> {
             THUMB_WIDTH
         };
         let color: Color = match (state.grab.is_some(), state.hovered) {
-            (true, _) => theme::TEXT_SECONDARY,
-            (false, true) => theme::TEXT_TERTIARY,
-            (false, false) => theme::TEXT_DISABLED,
+            (true, _) => theme::text_secondary(),
+            (false, true) => theme::text_tertiary(),
+            (false, false) => theme::text_disabled(),
         };
         renderer.fill_quad(
             Quad {

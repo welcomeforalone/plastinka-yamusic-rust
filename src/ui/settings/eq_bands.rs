@@ -156,17 +156,17 @@ pub fn view<'a>(
     };
     let values = row(gains
         .iter()
-        .map(|gain| cell(format_value(*gain), theme::TEXT_SECONDARY)));
+        .map(|gain| cell(format_value(*gain), theme::text_secondary())));
     let freqs = row(FREQS
         .iter()
-        .map(|hz| cell(format_freq(*hz), theme::TEXT_TERTIARY)));
+        .map(|hz| cell(format_freq(*hz), theme::text_tertiary())));
     // Подписи шкалы по центру линий: высота строки 16, линия на отступе 12.
     let axis = column![
-        theme::line("+12", Style::Caption, theme::TEXT_TERTIARY),
+        theme::line("+12", Style::Caption, theme::text_tertiary()),
         Space::new().height(Length::Fill),
-        theme::line("0", Style::Caption, theme::TEXT_TERTIARY),
+        theme::line("0", Style::Caption, theme::text_tertiary()),
         Space::new().height(Length::Fill),
-        theme::line("−12", Style::Caption, theme::TEXT_TERTIARY),
+        theme::line("−12", Style::Caption, theme::text_tertiary()),
     ]
     .width(AXIS_WIDTH)
     .height(PLOT_HEIGHT)
@@ -340,17 +340,17 @@ impl Widget<App, Theme, iced::Renderer> for Bands<'_> {
 
         // Сетка: +12, 0 и −12 дБ; нулевая линия ярче.
         for (y, color) in [
-            (span.top, theme::BORDER),
-            (span.bottom, theme::BORDER),
-            (span.middle(), theme::OUTLINE),
+            (span.top, theme::border()),
+            (span.bottom, theme::border()),
+            (span.middle(), theme::outline()),
         ] {
             quad(bounds.x, y - 0.5, bounds.width, 1.0, 0.0, color);
         }
 
         let (fill, handle) = if self.enabled {
-            (theme::accent(), theme::TEXT_PRIMARY)
+            (theme::accent(), theme::text_primary())
         } else {
-            (theme::TEXT_DISABLED, theme::TEXT_DISABLED)
+            (theme::text_disabled(), theme::text_disabled())
         };
         for (index, gain) in self.gains.iter().enumerate() {
             let x = column_center(index, bounds.x, bounds.width);
@@ -360,7 +360,7 @@ impl Widget<App, Theme, iced::Renderer> for Bands<'_> {
                 TRACK_WIDTH,
                 span.bottom - span.top,
                 TRACK_WIDTH / 2.0,
-                theme::SURFACE_3,
+                theme::surface_3(),
             );
             let y = span.y_of(*gain);
             let (from, to) = if y < span.middle() {

@@ -115,7 +115,7 @@ pub fn should_close(main_screen: bool, open: bool) -> bool {
 /// 18 % (HSV), оттенок прежний. Без обложки — цвет подложки.
 pub fn background(average: Option<[u8; 3]>) -> Color {
     let Some([r, g, b]) = average else {
-        return super::theme::SURFACE_2;
+        return super::theme::surface_2();
     };
     let (r, g, b) = (
         f32::from(r) / 255.0,
@@ -255,6 +255,6 @@ mod tests {
         // Серый остаётся серым, белый становится тёмно-серым.
         let white = background(Some([255, 255, 255]));
         assert!((white.r - 0.18).abs() < 0.01 && (white.r - white.b).abs() < 0.001);
-        assert_eq!(background(None), super::super::theme::SURFACE_2);
+        assert_eq!(background(None), super::super::theme::surface_2());
     }
 }

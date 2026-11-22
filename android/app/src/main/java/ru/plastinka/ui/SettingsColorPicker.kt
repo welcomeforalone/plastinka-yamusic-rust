@@ -50,8 +50,9 @@ fun AccentPickerDialog(initial: Int, onDismiss: () -> Unit, onDone: (Int) -> Uni
     var text by remember { mutableStateOf(ColorMath.formatHex(initial)) }
 
     val raw = hsv.toRgb()
-    // Слишком тёмный цвет осветляется: показываем и применяем уже читаемый.
-    val shown = ColorMath.readable(raw)
+    // Цвет сохраняется как выбран; в интерфейсе он осветляется на тёмном фоне и затемняется на светлом.
+    val scheme = LocalPl.current
+    val shown = resolveFor(raw, scheme.bgRgb, scheme.tone)
     val parsed = ColorMath.parseHex(text)
     val invalid = parsed == null
 
@@ -102,12 +103,20 @@ fun AccentPickerDialog(initial: Int, onDismiss: () -> Unit, onDone: (Int) -> Uni
                 when {
                     invalid -> PlText("Нужен цвет вида #RRGGBB", PlType.caption, Pl.error)
                     shown != raw ->
-                        PlText("Цвет осветлён, чтобы быть видным на чёрном фоне", PlType.caption, Pl.text3)
+                        PlText(
+                            if (scheme.tone == Tone.Dark) {
+                                "Цвет осветлён, чтобы быть видным на тёмном фоне"
+                            } else {
+                                "Цвет затемнён, чтобы быть видным на светлом фоне"
+                            },
+                            PlType.caption,
+                            Pl.text3,
+                        )
                 }
             }
         },
         confirmButton = {
-            TextButton(enabled = !invalid, onClick = { onDone(shown) }) {
+            TextButton(enabled = !invalid, onClick = { onDone(raw) }) {
                 PlText("Готово", PlType.secondaryStrong, if (invalid) Pl.textDisabled else Pl.accent)
             }
         },

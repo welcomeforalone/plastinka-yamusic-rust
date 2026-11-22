@@ -280,6 +280,7 @@ private fun copyReport(context: Context, text: String) {
 /** «Сбросить всё»: акцент и настройки возвращаются к значениям по умолчанию. */
 private fun resetAllSettings() {
     AccentState.selectPreset(Accent.Red)
+    ThemeState.reset()
     Prefs.resetAll()
 }
 

@@ -1002,7 +1002,7 @@ impl Library {
         let title = container(theme::line(
             format!("{} — {}", shown.artists_text(), shown.display_title()),
             Style::Caption,
-            theme::TEXT_TERTIARY,
+            theme::text_tertiary(),
         ))
         .height(MENU_TITLE)
         .center_y(MENU_TITLE)
@@ -1048,13 +1048,13 @@ impl Library {
         .style(|_, _| text_input::Style {
             background: Color::TRANSPARENT.into(),
             border: Border {
-                color: theme::OUTLINE,
+                color: theme::outline(),
                 width: 1.0,
                 radius: widgets::ROUND.into(),
             },
-            icon: theme::TEXT_TERTIARY,
-            placeholder: theme::TEXT_TERTIARY,
-            value: theme::TEXT_PRIMARY,
+            icon: theme::text_tertiary(),
+            placeholder: theme::text_tertiary(),
+            value: theme::text_primary(),
             selection: theme::alpha(theme::accent(), 0.35),
         });
         let results: Element<'a, App> = match &replace.results {
@@ -1071,7 +1071,7 @@ impl Library {
             .into(),
         };
         let body = column![
-            theme::line("Заменить звук", Style::Title, theme::TEXT_PRIMARY),
+            theme::line("Заменить звук", Style::Title, theme::text_primary()),
             theme::label(
                 format!(
                     "Вместо «{}» будет играть выбранный трек Яндекса. Замена действует везде, \
@@ -1079,7 +1079,7 @@ impl Library {
                     shown.display_title()
                 ),
                 Style::Secondary,
-                theme::TEXT_SECONDARY,
+                theme::text_secondary(),
             ),
             input,
             container(results).height(Length::Fixed(REPLACE_RESULTS as f32 * 48.0)),
@@ -1105,9 +1105,9 @@ impl Library {
             .width(560)
             .padding(24)
             .style(|_| container::Style {
-                background: Some(theme::SURFACE_2.into()),
+                background: Some(theme::surface_2().into()),
                 border: Border {
-                    color: theme::OUTLINE,
+                    color: theme::outline(),
                     width: 1.0,
                     radius: widgets::RADIUS_XL.into(),
                 },
@@ -1117,7 +1117,7 @@ impl Library {
         let scrim = container(opaque(card))
             .center(Length::Fill)
             .style(|_| container::Style {
-                background: Some(theme::SCRIM.into()),
+                background: Some(theme::scrim().into()),
                 ..container::Style::default()
             });
         opaque(mouse_area(scrim).on_press(Lib(plugin(Msg::CloseReplace))))
@@ -1316,13 +1316,13 @@ impl Library {
             .style(|_, _| text_input::Style {
                 background: Color::TRANSPARENT.into(),
                 border: Border {
-                    color: theme::OUTLINE,
+                    color: theme::outline(),
                     width: 1.0,
                     radius: widgets::ROUND.into(),
                 },
-                icon: theme::TEXT_TERTIARY,
-                placeholder: theme::TEXT_TERTIARY,
-                value: theme::TEXT_PRIMARY,
+                icon: theme::text_tertiary(),
+                placeholder: theme::text_tertiary(),
+                value: theme::text_primary(),
                 selection: theme::alpha(theme::accent(), 0.35),
             });
         let example = self
@@ -1390,9 +1390,9 @@ fn ago(at: u64) -> String {
 
 fn popover() -> container::Style {
     container::Style {
-        background: Some(theme::SURFACE_2.into()),
+        background: Some(theme::surface_2().into()),
         border: Border {
-            color: theme::OUTLINE,
+            color: theme::outline(),
             width: 1.0,
             radius: widgets::RADIUS_M.into(),
         },
@@ -1403,8 +1403,8 @@ fn popover() -> container::Style {
 
 fn menu_item<'a>(name: Icon, caption: String, message: App) -> Element<'a, App> {
     let content = row![
-        icon(name, 16.0, theme::TEXT_SECONDARY),
-        theme::line(caption, Style::Body, theme::TEXT_PRIMARY),
+        icon(name, 16.0, theme::text_secondary()),
+        theme::line(caption, Style::Body, theme::text_primary()),
     ]
     .spacing(12)
     .align_y(Alignment::Center);
@@ -1415,7 +1415,7 @@ fn menu_item<'a>(name: Icon, caption: String, message: App) -> Element<'a, App> 
         .padding([0, 12])
         .style(|_, status| button::Style {
             background: match status {
-                button::Status::Pressed => Some(theme::SURFACE_4.into()),
+                button::Status::Pressed => Some(theme::surface_4().into()),
                 _ => None,
             },
             border: Border::default().rounded(widgets::RADIUS_S),
@@ -1424,36 +1424,44 @@ fn menu_item<'a>(name: Icon, caption: String, message: App) -> Element<'a, App> 
         .on_press(message);
     anim::hover_fill(
         item,
-        theme::clear(theme::SURFACE_3),
-        theme::SURFACE_3,
+        theme::clear(theme::surface_3()),
+        theme::surface_3(),
         widgets::RADIUS_S,
     )
     .into()
 }
 
 fn note<'a>(text: &'a str) -> Element<'a, App> {
-    container(theme::label(text, Style::Secondary, theme::TEXT_SECONDARY))
-        .padding([12, 4])
-        .into()
+    container(theme::label(
+        text,
+        Style::Secondary,
+        theme::text_secondary(),
+    ))
+    .padding([12, 4])
+    .into()
 }
 
 fn note_owned<'a>(text: String) -> Element<'a, App> {
-    container(theme::label(text, Style::Secondary, theme::TEXT_SECONDARY))
-        .padding([12, 4])
-        .into()
+    container(theme::label(
+        text,
+        Style::Secondary,
+        theme::text_secondary(),
+    ))
+    .padding([12, 4])
+    .into()
 }
 
 /// Строка результата в диалоге замены. Сам трек и недоступные не выбрать.
 fn replace_row<'a>(track: &'a Track, original: &str) -> Element<'a, App> {
     let usable = track.available && track.id != original;
     let color = if usable {
-        theme::TEXT_PRIMARY
+        theme::text_primary()
     } else {
-        theme::TEXT_DISABLED
+        theme::text_disabled()
     };
     let mut title = row![].spacing(6).align_y(Alignment::Center);
     if track.warning == api::Warning::Explicit {
-        title = title.push(tag("E", theme::TEXT_SECONDARY));
+        title = title.push(tag("E", theme::text_secondary()));
     }
     let title = title.push(theme::line(track.display_title(), Style::Body, color));
     let content = row![
@@ -1462,7 +1470,7 @@ fn replace_row<'a>(track: &'a Track, original: &str) -> Element<'a, App> {
             theme::line(
                 track.artists_text(),
                 Style::Secondary,
-                theme::TEXT_SECONDARY
+                theme::text_secondary()
             ),
         ]
         .spacing(2)
@@ -1470,7 +1478,7 @@ fn replace_row<'a>(track: &'a Track, original: &str) -> Element<'a, App> {
         theme::line(
             track.duration_text(),
             Style::Secondary,
-            theme::TEXT_TERTIARY
+            theme::text_tertiary()
         ),
     ]
     .spacing(12)
@@ -1481,7 +1489,7 @@ fn replace_row<'a>(track: &'a Track, original: &str) -> Element<'a, App> {
         .padding([0, 12])
         .style(|_, status| button::Style {
             background: match status {
-                button::Status::Pressed => Some(theme::SURFACE_4.into()),
+                button::Status::Pressed => Some(theme::surface_4().into()),
                 _ => None,
             },
             border: Border::default().rounded(widgets::RADIUS_M),
@@ -1491,8 +1499,8 @@ fn replace_row<'a>(track: &'a Track, original: &str) -> Element<'a, App> {
     if usable {
         anim::hover_fill(
             item,
-            theme::clear(theme::SURFACE_3),
-            theme::SURFACE_3,
+            theme::clear(theme::surface_3()),
+            theme::surface_3(),
             widgets::RADIUS_M,
         )
         .into()

@@ -63,6 +63,8 @@ object Prefs {
     private const val FILE = "plastinka"
 
     private const val KEY_ACCENT = "accent"
+    private const val KEY_THEME = "theme"
+    private const val KEY_THEME_MODE = "theme_mode"
     private const val KEY_VISUALIZER = "visualizer"
     private const val KEY_VIBE = "vibe_colorizer"
     private const val KEY_BLUR = "blur_cover"
@@ -271,6 +273,28 @@ object Prefs {
         store?.edit()?.putString(KEY_ACCENT, key)?.apply()
     }
 
+    /** Ключ семейства темы (`classic`, `midnight`…) или `null`. */
+    fun themeKey(): String? = try {
+        store?.getString(KEY_THEME, null)
+    } catch (_: Exception) {
+        null
+    }
+
+    fun saveThemeKey(key: String) {
+        store?.edit()?.putString(KEY_THEME, key)?.apply()
+    }
+
+    /** Режим тона (`dark`, `light`, `system`) или `null`. */
+    fun themeModeKey(): String? = try {
+        store?.getString(KEY_THEME_MODE, null)
+    } catch (_: Exception) {
+        null
+    }
+
+    fun saveThemeModeKey(key: String) {
+        store?.edit()?.putString(KEY_THEME_MODE, key)?.apply()
+    }
+
     fun changeVisualizer(on: Boolean) {
         visualizer = on
         SpectrumHub.enabled = on
@@ -344,7 +368,7 @@ object Prefs {
     }
 
     /**
-     * «Сбросить всё»: звук, оформление (акцент возвращает `AccentState`, см. экран настроек), текст
+     * «Сбросить всё»: звук, оформление (акцент и тему возвращают `AccentState` и `ThemeState`, см. экран настроек), текст
      * песни, эквалайзер и плагины возвращаются к значениям по умолчанию. Остаются
      * свои пресеты эквалайзера и настройки «Моей волны» (как на десктопе). Согласие на
      * «Не нравится» Slopless сбрасывается вместе с плагином. Каждое значение меняется

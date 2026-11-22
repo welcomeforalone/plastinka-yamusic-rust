@@ -59,7 +59,7 @@ impl Library {
             .style(move |_| container::Style {
                 background: Some(background.into()),
                 border: Border {
-                    color: theme::BORDER,
+                    color: theme::border(),
                     width: 1.0,
                     radius: 0.0.into(),
                 },
@@ -100,7 +100,7 @@ impl Library {
         .on_enter(Lib(Message::SeekHover(true)))
         .on_exit(Lib(Message::SeekHover(false)));
         let mut line = row![
-            theme::line(clock(position), Style::Caption, theme::TEXT_TERTIARY)
+            theme::line(clock(position), Style::Caption, theme::text_tertiary())
                 .width(TIME_WIDTH)
                 .align_x(Alignment::End),
             container(slider).width(Length::Fill),
@@ -109,7 +109,7 @@ impl Library {
         .align_y(Alignment::Center);
         if with_total {
             line = line.push(
-                theme::line(total_text, Style::Caption, theme::TEXT_TERTIARY).width(TIME_WIDTH),
+                theme::line(total_text, Style::Caption, theme::text_tertiary()).width(TIME_WIDTH),
             );
         }
         line.into()
@@ -132,7 +132,7 @@ impl Library {
             .style(|_, status| button::Style {
                 background: match status {
                     button::Status::Pressed => Some(theme::accent_pressed().into()),
-                    button::Status::Disabled => Some(theme::SURFACE_3.into()),
+                    button::Status::Disabled => Some(theme::surface_3().into()),
                     _ => None,
                 },
                 border: Border::default().rounded(widgets::ROUND),
@@ -217,7 +217,7 @@ impl Library {
         let on = |message: Message| has_track.then_some(Lib(message));
         let cover: Element<'a, App> = match self.current_shown() {
             Some(track) => self.mini_art(covers, track, TALL_COVER, 16.0, now),
-            None => container(center(icon(Icon::Empty, 40.0, theme::TEXT_SECONDARY)))
+            None => container(center(icon(Icon::Empty, 40.0, theme::text_secondary())))
                 .width(TALL_COVER)
                 .height(TALL_COVER)
                 .style(|_| super::surface_2(16.0))
@@ -274,9 +274,9 @@ impl Library {
             top,
             container(cover).center_x(Length::Fill).padding([8.0, 0.0]),
             column![
-                container(marquee(title, Style::Headline, theme::TEXT_PRIMARY).centered())
+                container(marquee(title, Style::Headline, theme::text_primary()).centered())
                     .padding([0.0, TEXT_SIDE]),
-                container(marquee(artist, Style::Secondary, theme::TEXT_SECONDARY).centered())
+                container(marquee(artist, Style::Secondary, theme::text_secondary()).centered())
                     .padding([0.0, TEXT_SIDE]),
             ]
             .spacing(2),
@@ -298,7 +298,7 @@ impl Library {
         let on = |message: Message| has_track.then_some(Lib(message));
         let cover: Element<'a, App> = match self.current_shown() {
             Some(track) => self.mini_art(covers, track, COMPACT_COVER, 12.0, now),
-            None => container(center(icon(Icon::Empty, 28.0, theme::TEXT_SECONDARY)))
+            None => container(center(icon(Icon::Empty, 28.0, theme::text_secondary())))
                 .width(COMPACT_COVER)
                 .height(COMPACT_COVER)
                 .style(|_| super::surface_2(12.0))
@@ -313,8 +313,8 @@ impl Library {
         );
         let head = row![
             column![
-                marquee(title, Style::Headline, theme::TEXT_PRIMARY),
-                marquee(artist, Style::Secondary, theme::TEXT_SECONDARY),
+                marquee(title, Style::Headline, theme::text_primary()),
+                marquee(artist, Style::Secondary, theme::text_secondary()),
             ]
             .spacing(2)
             .width(Length::Fill),
@@ -327,7 +327,7 @@ impl Library {
             widgets::icon_button(Icon::PreviousFilled, Size::M, false, on(Message::Previous)),
             self.mini_play(40.0),
             widgets::icon_button(Icon::NextFilled, Size::M, false, on(Message::Next)),
-            container(theme::line(time, Style::Caption, theme::TEXT_TERTIARY))
+            container(theme::line(time, Style::Caption, theme::text_tertiary()))
                 .width(Length::Fill)
                 .align_x(Alignment::End),
         ]

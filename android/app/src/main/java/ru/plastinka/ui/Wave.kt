@@ -130,15 +130,17 @@ private fun WaveIdle(model: AppViewModel, player: PlayerController?, onOpenSetti
                 label = "wavePulsePhase",
             )
             Box(Modifier.fillMaxWidth().height(272.dp), contentAlignment = Alignment.Center) {
+                val outerRing = Pl.text.copy(alpha = 0.06f)
+                val innerRing = Pl.text.copy(alpha = 0.10f)
                 Canvas(Modifier.size(272.dp)) {
                     val stroke = Stroke(1.dp.toPx())
                     drawCircle(
-                        Color.White.copy(alpha = 0.06f),
+                        outerRing,
                         radius = 136.dp.toPx() * waveRingScale(pulse.value, 0.5f),
                         style = stroke,
                     )
                     drawCircle(
-                        Color.White.copy(alpha = 0.10f),
+                        innerRing,
                         radius = 104.dp.toPx() * waveRingScale(pulse.value, 0.25f),
                         style = stroke,
                     )
@@ -163,7 +165,7 @@ private fun WaveIdle(model: AppViewModel, player: PlayerController?, onOpenSetti
                             CircleShape,
                             clip = false,
                             ambientColor = Color.Transparent,
-                            spotColor = Pl.accent.copy(alpha = 0.6f),
+                            spotColor = Pl.accent.copy(alpha = Pl.shadowAlpha(0.6f)),
                         )
                         .clip(CircleShape)
                         .background(startColor, CircleShape)
@@ -274,7 +276,7 @@ private fun WavePlaying(
                                 RoundedCornerShape(26.dp),
                                 clip = false,
                                 ambientColor = Color.Transparent,
-                                spotColor = tint.copy(alpha = 0.5f),
+                                spotColor = tint.copy(alpha = Pl.shadowAlpha(0.5f)),
                             )
                             .border(2.dp, tint.copy(alpha = 0.7f), RoundedCornerShape(26.dp))
                             .padding(2.dp)

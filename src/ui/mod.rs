@@ -7,6 +7,7 @@
 mod anim;
 mod corners;
 mod covers;
+mod dark;
 mod drag_pulse;
 mod filter;
 mod gate;
@@ -254,6 +255,9 @@ enum Screen {
 pub struct Prefs {
     pub sidebar_collapsed: bool,
     pub accent: theme::Accent,
+    /// Цветовое семейство и режим тона (тёмная, светлая, как в системе).
+    pub theme: theme::Family,
+    pub theme_mode: theme::ThemeMode,
     /// Масштаб окна, проценты.
     pub scale: u32,
     pub visualizer: bool,
@@ -274,6 +278,8 @@ impl Default for Prefs {
         Self {
             sidebar_collapsed: false,
             accent: theme::Accent::default(),
+            theme: theme::Family::default(),
+            theme_mode: theme::ThemeMode::default(),
             scale: config::SCALE_DEFAULT,
             visualizer: true,
             quality: AudioQuality::default(),
@@ -293,6 +299,16 @@ impl Prefs {
                 .accent
                 .as_deref()
                 .and_then(theme::Accent::from_key)
+                .unwrap_or_default(),
+            theme: config
+                .theme
+                .as_deref()
+                .and_then(theme::Family::from_key)
+                .unwrap_or_default(),
+            theme_mode: config
+                .theme_mode
+                .as_deref()
+                .and_then(theme::ThemeMode::from_key)
                 .unwrap_or_default(),
             scale: config.scale_percent(),
             visualizer: config.visualizer.unwrap_or(true),
@@ -334,6 +350,8 @@ impl Prefs {
     fn write(self, config: &mut Config) {
         config.sidebar_collapsed = self.sidebar_collapsed;
         config.accent = Some(self.accent.key().into_owned());
+        config.theme = Some(self.theme.key().to_owned());
+        config.theme_mode = Some(self.theme_mode.key().to_owned());
         config.scale = Some(i64::from(self.scale));
         config.visualizer = Some(self.visualizer);
         config.audio_quality = Some(self.quality.key().to_owned());
@@ -438,6 +456,11 @@ pub enum Message {
     ),
     ToggleSidebar,
     SetAccent(theme::Accent),
+    /// Цветовое семейство и режим тона из «Настройки → Оформление».
+    SetTheme(theme::Family),
+    SetThemeMode(theme::ThemeMode),
+    /// Тон системной темы: при запуске и когда пользователь его меняет.
+    SystemTone(iced::theme::Mode),
     /// Палитра своего акцента.
     Palette(palette::Msg),
     /// Экран настроек: раздел, поиск, сброс.
@@ -539,8 +562,10 @@ pub struct App {
     eq: EqState,
     /// Выбор в меню «Моей волны» (`[wave_settings]`, в аккаунт не пишется).
     wave_settings: api::WaveSettings,
-    /// Тема iced с текущим акцентом.
+    /// Тема iced с текущими цветами и акцентом.
     theme: iced::Theme,
+    /// Тон системной темы (в `config.toml` не пишется).
+    system_tone: theme::Tone,
     /// Настройки сейчас пишутся; `save_again` — за это время они изменились.
     saving: bool,
     save_again: bool,
@@ -593,6 +618,7 @@ impl App {
             eq: EqState::default(),
             wave_settings: api::WaveSettings::default(),
             theme: theme::theme(),
+            system_tone: theme::Tone::default(),
             palette: palette::State::default(),
             settings: settings::State::default(),
             saving: false,
@@ -604,6 +630,7 @@ impl App {
         let task = Task::batch([
             open_main.map(|id| Message::WindowOpened(Some(id))),
             Task::perform(load_token(), Message::TokenLoaded),
+            iced::system::theme().map(Message::SystemTone),
             // Не прочитались настройки — всё по умолчанию.
             Task::perform(load_config(), |config| {
                 let config = config.unwrap_or_default();
@@ -1163,6 +1190,24 @@ impl App {
                 self.palette.sync(accent);
                 return self.change_prefs(prefs);
             }
+            Message::SetTheme(family) => {
+                let prefs = Prefs {
+                    theme: family,
+                    ..self.prefs
+                };
+                return self.change_prefs(prefs);
+            }
+            Message::SetThemeMode(mode) => {
+                let prefs = Prefs {
+                    theme_mode: mode,
+                    ..self.prefs
+                };
+                return self.change_prefs(prefs);
+            }
+            Message::SystemTone(mode) => {
+                self.system_tone = theme::Tone::from_system(mode);
+                self.sync_scheme();
+            }
             Message::Palette(message) => return self.palette_message(message),
             Message::Settings(message) => return self.settings_message(message),
             Message::OpenEqualizer => {
@@ -1321,15 +1366,24 @@ impl App {
 
     fn apply_prefs(&mut self, prefs: Prefs) {
         self.sidebar.go_mut(prefs.sidebar_collapsed, Instant::now());
-        if prefs.accent != self.prefs.accent {
-            theme::set_accent(prefs.accent);
-            self.theme = theme::theme();
-        }
+        theme::set_accent(prefs.accent);
         if let Screen::Main(library) = &mut self.screen {
             library.set_sound(prefs.quality, prefs.normalize);
             library.set_lyrics_lrclib(prefs.lyrics_lrclib);
         }
         self.prefs = prefs;
+        self.sync_scheme();
+    }
+
+    /// Итоговый тон: выбранный в настройках или тон системы.
+    fn tone(&self) -> theme::Tone {
+        self.prefs.theme_mode.tone(self.system_tone)
+    }
+
+    /// Применяет семейство и тон: общая схема цветов и тема iced.
+    fn sync_scheme(&mut self) {
+        theme::set_scheme(self.prefs.theme, self.tone());
+        self.theme = theme::theme();
     }
 
     /// Экран настроек. «Сбросить всё» возвращает значения по умолчанию и
@@ -1968,6 +2022,7 @@ impl App {
                 _ => None,
             }),
             window::close_requests().map(Message::CloseRequested),
+            iced::system::theme_changes().map(Message::SystemTone),
             iced::event::listen_with(|event, _, id| match event {
                 iced::Event::Window(window::Event::Rescaled(dpi)) => {
                     Some(Message::DpiChanged(id, dpi))
@@ -2086,13 +2141,16 @@ impl App {
             .mini_cover()
             .and_then(|uri| self.covers.big(Some(uri), self.now))
             .and_then(|(big, _)| big.average);
-        let view = library.mini_view(
-            &self.covers,
-            self.mini_prefs.compact,
-            self.mini_pinned,
-            average,
-            self.now,
-        );
+        // Фон мини-плеера всегда тёмный: тёмный тон при любой теме окна.
+        let view = theme::dark_scope(|| {
+            dark::scope(library.mini_view(
+                &self.covers,
+                self.mini_prefs.compact,
+                self.mini_pinned,
+                average,
+                self.now,
+            ))
+        });
         // Мини-плеер не разворачивается, масштаба у него нет.
         let radius = corners::radius(corners::ENABLED, false, false, 1.0);
         match corners::eraser(radius) {
@@ -2111,20 +2169,26 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| container::Style {
-                background: Some(theme::BG.into()),
+                background: Some(theme::bg().into()),
                 ..container::Style::default()
             });
         let mut layers = stack![window].width(Length::Fill).height(Length::Fill);
         if let Screen::Main(library) = &self.screen {
-            let sheet = library.fullscreen(
-                &self.covers,
-                &self.prefs,
-                self.now,
-                self.compact(),
-                self.size,
-                self.turn(),
-                gate::title_bar(false),
-            );
+            // Фон полноэкранного плеера — затемнённая обложка: тёмный тон при
+            // любой теме окна.
+            let sheet = theme::dark_scope(|| {
+                library
+                    .fullscreen(
+                        &self.covers,
+                        &self.prefs,
+                        self.now,
+                        self.compact(),
+                        self.size,
+                        self.turn(),
+                        gate::title_bar(false),
+                    )
+                    .map(dark::scope)
+            });
             if let Some(sheet) = sheet {
                 layers = layers.push(sheet);
             }
@@ -2215,7 +2279,7 @@ pub fn appear<'a>(content: Element<'a, Message>, shown: f32) -> Element<'a, Mess
     let hidden = 1.0 - shown;
     anim::motion(content)
         .offset(0.0, 12.0 * hidden)
-        .veil(theme::alpha(theme::BG, hidden), 0.0)
+        .veil(theme::alpha(theme::bg(), hidden), 0.0)
         .into()
 }
 

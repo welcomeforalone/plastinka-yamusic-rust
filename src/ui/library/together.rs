@@ -1084,7 +1084,7 @@ impl Library {
             container(theme::line(
                 "Слушать вместе",
                 Style::Title,
-                theme::TEXT_PRIMARY
+                theme::text_primary()
             ))
             .width(Length::Fill),
             widgets::icon_button(
@@ -1096,7 +1096,7 @@ impl Library {
         ]
         .align_y(Alignment::Center);
         let content = anim::motion(column![header, self.together_body()].spacing(12))
-            .reveal(theme::SURFACE_2, frame.content);
+            .reveal(theme::surface_2(), frame.content);
         let card = container(content)
             .width(Length::Fill)
             .max_width(PANEL_WIDTH)
@@ -1126,7 +1126,7 @@ impl Library {
     fn together_body(&self) -> Element<'_, App> {
         let together = &self.together;
         let note = |text: String| -> Element<'_, App> {
-            theme::label(text, Style::Secondary, theme::TEXT_SECONDARY).into()
+            theme::label(text, Style::Secondary, theme::text_secondary()).into()
         };
         if !together.enabled {
             return column![
@@ -1151,7 +1151,7 @@ impl Library {
                 .push(theme::label(
                     format!("Вместе с {}", link.peer.name),
                     Style::BodyStrong,
-                    theme::TEXT_PRIMARY,
+                    theme::text_primary(),
                 ))
                 .push(note(format!(
                     "{}. {}",
@@ -1183,10 +1183,10 @@ impl Library {
             body = body.push(self.together_devices());
         }
         if let Some(text) = &together.last_failure {
-            body = body.push(theme::label(text.clone(), Style::Secondary, theme::ERROR));
+            body = body.push(theme::label(text.clone(), Style::Secondary, theme::error()));
         }
         if let Some(text) = &together.problem {
-            body = body.push(theme::label(text.clone(), Style::Secondary, theme::ERROR));
+            body = body.push(theme::label(text.clone(), Style::Secondary, theme::error()));
         }
         body = body.push(widgets::action(
             Kind::Secondary,
@@ -1204,7 +1204,7 @@ impl Library {
             return theme::label(
                 "Ищем устройства в сети…".to_owned(),
                 Style::Secondary,
-                theme::TEXT_TERTIARY,
+                theme::text_tertiary(),
             )
             .into();
         }
@@ -1216,11 +1216,15 @@ impl Library {
                 ""
             };
             let info = column![
-                theme::line(device.name.clone(), Style::BodyStrong, theme::TEXT_PRIMARY),
+                theme::line(
+                    device.name.clone(),
+                    Style::BodyStrong,
+                    theme::text_primary()
+                ),
                 theme::line(
                     format!("{}{paired}", os_title(&device.os)),
                     Style::Secondary,
-                    theme::TEXT_TERTIARY
+                    theme::text_tertiary()
                 ),
             ]
             .spacing(2)
@@ -1278,18 +1282,18 @@ impl Library {
         let code = container(theme::line(
             pairing.code.clone(),
             Style::Display,
-            theme::TEXT_PRIMARY,
+            theme::text_primary(),
         ))
         .center_x(Length::Fill)
         .padding([16, 0])
         .style(|_| container::Style {
-            background: Some(theme::SURFACE_3.into()),
+            background: Some(theme::surface_3().into()),
             border: iced::Border::default().rounded(widgets::RADIUS_M),
             ..container::Style::default()
         });
         let body = column![
-            theme::line("Сопряжение", Style::Title, theme::TEXT_PRIMARY),
-            theme::label(text, Style::Body, theme::TEXT_SECONDARY),
+            theme::line("Сопряжение", Style::Title, theme::text_primary()),
+            theme::label(text, Style::Body, theme::text_secondary()),
             code,
             actions,
         ]
@@ -1301,9 +1305,9 @@ impl Library {
             .width(460)
             .padding(24)
             .style(|_| container::Style {
-                background: Some(theme::SURFACE_2.into()),
+                background: Some(theme::surface_2().into()),
                 border: iced::Border {
-                    color: theme::OUTLINE,
+                    color: theme::outline(),
                     width: 1.0,
                     radius: widgets::RADIUS_XL.into(),
                 },
@@ -1313,7 +1317,7 @@ impl Library {
         let scrim = container(iced::widget::opaque(card))
             .center(Length::Fill)
             .style(|_| container::Style {
-                background: Some(theme::SCRIM.into()),
+                background: Some(theme::scrim().into()),
                 ..container::Style::default()
             });
         Some(iced::widget::opaque(mouse_area(scrim)))
@@ -1400,8 +1404,8 @@ impl Library {
             paired = paired.push(
                 row![
                     column![
-                        theme::line(device.name.clone(), Style::Body, theme::TEXT_PRIMARY),
-                        theme::line(os_title(&device.os), Style::Caption, theme::TEXT_TERTIARY),
+                        theme::line(device.name.clone(), Style::Body, theme::text_primary()),
+                        theme::line(os_title(&device.os), Style::Caption, theme::text_tertiary()),
                     ]
                     .width(Length::Fill),
                     widgets::action(
@@ -1422,9 +1426,9 @@ impl Library {
                 theme::line(
                     "Сопряжённые устройства",
                     Style::BodyStrong,
-                    theme::TEXT_PRIMARY
+                    theme::text_primary()
                 ),
-                theme::label(paired_hint, Style::Secondary, theme::TEXT_TERTIARY),
+                theme::label(paired_hint, Style::Secondary, theme::text_tertiary()),
                 paired,
             ]
             .spacing(6)
@@ -1450,10 +1454,10 @@ impl Library {
                 theme::line(
                     "Адреса этого устройства",
                     Style::BodyStrong,
-                    theme::TEXT_PRIMARY
+                    theme::text_primary()
                 ),
-                theme::label(address_hint, Style::Secondary, theme::TEXT_TERTIARY),
-                theme::label(addresses, Style::Body, theme::TEXT_PRIMARY),
+                theme::label(address_hint, Style::Secondary, theme::text_tertiary()),
+                theme::label(addresses, Style::Body, theme::text_primary()),
             ]
             .spacing(6)
             .padding([16, 0])
@@ -1463,7 +1467,7 @@ impl Library {
             theme::line(
                 "Подключить по адресу",
                 Style::BodyStrong,
-                theme::TEXT_PRIMARY
+                theme::text_primary()
             ),
             row![
                 text_field(
@@ -1493,7 +1497,11 @@ impl Library {
         .spacing(6)
         .padding([16, 0]);
         if let Some(error) = &together.address_error {
-            connect = connect.push(theme::label(error.clone(), Style::Secondary, theme::ERROR));
+            connect = connect.push(theme::label(
+                error.clone(),
+                Style::Secondary,
+                theme::error(),
+            ));
         }
         entries.push(Entry::new(
             "Подключить по адресу",
@@ -1513,7 +1521,7 @@ impl Library {
             container(theme::label(
                 firewall,
                 Style::Secondary,
-                theme::TEXT_TERTIARY,
+                theme::text_tertiary(),
             ))
             .padding([16, 0])
             .into(),

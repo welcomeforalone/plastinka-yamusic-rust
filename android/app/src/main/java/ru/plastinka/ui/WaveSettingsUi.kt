@@ -96,14 +96,14 @@ internal fun WaveSettingsButton(
             onClick = { open = true },
             modifier = if (onClose != null) Modifier.weight(1f, fill = false) else Modifier,
             trailingIcon = R.drawable.ic_chevron_down,
-            fill = if (filled) Color.White.copy(alpha = 0.10f) else null,
+            fill = if (filled) Pl.text.copy(alpha = 0.10f) else null,
         )
         if (onClose != null) {
             Box(
                 Modifier
                     .size(36.dp)
                     .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.10f), CircleShape)
+                    .background(Pl.text.copy(alpha = 0.10f), CircleShape)
                     .clickable(onClick = onClose),
                 contentAlignment = Alignment.Center,
             ) {

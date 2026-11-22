@@ -1069,7 +1069,7 @@ impl Library {
                 Phase::Starting => center(
                     column![
                         spinner(40.0, self.wave_color(now), turn),
-                        theme::line("Загружаем волну…", Style::Body, theme::TEXT_SECONDARY),
+                        theme::line("Загружаем волну…", Style::Body, theme::text_secondary()),
                     ]
                     .spacing(14)
                     .align_x(Alignment::Center),
@@ -1088,11 +1088,18 @@ impl Library {
             }
         };
         let tint = self.wave_color(now);
+        // Фон волны — цвет окна с цветным градиентом сверху. На светлом фоне
+        // градиент слабее: тёмный оттенок иначе серит верх экрана и тексты
+        // теряют контраст.
+        let tint_alpha = match theme::current_tone() {
+            theme::Tone::Dark => 0.35,
+            theme::Tone::Light => 0.2,
+        };
         let mut layers = stack![
             fill(move || container::Style {
                 background: Some(Background::Gradient(
                     Linear::new(Degrees(180.0))
-                        .add_stop(0.0, theme::alpha(tint, 0.35))
+                        .add_stop(0.0, theme::alpha(tint, tint_alpha))
                         .add_stop(1.0, theme::clear(tint))
                         .into(),
                 )),
@@ -1171,11 +1178,11 @@ impl Library {
         center(
             column![
                 rings,
-                theme::line("Моя волна", Style::Display, theme::TEXT_PRIMARY),
+                theme::line("Моя волна", Style::Display, theme::text_primary()),
                 theme::label(
                     "Бесконечный поток музыки под ваш вкус. «Нравится» и «Не нравится» настраивают его на ходу.",
                     Style::Body,
-                    theme::TEXT_SECONDARY,
+                    theme::text_secondary(),
                 )
                 .center()
                 .width(420),
@@ -1246,12 +1253,12 @@ impl Library {
         };
         // Щелчок по обложке открывает полноэкранный плеер; при наведении
         // проступает значок «развернуть», как в плеере снизу.
-        let glyph: Element<'a, App> = icon(Icon::Expand, 24.0, theme::TEXT_PRIMARY).into();
+        let glyph: Element<'a, App> = icon(Icon::Expand, 24.0, theme::text_primary()).into();
         let badge = container(center(glyph))
             .width(COVER)
             .height(COVER)
             .style(|_| container::Style {
-                background: Some(theme::alpha(theme::BG, 0.5).into()),
+                background: Some(theme::alpha(theme::bg(), 0.5).into()),
                 border: Border::default().rounded(16.0),
                 ..container::Style::default()
             });
@@ -1281,7 +1288,7 @@ impl Library {
 
         let mut tags = row![].spacing(6).align_y(Alignment::Center);
         if self.ai_track(original) {
-            tags = tags.push(plugins::tag("ИИ", theme::ERROR));
+            tags = tags.push(plugins::tag("ИИ", theme::error()));
         }
         if self.replaced(original) {
             tags = tags.push(plugins::tag("Замена", theme::accent()));
@@ -1290,7 +1297,7 @@ impl Library {
             container(browse::artist_links(
                 &track.artists,
                 Style::Headline,
-                theme::TEXT_SECONDARY,
+                theme::text_secondary(),
             ))
             .width(TEXT_WIDTH)
             .align_x(Alignment::Center)
@@ -1298,7 +1305,12 @@ impl Library {
             .into()
         } else {
             container(
-                marquee(track.artists_text(), Style::Headline, theme::TEXT_SECONDARY).centered(),
+                marquee(
+                    track.artists_text(),
+                    Style::Headline,
+                    theme::text_secondary(),
+                )
+                .centered(),
             )
             .width(TEXT_WIDTH)
             .into()
@@ -1413,7 +1425,7 @@ impl Library {
                 None if self.wave.blocked => "Далее: пока неизвестно".to_owned(),
                 None => "Далее: загружаем…".to_owned(),
             };
-            container(theme::line(text, Style::Secondary, theme::TEXT_TERTIARY))
+            container(theme::line(text, Style::Secondary, theme::text_tertiary()))
                 .width(TEXT_WIDTH)
                 .align_x(Alignment::Center)
                 .clip(true)
@@ -1425,7 +1437,7 @@ impl Library {
         };
         // Длинное название прокручивается, как в плеере снизу.
         let title = container(
-            marquee(track.display_title(), Style::Display, theme::TEXT_PRIMARY).centered(),
+            marquee(track.display_title(), Style::Display, theme::text_primary()).centered(),
         )
         .width(TEXT_WIDTH);
         // Над названием: «Моя волна» или (чужая очередь) таблетка источника
@@ -1485,15 +1497,15 @@ fn source_pill<'a>(label: String, on_press: Option<App>) -> Element<'a, App> {
     // Одно целое: подпись и шеврон в одном ряду, равные отступы по краям,
     // у шеврона ни подложки, ни своей кнопки.
     let content = row![
-        container(theme::line(label, Style::BodyStrong, theme::TEXT_PRIMARY))
+        container(theme::line(label, Style::BodyStrong, theme::text_primary()))
             .max_width(360)
             .clip(true),
-        icon(Icon::ChevronDown, 16.0, theme::TEXT_SECONDARY),
+        icon(Icon::ChevronDown, 16.0, theme::text_secondary()),
     ]
     .spacing(6)
     .align_y(Alignment::Center);
     let style = |fill: f32| button::Style {
-        background: Some(theme::alpha(theme::TEXT_PRIMARY, fill).into()),
+        background: Some(theme::alpha(theme::text_primary(), fill).into()),
         border: Border::default().rounded(widgets::ROUND),
         ..button::Style::default()
     };
@@ -1511,7 +1523,7 @@ fn source_pill<'a>(label: String, on_press: Option<App>) -> Element<'a, App> {
         None => container(content)
             .padding([6, 14])
             .style(move |_| container::Style {
-                background: Some(theme::alpha(theme::TEXT_PRIMARY, 0.1).into()),
+                background: Some(theme::alpha(theme::text_primary(), 0.1).into()),
                 border: Border::default().rounded(widgets::ROUND),
                 ..container::Style::default()
             })
@@ -1543,7 +1555,7 @@ impl Library {
             container(theme::line(
                 "Настройки волны",
                 Style::Title,
-                theme::TEXT_PRIMARY
+                theme::text_primary()
             ))
             .width(Length::Fill),
             widgets::icon_button(
@@ -1625,7 +1637,7 @@ impl Library {
             container(theme::label(
                 "Смена настроек запускает новую волну",
                 Style::Caption,
-                theme::TEXT_TERTIARY,
+                theme::text_tertiary(),
             ))
             .width(Length::Fill),
             reset,
@@ -1638,7 +1650,7 @@ impl Library {
         // Появление: карточка проступает из прозрачности, опускаясь на
         // несколько пикселей и чуть вырастая, за ней — содержимое.
         let content = anim::motion(column![header, groups, footer].spacing(18))
-            .reveal(theme::SURFACE_2, frame.content);
+            .reveal(theme::surface_2(), frame.content);
         let card = container(content)
             .width(Length::Fill)
             .max_width(WAVE_MENU_WIDTH)
@@ -1684,7 +1696,7 @@ fn menu_height(window: f32, top: f32, bottom: f32) -> f32 {
 /// Группа таблеток с подписью.
 fn group<'a>(title: &'a str, pills: Vec<Element<'a, App>>) -> Element<'a, App> {
     column![
-        theme::line(title, Style::Caption, theme::TEXT_TERTIARY),
+        theme::line(title, Style::Caption, theme::text_tertiary()),
         row(pills).spacing(8).wrap().vertical_spacing(8),
     ]
     .spacing(8)
@@ -1722,7 +1734,7 @@ fn choice_pill<'a>(title: String, selected: bool, message: App) -> Element<'a, A
         if selected {
             theme::on_accent()
         } else {
-            theme::TEXT_SECONDARY
+            theme::text_secondary()
         },
     ))
     .padding([6, 14])
@@ -1730,8 +1742,8 @@ fn choice_pill<'a>(title: String, selected: bool, message: App) -> Element<'a, A
         background: Some(
             match (selected, status) {
                 (true, _) => theme::accent(),
-                (false, button::Status::Hovered | button::Status::Pressed) => theme::SURFACE_4,
-                (false, _) => theme::SURFACE_3,
+                (false, button::Status::Hovered | button::Status::Pressed) => theme::surface_4(),
+                (false, _) => theme::surface_3(),
             }
             .into(),
         ),
@@ -1752,12 +1764,12 @@ fn placeholder_pill<'a>(width: f32) -> Element<'a, App> {
     button(theme::line(
         "\u{a0}",
         Style::CaptionStrong,
-        theme::TEXT_SECONDARY,
+        theme::text_secondary(),
     ))
     .width(width)
     .padding([6, 14])
     .style(|_, _| button::Style {
-        background: Some(theme::SURFACE_3.into()),
+        background: Some(theme::surface_3().into()),
         border: Border::default().rounded(widgets::ROUND),
         ..button::Style::default()
     })
@@ -1774,7 +1786,7 @@ fn mouse_pointer<'a>(content: impl Into<Element<'a, App>>) -> Element<'a, App> {
 /// Ошибка или пустая волна: заголовок, пояснение, «Повторить».
 fn wave_problem<'a>(title: &'a str, text: String, retry: App) -> Element<'a, App> {
     state_block(
-        widgets::badge(Icon::Wave, theme::TEXT_SECONDARY, theme::SURFACE_2),
+        widgets::badge(Icon::Wave, theme::text_secondary(), theme::surface_2()),
         title,
         text,
         widgets::action(Kind::Primary, Some(Icon::Retry), "Повторить", Some(retry)),

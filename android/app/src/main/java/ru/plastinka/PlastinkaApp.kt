@@ -55,6 +55,7 @@ class PlastinkaApp : Application() {
         // Настройки и акцент грузим до первого кадра и до запуска сервиса воспроизведения.
         ru.plastinka.data.Prefs.load(this)
         ru.plastinka.ui.AccentState.load()
+        ru.plastinka.ui.ThemeState.load()
         tokenStore = TokenStore.get(this)
         api = YandexApi(http)
         fckCensor = FckCensor.get(http, cacheDir, filesDir, contentResolver)

@@ -27,10 +27,20 @@ pub struct Config {
     /// Боковое меню свёрнуто до иконок.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub sidebar_collapsed: bool,
-    /// Акцентный цвет окна: `red`, `teal`, `orange`, `violet`, `blue`.
+    /// Акцентный цвет окна: `red`, `orange`, `yellow`, `green`, `teal`, `blue`,
+    /// `violet`, `pink` или `#RRGGBB`.
     /// Неизвестное значение окно заменяет красным.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub accent: Option<String>,
+    /// Цветовое семейство окна: `classic`, `graphite`, `coffee`, `slate`,
+    /// `midnight`, `ocean`, `forest`, `matcha`, `amber`, `dusk`, `sakura`,
+    /// `velvet`. Неизвестное значение окно заменяет «Классикой».
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub theme: Option<String>,
+    /// Тон темы: `dark`, `light` или `system`. Неизвестное значение окно
+    /// заменяет тёмным.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub theme_mode: Option<String>,
     /// Масштаб окна в процентах, см. [`Config::scale_percent`].
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub scale: Option<i64>,
@@ -590,6 +600,36 @@ visualizer = \"yes\"
         assert_eq!(config.scale, None);
         assert_eq!(config.visualizer, None);
         assert_eq!(config.scale_percent(), 100);
+    }
+
+    #[test]
+    fn theme_survives_bad_values() {
+        let config: Config = toml::from_str(
+            "accent = \"teal\"
+theme = \"midnight\"
+theme_mode = \"light\"
+",
+        )
+        .unwrap();
+        assert_eq!(config.theme.as_deref(), Some("midnight"));
+        assert_eq!(config.theme_mode.as_deref(), Some("light"));
+        let config: Config = toml::from_str(
+            "accent = \"teal\"
+theme = 7
+theme_mode = 5
+",
+        )
+        .unwrap();
+        assert_eq!(config.theme, None);
+        assert_eq!(config.theme_mode, None);
+        assert_eq!(config.accent.as_deref(), Some("teal"));
+        // Незнакомая строка читается как есть: заменяет её окно.
+        let config: Config = toml::from_str(
+            "theme = \"abc\"
+",
+        )
+        .unwrap();
+        assert_eq!(config.theme.as_deref(), Some("abc"));
     }
 
     #[test]

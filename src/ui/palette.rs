@@ -273,7 +273,7 @@ pub fn view(state: &State) -> Element<'_, App> {
         .style(move |_| container::Style {
             background: Some(chosen.into()),
             border: Border {
-                color: theme::OUTLINE,
+                color: theme::outline(),
                 width: 1.0,
                 radius: widgets::ROUND.into(),
             },
@@ -286,11 +286,11 @@ pub fn view(state: &State) -> Element<'_, App> {
         .padding([9, 16])
         .style(move |_, status| {
             let border = if invalid {
-                theme::ERROR
+                theme::error()
             } else if matches!(status, text_input::Status::Focused { .. }) {
-                theme::TEXT_SECONDARY
+                theme::text_secondary()
             } else {
-                theme::OUTLINE
+                theme::outline()
             };
             text_input::Style {
                 background: Color::TRANSPARENT.into(),
@@ -299,9 +299,9 @@ pub fn view(state: &State) -> Element<'_, App> {
                     width: 1.0,
                     radius: widgets::ROUND.into(),
                 },
-                icon: theme::TEXT_TERTIARY,
-                placeholder: theme::TEXT_TERTIARY,
-                value: theme::TEXT_PRIMARY,
+                icon: theme::text_tertiary(),
+                placeholder: theme::text_tertiary(),
+                value: theme::text_primary(),
                 selection: theme::alpha(theme::accent(), 0.35),
             }
         });
@@ -310,7 +310,7 @@ pub fn view(state: &State) -> Element<'_, App> {
         bottom = bottom.push(theme::line(
             "Нужен цвет вида #RRGGBB",
             Style::Caption,
-            theme::ERROR,
+            theme::error(),
         ));
     }
 

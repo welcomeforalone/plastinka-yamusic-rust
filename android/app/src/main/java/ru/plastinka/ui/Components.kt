@@ -140,6 +140,8 @@ fun Pill(
  * заливка вместо рамки (чипы на цветном фоне, макет 04); `icon` — значок 16 dp
  * слева (поле слева 12); `trailingIcon` — значок 16 dp справа (подпись при нехватке
  * места обрезается, значок остаётся); `color` — цвет текста и значка невыбранного чипа.
+ * `compact` — мелкая подпись и узкие поля: для ряда равных чипов (переключатель режима темы).
+ * Подпись по центру, если чип шире содержимого.
  */
 @Composable
 fun Chip(
@@ -151,6 +153,7 @@ fun Chip(
     @DrawableRes trailingIcon: Int? = null,
     fill: Color? = null,
     color: Color = Pl.text,
+    compact: Boolean = false,
 ) {
     val shape = CircleShape
     var m = modifier.height(36.dp).clip(shape)
@@ -159,16 +162,20 @@ fun Chip(
         fill != null -> m.background(fill, shape)
         else -> m.border(1.dp, Pl.outline, shape)
     }
-    val content = if (selected) Pl.darkText else color
+    // Выбранный чип залит цветом текста, поэтому значок и подпись — цветом фона.
+    val content = if (selected) Pl.bg else color
     Row(
-        m.clickable(onClick = onClick).padding(start = if (icon != null) 12.dp else 14.dp, end = 14.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        m.clickable(onClick = onClick).padding(
+            start = if (compact) 6.dp else if (icon != null) 12.dp else 14.dp,
+            end = if (compact) 6.dp else 14.dp,
+        ),
+        horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (icon != null) PlIcon(icon, 16.dp, content)
         PlText(
             label,
-            PlType.secondaryStrong,
+            if (compact) PlType.captionStrong else PlType.secondaryStrong,
             content,
             modifier = if (trailingIcon != null) Modifier.weight(1f, fill = false) else Modifier,
             maxLines = 1,
@@ -340,15 +347,20 @@ fun Vinyl(size: Dp, modifier: Modifier = Modifier) {
     }
 }
 
+/** Во сколько раз слабее свечение в светлом тоне: 0,2 / 0,35. */
+private const val LIGHT_GLOW_FACTOR = 0.2f / 0.35f
+
 /** Мягкое свечение: радиальный градиент от акцента к прозрачному (без blur, он только с API 31). */
 @Composable
 fun Glow(size: Dp, modifier: Modifier = Modifier, color: Color = Pl.accent, alpha: Float = 0.5f) {
+    // Светлый тон: свечение слабее (как подложка волны на десктопе, 0,2 против 0,35).
+    val strength = if (Pl.isLight) alpha * LIGHT_GLOW_FACTOR else alpha
     Box(
         modifier
             .size(size)
             .background(
                 Brush.radialGradient(
-                    listOf(color.copy(alpha = alpha), Color.Transparent),
+                    listOf(color.copy(alpha = strength), Color.Transparent),
                 ),
             ),
     )

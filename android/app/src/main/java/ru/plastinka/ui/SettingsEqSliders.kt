@@ -144,6 +144,9 @@ private fun BandSlider(
     var pressed by remember { mutableStateOf(false) }
     val accent = if (dimmed) Pl.textDisabled else Pl.accent
     val handle = if (dimmed) Pl.textDisabled else Pl.text
+    val gridColor = Pl.surface3
+    val zeroColor = Pl.outline
+    val trackColor = Pl.surface4
     val description = "${formatEqFreq(EqSpec.FREQS.getOrElse(index) { 0 })} Гц: ${formatEqDb(gain)}"
     Canvas(
         Modifier
@@ -187,12 +190,12 @@ private fun BandSlider(
         val centerX = size.width / 2f
         val line = 1.dp.toPx()
         // Сетка: +12, 0, −12 дБ; нулевая линия ярче.
-        drawLine(Pl.surface3, Offset(0f, top), Offset(size.width, top), line)
-        drawLine(Pl.surface3, Offset(0f, bottom), Offset(size.width, bottom), line)
-        drawLine(Pl.outline, Offset(0f, mid), Offset(size.width, mid), line)
+        drawLine(gridColor, Offset(0f, top), Offset(size.width, top), line)
+        drawLine(gridColor, Offset(0f, bottom), Offset(size.width, bottom), line)
+        drawLine(zeroColor, Offset(0f, mid), Offset(size.width, mid), line)
         // Дорожка и заполнение от нуля до ручки.
         val track = 4.dp.toPx()
-        drawLine(Pl.surface4, Offset(centerX, top), Offset(centerX, bottom), track, StrokeCap.Round)
+        drawLine(trackColor, Offset(centerX, top), Offset(centerX, bottom), track, StrokeCap.Round)
         val clamped = gain.coerceIn(-EqSpec.GAIN_LIMIT, EqSpec.GAIN_LIMIT)
         val y = mid - clamped / EqSpec.GAIN_LIMIT.toFloat() * (bottom - top) / 2f
         drawLine(accent, Offset(centerX, mid), Offset(centerX, y), track, StrokeCap.Round)
@@ -214,6 +217,8 @@ fun EqPreampSlider(
     var pressed by remember { mutableStateOf(false) }
     val accent = if (dimmed) Pl.textDisabled else Pl.accent
     val handle = if (dimmed) Pl.textDisabled else Pl.text
+    val trackColor = Pl.surface4
+    val midColor = Pl.outline
     Canvas(
         Modifier
             .fillMaxWidth()
@@ -254,8 +259,8 @@ fun EqPreampSlider(
         val mid = (left + right) / 2f
         val centerY = size.height / 2f
         val track = 4.dp.toPx()
-        drawLine(Pl.surface4, Offset(left, centerY), Offset(right, centerY), track, StrokeCap.Round)
-        drawLine(Pl.outline, Offset(mid, centerY - 6.dp.toPx()), Offset(mid, centerY + 6.dp.toPx()), 1.dp.toPx())
+        drawLine(trackColor, Offset(left, centerY), Offset(right, centerY), track, StrokeCap.Round)
+        drawLine(midColor, Offset(mid, centerY - 6.dp.toPx()), Offset(mid, centerY + 6.dp.toPx()), 1.dp.toPx())
         val clamped = tenths.coerceIn(-EqSpec.GAIN_LIMIT, EqSpec.GAIN_LIMIT)
         val x = mid + clamped / EqSpec.GAIN_LIMIT.toFloat() * (right - left) / 2f
         drawLine(accent, Offset(mid, centerY), Offset(x, centerY), track, StrokeCap.Round)

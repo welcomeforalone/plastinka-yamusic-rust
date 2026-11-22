@@ -695,9 +695,9 @@ impl Library {
         };
         // Фон строки проявляется плавно; выбранная строка подсвечена всегда.
         let (idle, hovered) = if selected {
-            (theme::SURFACE_3, theme::SURFACE_3)
+            (theme::surface_3(), theme::surface_3())
         } else {
-            (theme::clear(theme::SURFACE_2), theme::SURFACE_2)
+            (theme::clear(theme::surface_2()), theme::surface_2())
         };
         mouse_area(anim::hover_fill(
             anim::swap(make(false), make(true)),
@@ -718,11 +718,11 @@ impl Library {
     fn tail_row<'a>(&self, error: Option<&'a str>, retry: Message, turn: f32) -> Element<'a, App> {
         let content: Element<'a, App> = match error {
             Some(error) => row![
-                icon(Icon::Error, 18.0, theme::ERROR),
+                icon(Icon::Error, 18.0, theme::error()),
                 theme::line(
                     sentence(&format!("Не удалось догрузить: {error}")),
                     Style::Secondary,
-                    theme::TEXT_SECONDARY
+                    theme::text_secondary()
                 ),
                 widgets::action(
                     Kind::Secondary,
@@ -792,11 +792,11 @@ impl Library {
     ) -> Element<'a, App> {
         let key = ListKey::TopTracks(serial);
         let header = column![
-            theme::line("Топ месяца", Style::Display, theme::TEXT_PRIMARY),
+            theme::line("Топ месяца", Style::Display, theme::text_primary()),
             theme::line(
                 "Исполнители и треки, которые вы слушали больше всего за месяц",
                 Style::Body,
-                theme::TEXT_SECONDARY,
+                theme::text_secondary(),
             ),
         ]
         .spacing(4);
@@ -829,7 +829,7 @@ impl Library {
                 container(theme::line(
                     "Послушайте музыку — здесь появится ваш топ за месяц.",
                     Style::Body,
-                    theme::TEXT_SECONDARY,
+                    theme::text_secondary(),
                 ))
                 .height(EMPTY_NOTE),
             );
@@ -861,7 +861,7 @@ impl Library {
             Some(artist_links(
                 self.album_artists(card),
                 Style::BodyStrong,
-                theme::TEXT_PRIMARY,
+                theme::text_primary(),
             )),
             list_stats(&album.tracks),
             list_actions(&key, self.any_playable(&album.tracks)),
@@ -880,7 +880,7 @@ impl Library {
         let byline: Element<'a, App> = theme::line(
             card.owner_name.clone().unwrap_or_default(),
             Style::BodyStrong,
-            theme::TEXT_PRIMARY,
+            theme::text_primary(),
         )
         .into();
         let mut stats = list_stats(&playlist.tracks);
@@ -930,7 +930,7 @@ impl Library {
             return column![
                 container(top).padding([0.0, PAGE_SIDE]),
                 state_block(
-                    widgets::badge(Icon::Empty, theme::TEXT_SECONDARY, theme::SURFACE_2),
+                    widgets::badge(Icon::Empty, theme::text_secondary(), theme::surface_2()),
                     empty,
                     "Здесь появятся треки, когда их добавят.".to_owned(),
                     Space::new().into(),
@@ -1042,11 +1042,11 @@ impl Library {
                 Style::Body,
                 Lib(Message::Open(Target::Artist(id.to_owned())))
             ),
-            theme::line("Все треки", Style::Display, theme::TEXT_PRIMARY),
+            theme::line("Все треки", Style::Display, theme::text_primary()),
             theme::line(
                 format!("{} {}", paged.total, texts::tracks_word(paged.total)),
                 Style::Body,
-                theme::TEXT_SECONDARY
+                theme::text_secondary()
             ),
             Space::new().height(10),
             list_actions(&key, self.any_playable(&paged.items)),
@@ -1278,8 +1278,8 @@ impl Library {
             _ => format!("{count} {}", plural(count, forms)),
         };
         let header = column![
-            theme::line(title, Style::Display, theme::TEXT_PRIMARY),
-            theme::line(subtitle, Style::Body, theme::TEXT_SECONDARY),
+            theme::line(title, Style::Display, theme::text_primary()),
+            theme::line(subtitle, Style::Body, theme::text_secondary()),
         ]
         .spacing(4);
         let head = column![
@@ -1291,7 +1291,7 @@ impl Library {
             return column![
                 container(head).padding([0.0, PAGE_SIDE]),
                 state_block(
-                    widgets::badge(Icon::Heart, theme::TEXT_SECONDARY, theme::SURFACE_2),
+                    widgets::badge(Icon::Heart, theme::text_secondary(), theme::surface_2()),
                     "Здесь пока пусто",
                     empty.to_owned(),
                     widgets::action(
@@ -1324,7 +1324,8 @@ impl Library {
                 _ => "Отмечайте исполнителей сердцем — они появятся здесь.",
             };
             top = top.push(
-                container(theme::line(note, Style::Body, theme::TEXT_SECONDARY)).height(EMPTY_NOTE),
+                container(theme::line(note, Style::Body, theme::text_secondary()))
+                    .height(EMPTY_NOTE),
             );
         }
         self.scroller(self.body(), Some(top.into()), move |index| {
@@ -1445,7 +1446,7 @@ impl Library {
         });
         let body: Element<'a, App> = if search.query.is_empty() {
             state_block(
-                widgets::badge(Icon::Search, theme::TEXT_SECONDARY, theme::SURFACE_2),
+                widgets::badge(Icon::Search, theme::text_secondary(), theme::surface_2()),
                 "Поиск",
                 "Найдите треки, альбомы, исполнителей и плейлисты.".to_owned(),
                 Space::new().into(),
@@ -1467,7 +1468,7 @@ impl Library {
             container(theme::line(
                 format!("Показаны результаты по запросу «{corrected}»"),
                 Style::Secondary,
-                theme::TEXT_SECONDARY,
+                theme::text_secondary(),
             ))
             .height(SEARCH_NOTE)
             .center_y(SEARCH_NOTE)
@@ -1563,7 +1564,7 @@ impl Library {
                 Some(Lib(Message::RetrySearch)),
             )),
             Some(Load::Ready(paged)) if paged.items.is_empty() => Err(state_block(
-                widgets::badge(Icon::Search, theme::TEXT_SECONDARY, theme::SURFACE_2),
+                widgets::badge(Icon::Search, theme::text_secondary(), theme::surface_2()),
                 "Ничего не нашлось",
                 format!(
                     "По запросу «{}» нет: {}.",
@@ -1756,28 +1757,32 @@ fn track_cells<'a>(
 ) -> Element<'a, App> {
     let available = flags.playable;
     let (title_color, other_color) = match (available, flags.current) {
-        (false, _) => (theme::TEXT_DISABLED, theme::TEXT_DISABLED),
-        (true, true) => (theme::accent(), theme::TEXT_SECONDARY),
-        (true, false) => (theme::TEXT_PRIMARY, theme::TEXT_SECONDARY),
+        (false, _) => (theme::text_disabled(), theme::text_disabled()),
+        (true, true) => (theme::accent(), theme::text_secondary()),
+        (true, false) => (theme::text_primary(), theme::text_secondary()),
     };
     let play = Message::PlayFrom(key.clone(), index);
     // Играющий: столбики, при наведении — пауза; на паузе — play акцентом.
     let index_cell: Element<'a, App> =
         match (available, flags.current, flags.playing, flags.hovered) {
-            (true, true, true, true) => {
-                super::play_cell(Icon::PauseFilled, theme::TEXT_PRIMARY, Message::TogglePlay)
-            }
+            (true, true, true, true) => super::play_cell(
+                Icon::PauseFilled,
+                theme::text_primary(),
+                Message::TogglePlay,
+            ),
             (true, true, true, false) => anim::equalizer(theme::accent(), !flags.buffering),
             (true, true, false, _) => {
                 super::play_cell(Icon::PlayFilled, theme::accent(), Message::TogglePlay)
             }
-            (true, false, _, true) => super::play_cell(Icon::PlayFilled, theme::TEXT_PRIMARY, play),
-            _ => theme::line(number.to_string(), Style::Secondary, theme::TEXT_TERTIARY).into(),
+            (true, false, _, true) => {
+                super::play_cell(Icon::PlayFilled, theme::text_primary(), play)
+            }
+            _ => theme::line(number.to_string(), Style::Secondary, theme::text_tertiary()).into(),
         };
     let cover = if available {
         widgets::cover(super::cover_art(covers, flags.art), 40.0, widgets::RADIUS_S)
     } else {
-        widgets::block(40, 40, theme::SURFACE_3, widgets::RADIUS_S)
+        widgets::block(40, 40, theme::surface_3(), widgets::RADIUS_S)
     };
     // Метки плагинов — перед названием: длинное название их не вытеснит.
     let mut name = row![].spacing(6).align_y(Alignment::Center);
@@ -1786,7 +1791,7 @@ fn track_cells<'a>(
     }
     if flags.ai {
         name = name.push(widgets::with_tooltip(
-            super::plugins::tag("ИИ", theme::ERROR),
+            super::plugins::tag("ИИ", theme::error()),
             "ИИ-трек по данным slopless.art",
             tooltip::Position::Top,
         ));
@@ -1833,7 +1838,7 @@ fn track_cells<'a>(
     let duration = theme::line(
         track.duration_text(),
         Style::Secondary,
-        theme::TEXT_TERTIARY,
+        theme::text_tertiary(),
     );
     let cells = super::columns(
         index_cell,
@@ -1865,11 +1870,11 @@ fn detail_header<'a>(
     actions: Element<'a, App>,
 ) -> Element<'a, App> {
     let info = column![
-        theme::line(caption, Style::BodyStrong, theme::TEXT_SECONDARY),
-        theme::line(title, Style::Display, theme::TEXT_PRIMARY),
+        theme::line(caption, Style::BodyStrong, theme::text_secondary()),
+        theme::line(title, Style::Display, theme::text_primary()),
     ]
     .extend(byline)
-    .push(theme::line(stats, Style::Body, theme::TEXT_SECONDARY))
+    .push(theme::line(stats, Style::Body, theme::text_secondary()))
     .push(Space::new().height(10))
     .push(actions)
     .spacing(4)
@@ -1930,7 +1935,7 @@ fn back_row<'a>() -> Element<'a, App> {
 /// Заголовок блока и ссылка справа («Все треки»).
 fn section_title<'a>(title: &'a str, link: Option<(&'a str, App)>) -> Element<'a, App> {
     let mut line = row![
-        theme::line(title, Style::Title, theme::TEXT_PRIMARY),
+        theme::line(title, Style::Title, theme::text_primary()),
         Space::new().width(Length::Fill),
     ]
     .align_y(Alignment::Center);
@@ -1959,15 +1964,15 @@ fn tab_pill<'a>(kind: SearchKind, selected: bool) -> Element<'a, App> {
 /// Вкладка-«таблетка»: выбранная подсвечена.
 fn pill<'a>(label: String, selected: bool, message: App) -> Element<'a, App> {
     let color = if selected {
-        theme::TEXT_PRIMARY
+        theme::text_primary()
     } else {
-        theme::TEXT_SECONDARY
+        theme::text_secondary()
     };
     let pill = button(theme::line(label, Style::BodyStrong, color))
         .padding([8, 16])
         .style(move |_, status| button::Style {
             background: match (selected, status) {
-                (true, _) | (false, button::Status::Pressed) => Some(theme::SURFACE_3.into()),
+                (true, _) | (false, button::Status::Pressed) => Some(theme::surface_3().into()),
                 _ => None,
             },
             border: Border::default().rounded(widgets::ROUND),
@@ -1979,8 +1984,8 @@ fn pill<'a>(label: String, selected: bool, message: App) -> Element<'a, App> {
     } else {
         anim::hover_fill(
             pill,
-            theme::clear(theme::SURFACE_2),
-            theme::SURFACE_2,
+            theme::clear(theme::surface_2()),
+            theme::surface_2(),
             widgets::ROUND,
         )
         .into()
@@ -2032,7 +2037,7 @@ fn card<'a>(
     let base = column![
         cover,
         Space::new().height(10),
-        theme::line(title, Style::BodyStrong, theme::TEXT_PRIMARY),
+        theme::line(title, Style::BodyStrong, theme::text_primary()),
         Space::new().height(2),
         subtitle.into(),
     ]
@@ -2143,14 +2148,18 @@ fn top_artist_card<'a>(covers: &'a Covers, top: &'a TopArtist, side: f32) -> Ele
         line = line.push(theme::line(
             position.to_string(),
             Style::CaptionStrong,
-            theme::TEXT_PRIMARY,
+            theme::text_primary(),
         ));
     }
     let (mark, color, hint) = match top.trend {
-        Some(Trend::Up) => (Icon::TrendUp, theme::GROWTH, "Поднялся в топе"),
-        Some(Trend::Down) => (Icon::TrendDown, theme::ERROR, "Опустился в топе"),
+        Some(Trend::Up) => (Icon::TrendUp, theme::growth(), "Поднялся в топе"),
+        Some(Trend::Down) => (Icon::TrendDown, theme::error(), "Опустился в топе"),
         Some(Trend::New) => (Icon::TrendNew, theme::accent(), "Новый в топе"),
-        Some(Trend::Same) | None => (Icon::TrendSame, theme::TEXT_TERTIARY, "Место не изменилось"),
+        Some(Trend::Same) | None => (
+            Icon::TrendSame,
+            theme::text_tertiary(),
+            "Место не изменилось",
+        ),
     };
     if top.trend.is_some() {
         line = line.push(widgets::with_tooltip(
@@ -2163,7 +2172,7 @@ fn top_artist_card<'a>(covers: &'a Covers, top: &'a TopArtist, side: f32) -> Ele
         let time = theme::line(
             format!("· {listened}"),
             Style::Secondary,
-            theme::TEXT_SECONDARY,
+            theme::text_secondary(),
         );
         line = line.push(time);
     }
@@ -2207,7 +2216,7 @@ fn personal_card<'a>(
         container(theme::label(
             note.clone(),
             Style::Secondary,
-            theme::TEXT_SECONDARY,
+            theme::text_secondary(),
         ))
         .height(18.0 + NOTE_LINE)
         .clip(true),
@@ -2220,7 +2229,7 @@ fn personal_card<'a>(
 
 /// Обычная подпись под карточкой.
 fn caption<'a>(text: String) -> Element<'a, App> {
-    theme::line(text, Style::Secondary, theme::TEXT_SECONDARY).into()
+    theme::line(text, Style::Secondary, theme::text_secondary()).into()
 }
 
 fn playlist_card<'a>(
@@ -2314,7 +2323,7 @@ fn failure_block<'a>(title: &str, failure: &Failure, retry: Option<App>) -> Elem
         ),
     };
     super::state_block(
-        widgets::badge(badge, theme::ERROR, theme::ERROR_SOFT),
+        widgets::badge(badge, theme::error(), theme::error_soft()),
         title.to_owned(),
         text,
         action,

@@ -175,7 +175,7 @@ pub fn title_bar<'a>(with_brand: bool) -> Element<'a, Message> {
     let brand: Element<'a, Message> = if with_brand {
         row![
             widgets::logo(18.0),
-            theme::line(APP_NAME, Style::CaptionStrong, theme::TEXT_SECONDARY),
+            theme::line(APP_NAME, Style::CaptionStrong, theme::text_secondary()),
         ]
         .spacing(8)
         .align_y(Alignment::Center)
@@ -217,9 +217,9 @@ fn window_button<'a>(name: Icon, on_press: Message, close: bool) -> Element<'a, 
     use iced::widget::button;
     let make = move |hovered: bool| -> Element<'a, Message> {
         let color = if hovered {
-            theme::TEXT_PRIMARY
+            theme::text_primary()
         } else {
-            theme::TEXT_SECONDARY
+            theme::text_secondary()
         };
         button(center(icon(name, 16.0, color)))
             .width(46)
@@ -230,8 +230,8 @@ fn window_button<'a>(name: Icon, on_press: Message, close: bool) -> Element<'a, 
                     button::Status::Hovered | button::Status::Pressed if close => {
                         Some(theme::CLOSE_HOVER.into())
                     }
-                    button::Status::Hovered => Some(theme::SURFACE_3.into()),
-                    button::Status::Pressed => Some(theme::SURFACE_4.into()),
+                    button::Status::Hovered => Some(theme::surface_3().into()),
+                    button::Status::Pressed => Some(theme::surface_4().into()),
                     _ => None,
                 },
                 ..button::Style::default()
@@ -252,7 +252,7 @@ pub fn frame<'a>(body: Element<'a, Message>) -> Element<'a, Message> {
         container(theme::line(
             DISCLAIMER,
             Style::Caption,
-            theme::TEXT_TERTIARY
+            theme::text_tertiary()
         ))
         .center_x(Length::Fill)
         .padding(Padding::default().bottom(14)),
@@ -263,7 +263,7 @@ pub fn frame<'a>(body: Element<'a, Message>) -> Element<'a, Message> {
 pub fn loading<'a>(caption: &'a str, turn: f32) -> Element<'a, Message> {
     column![
         spinner(32.0, theme::accent(), turn),
-        theme::line(caption, Style::Body, theme::TEXT_SECONDARY),
+        theme::line(caption, Style::Body, theme::text_secondary()),
     ]
     .spacing(16)
     .align_x(Alignment::Center)
@@ -313,7 +313,7 @@ pub fn problem<'a>(problem: &'a Problem, now: Instant) -> Element<'a, Message> {
         ));
     }
     let mut content = column![
-        widgets::badge(badge_icon, theme::ERROR, theme::ERROR_SOFT),
+        widgets::badge(badge_icon, theme::error(), theme::error_soft()),
         widgets::heading(problem.title.clone(), body),
     ]
     .spacing(20)
@@ -358,13 +358,13 @@ pub fn login<'a>(login: &'a Login, now: Instant, turn: f32) -> Element<'a, Messa
             Style::BodyStrong,
             Message::OpenUrl(full.clone()),
         ),
-        None => theme::line("страницу входа", Style::Body, theme::TEXT_SECONDARY).into(),
+        None => theme::line("страницу входа", Style::Body, theme::text_secondary()).into(),
     };
     let steps = column![
         step(
             "1",
             row![
-                theme::line("Откройте", Style::Body, theme::TEXT_SECONDARY),
+                theme::line("Откройте", Style::Body, theme::text_secondary()),
                 open_step
             ]
             .spacing(12)
@@ -373,7 +373,7 @@ pub fn login<'a>(login: &'a Login, now: Instant, turn: f32) -> Element<'a, Messa
         ),
         step(
             "2",
-            theme::line("Введите код:", Style::Body, theme::TEXT_SECONDARY).into()
+            theme::line("Введите код:", Style::Body, theme::text_secondary()).into()
         ),
     ]
     .spacing(12)
@@ -415,7 +415,7 @@ pub fn login<'a>(login: &'a Login, now: Instant, turn: f32) -> Element<'a, Messa
                         theme::line(
                             format!("Код действует {}", crate::texts::clock(left)),
                             Style::Secondary,
-                            theme::TEXT_TERTIARY
+                            theme::text_tertiary()
                         ),
                     ]
                     .align_y(Alignment::Center)
@@ -456,10 +456,10 @@ fn wide_new_code<'a>() -> Element<'a, Message> {
 
 fn step<'a>(number: &'a str, content: Element<'a, Message>) -> Element<'a, Message> {
     row![
-        container(theme::line(number, Style::Caption, theme::TEXT_SECONDARY))
+        container(theme::line(number, Style::Caption, theme::text_secondary()))
             .center(24)
             .style(|_| container::Style {
-                background: Some(theme::SURFACE_3.into()),
+                background: Some(theme::surface_3().into()),
                 border: Border::default().rounded(widgets::ROUND),
                 ..container::Style::default()
             }),
@@ -476,9 +476,9 @@ fn code_box<'a>(code: Option<&DeviceCode>, copyable: bool, turn: f32) -> Element
         None => center(spinner(28.0, theme::accent(), turn)).into(),
         Some(code) => {
             let color = if copyable {
-                theme::TEXT_PRIMARY
+                theme::text_primary()
             } else {
-                theme::TEXT_DISABLED
+                theme::text_disabled()
             };
             let letters = code
                 .user_code
@@ -502,7 +502,7 @@ fn code_box<'a>(code: Option<&DeviceCode>, copyable: bool, turn: f32) -> Element
         .width(Length::Fill)
         .height(76)
         .style(|_| container::Style {
-            background: Some(theme::SURFACE_2.into()),
+            background: Some(theme::surface_2().into()),
             border: Border::default().rounded(14),
             ..container::Style::default()
         })
@@ -587,7 +587,11 @@ pub fn paywall<'a>(paywall: &'a Paywall, turn: f32) -> Element<'a, Message> {
     ]
     .spacing(12);
     let plus = row![
-        theme::line("Оформить подписку:", Style::Secondary, theme::TEXT_TERTIARY),
+        theme::line(
+            "Оформить подписку:",
+            Style::Secondary,
+            theme::text_tertiary()
+        ),
         widgets::link(
             "plus.yandex.ru".to_owned(),
             Style::Secondary,
@@ -608,14 +612,14 @@ pub fn toast<'a>(text: &'a str, insets: (f32, f32), shown: f32) -> Element<'a, M
     let card = container(theme::label(
         text,
         Style::Body,
-        theme::alpha(theme::TEXT_PRIMARY, shown),
+        theme::alpha(theme::text_primary(), shown),
     ))
     .max_width(560)
     .padding([12, 16])
     .style(move |_| container::Style {
-        background: Some(theme::alpha(theme::SURFACE_3, shown).into()),
+        background: Some(theme::alpha(theme::surface_3(), shown).into()),
         border: Border {
-            color: theme::alpha(theme::OUTLINE, shown),
+            color: theme::alpha(theme::outline(), shown),
             width: 1.0,
             radius: widgets::RADIUS_M.into(),
         },
@@ -659,9 +663,9 @@ pub fn dialog<'a>(dialog: Dialog, shown: f32, interactive: bool) -> Element<'a, 
         .width(460)
         .padding(24)
         .style(move |_| container::Style {
-            background: Some(theme::SURFACE_2.into()),
+            background: Some(theme::surface_2().into()),
             border: Border {
-                color: theme::OUTLINE,
+                color: theme::outline(),
                 width: 1.0,
                 radius: widgets::RADIUS_XL.into(),
             },
@@ -676,11 +680,11 @@ pub fn dialog<'a>(dialog: Dialog, shown: f32, interactive: bool) -> Element<'a, 
     let card = anim::motion(card)
         .scale(0.96 + 0.04 * shown)
         .offset(0.0, 8.0 * hidden)
-        .veil(theme::alpha(theme::BG, hidden), widgets::RADIUS_XL);
+        .veil(theme::alpha(theme::bg(), hidden), widgets::RADIUS_XL);
     let scrim = container(opaque(card))
         .center(Length::Fill)
         .style(move |_| container::Style {
-            background: Some(theme::alpha(theme::SCRIM, theme::SCRIM.a * shown).into()),
+            background: Some(theme::alpha(theme::scrim(), theme::scrim().a * shown).into()),
             ..container::Style::default()
         });
     if interactive {
@@ -717,18 +721,18 @@ const LICENSES: &[(&str, &str)] = &[
 fn licenses<'a>() -> Element<'a, Message> {
     let rows = LICENSES.iter().map(|(name, license)| {
         row![
-            theme::label(*name, Style::Body, theme::TEXT_PRIMARY).width(Length::Fill),
-            theme::label(*license, Style::Secondary, theme::TEXT_SECONDARY),
+            theme::label(*name, Style::Body, theme::text_primary()).width(Length::Fill),
+            theme::label(*license, Style::Secondary, theme::text_secondary()),
         ]
         .spacing(12)
         .into()
     });
     column![
-        theme::line("Сторонние лицензии", Style::Title, theme::TEXT_PRIMARY),
+        theme::line("Сторонние лицензии", Style::Title, theme::text_primary()),
         theme::label(
             "Полный список зависимостей с текстами лицензий прилагается к релизу.",
             Style::Secondary,
-            theme::TEXT_SECONDARY
+            theme::text_secondary()
         ),
         iced::widget::Column::with_children(rows).spacing(10),
     ]
@@ -742,14 +746,14 @@ fn slopless_consent<'a>() -> Element<'a, Message> {
         theme::line(
             "Ставить «Не нравится» ИИ-трекам?",
             Style::Title,
-            theme::TEXT_PRIMARY
+            theme::text_primary()
         ),
         theme::label(
             "Slopless будет отмечать пропущенные ИИ-треки как «Не нравится» в вашем \
              аккаунте. Это меняет рекомендации и видно на всех устройствах. Снять \
              отметку можно в списке «Не нравится» на сайте музыки.",
             Style::Body,
-            theme::TEXT_SECONDARY
+            theme::text_secondary()
         ),
         row![
             widgets::action(
@@ -769,12 +773,12 @@ fn slopless_consent<'a>() -> Element<'a, Message> {
 
 fn confirm_reset_settings<'a>() -> Element<'a, Message> {
     column![
-        theme::line("Сбросить настройки?", Style::Title, theme::TEXT_PRIMARY),
+        theme::line("Сбросить настройки?", Style::Title, theme::text_primary()),
         theme::label(
             "Оформление, звук, эквалайзер, тексты, Discord и плагины вернутся к значениям \
              по умолчанию. Аккаунт, свои пресеты эквалайзера и замены треков останутся.",
             Style::Body,
-            theme::TEXT_SECONDARY
+            theme::text_secondary()
         ),
         row![
             widgets::action(
@@ -794,12 +798,12 @@ fn confirm_reset_settings<'a>() -> Element<'a, Message> {
 
 fn confirm_logout<'a>() -> Element<'a, Message> {
     column![
-        theme::line("Выйти из аккаунта?", Style::Title, theme::TEXT_PRIMARY),
+        theme::line("Выйти из аккаунта?", Style::Title, theme::text_primary()),
         theme::label(
             "Токен удалится с этого компьютера и будет отозван на сервере Яндекса. \
              Чтобы снова слушать музыку, нужно будет войти заново.",
             Style::Body,
-            theme::TEXT_SECONDARY
+            theme::text_secondary()
         ),
         row![
             widgets::action(

@@ -360,7 +360,7 @@ pub fn view<'a>(ctx: Ctx<'a>, state: &'a State, width: f32) -> Element<'a, App> 
 /// «Сбросить всё» в конце страницы.
 fn ribbon_layout<'a>(body: Element<'a, App>, state: &'a State) -> Element<'a, App> {
     let top = column![
-        theme::line("Настройки", Style::Display, theme::TEXT_PRIMARY),
+        theme::line("Настройки", Style::Display, theme::text_primary()),
         search_field(state),
         ribbon(state),
     ]
@@ -402,7 +402,7 @@ fn navigation<'a>(state: &'a State, width: f32) -> Element<'a, App> {
                 container(theme::line(
                     group.title().to_uppercase(),
                     Style::Caption,
-                    theme::TEXT_TERTIARY,
+                    theme::text_tertiary(),
                 ))
                 .padding(Padding {
                     top: 20.0,
@@ -421,7 +421,7 @@ fn navigation<'a>(state: &'a State, width: f32) -> Element<'a, App> {
         reset_button(),
     ];
     column![
-        theme::line("Настройки", Style::Display, theme::TEXT_PRIMARY),
+        theme::line("Настройки", Style::Display, theme::text_primary()),
         Space::new().height(16),
         search_field(state),
         scroll::smooth(scrollable(groups).height(Length::Fill)),
@@ -455,9 +455,13 @@ fn search_field(state: &State) -> Element<'_, App> {
 /// Пункт навигации. Выбранный — с фоном, иконкой акцента и полоской слева.
 fn nav_item<'a>(category: Category, selected: bool) -> Element<'a, App> {
     let (icon_color, style, color) = if selected {
-        (theme::accent(), Style::BodyStrong, theme::TEXT_PRIMARY)
+        (theme::accent(), Style::BodyStrong, theme::text_primary())
     } else {
-        (theme::TEXT_SECONDARY, Style::Body, theme::TEXT_SECONDARY)
+        (
+            theme::text_secondary(),
+            Style::Body,
+            theme::text_secondary(),
+        )
     };
     let content = row![
         icon(category.icon(), 18.0, icon_color),
@@ -471,9 +475,9 @@ fn nav_item<'a>(category: Category, selected: bool) -> Element<'a, App> {
         .padding([0, 14])
         .style(move |_, status| button::Style {
             background: match (selected, status) {
-                (true, _) => Some(theme::SURFACE_2.into()),
+                (true, _) => Some(theme::surface_2().into()),
                 (false, button::Status::Hovered | button::Status::Pressed) => {
-                    Some(theme::SURFACE_1.into())
+                    Some(theme::surface_1().into())
                 }
                 _ => None,
             },
@@ -495,9 +499,9 @@ fn ribbon(state: &State) -> Element<'_, App> {
     let pills = row(Category::ALL.into_iter().map(|category| {
         let selected = state.category == category;
         let (icon_color, color) = if selected {
-            (theme::accent(), theme::TEXT_PRIMARY)
+            (theme::accent(), theme::text_primary())
         } else {
-            (theme::TEXT_SECONDARY, theme::TEXT_SECONDARY)
+            (theme::text_secondary(), theme::text_secondary())
         };
         button(
             row![
@@ -511,9 +515,11 @@ fn ribbon(state: &State) -> Element<'_, App> {
         .style(move |_, status| button::Style {
             background: Some(
                 match (selected, status) {
-                    (true, _) => theme::SURFACE_3,
-                    (false, button::Status::Hovered | button::Status::Pressed) => theme::SURFACE_2,
-                    _ => theme::SURFACE_1,
+                    (true, _) => theme::surface_3(),
+                    (false, button::Status::Hovered | button::Status::Pressed) => {
+                        theme::surface_2()
+                    }
+                    _ => theme::surface_1(),
                 }
                 .into(),
             ),
@@ -534,19 +540,23 @@ fn ribbon(state: &State) -> Element<'_, App> {
 /// «Сбросить всё»: рамка и текст цвета ошибки, диалог подтверждения.
 fn reset_button<'a>() -> Element<'a, App> {
     button(
-        container(theme::line("Сбросить всё", Style::BodyStrong, theme::ERROR))
-            .center(Length::Fill),
+        container(theme::line(
+            "Сбросить всё",
+            Style::BodyStrong,
+            theme::error(),
+        ))
+        .center(Length::Fill),
     )
     .width(Length::Fill)
     .height(NAV_ITEM)
     .padding(0)
     .style(|_, status| button::Style {
         background: match status {
-            button::Status::Hovered | button::Status::Pressed => Some(theme::ERROR_SOFT.into()),
+            button::Status::Hovered | button::Status::Pressed => Some(theme::error_soft().into()),
             _ => None,
         },
         border: Border {
-            color: theme::ERROR,
+            color: theme::error(),
             width: 1.0,
             radius: 12.0.into(),
         },
@@ -597,14 +607,14 @@ fn search_results<'a>(ctx: &Ctx<'a>, query: &str) -> Element<'a, App> {
         let heading = button(theme::line(
             category.title(),
             Style::Headline,
-            theme::TEXT_PRIMARY,
+            theme::text_primary(),
         ))
         .padding(Padding::default().top(24).bottom(4))
         .style(|_, status| button::Style {
             text_color: if status == button::Status::Hovered {
                 theme::accent_hover()
             } else {
-                theme::TEXT_PRIMARY
+                theme::text_primary()
             },
             ..button::Style::default()
         })
@@ -615,11 +625,11 @@ fn search_results<'a>(ctx: &Ctx<'a>, query: &str) -> Element<'a, App> {
     if count == 0 {
         return container(
             column![
-                theme::line("Ничего не нашлось", Style::Headline, theme::TEXT_PRIMARY),
+                theme::line("Ничего не нашлось", Style::Headline, theme::text_primary()),
                 theme::label(
                     "Проверьте запрос или попробуйте другое слово",
                     Style::Secondary,
-                    theme::TEXT_TERTIARY,
+                    theme::text_tertiary(),
                 ),
             ]
             .spacing(6)
@@ -703,6 +713,8 @@ mod tests {
         let current = Prefs {
             sidebar_collapsed: true,
             accent: theme::Accent::Blue,
+            theme: theme::Family::Midnight,
+            theme_mode: theme::ThemeMode::Light,
             scale: 150,
             visualizer: false,
             quality: AudioQuality::Low,
