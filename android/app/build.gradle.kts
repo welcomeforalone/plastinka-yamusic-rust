@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -17,19 +19,81 @@ android {
         versionName = "0.0.5"
     }
 
-    signingConfigs {
-        create("release") {
-            storeFile = file("plastinka.keystore")
-            storePassword = "REMOVED"
-            keyAlias = "plastinka"
-            keyPassword = "REMOVED"
+    // Подпись release: ключ в репозитории не хранится.
+    // Источник — переменные окружения ANDROID_KEYSTORE_* или файл android/keystore.properties.
+    val releaseSigning: Map<String, String>? = run {
+        fun need(values: Map<String, String?>, field: String, source: String): String {
+            val value = values[field]?.trim()
+            if (value.isNullOrEmpty()) {
+                throw GradleException("Подпись release: не задано значение «$field» ($source).")
+            }
+            return value
         }
+
+        // Путь к хранилищу проверяем сразу после его чтения: ошибка про файл понятнее, чем про пароли.
+        fun needKeystore(values: Map<String, String?>, field: String, source: String): String {
+            val path = need(values, field, source)
+            if (!rootProject.file(path).isFile) {
+                throw GradleException("Подпись release: файл хранилища ключей не найден: $path ($source).")
+            }
+            return path
+        }
+
+        val envPath = System.getenv("ANDROID_KEYSTORE_PATH")
+        val propsFile = rootProject.file("keystore.properties")
+        if (!envPath.isNullOrBlank()) {
+            val source = "переменные окружения ANDROID_KEYSTORE_*"
+            val env = mapOf(
+                "ANDROID_KEYSTORE_PATH" to envPath,
+                "ANDROID_KEYSTORE_PASSWORD" to System.getenv("ANDROID_KEYSTORE_PASSWORD"),
+                "ANDROID_KEY_ALIAS" to System.getenv("ANDROID_KEY_ALIAS"),
+                "ANDROID_KEY_PASSWORD" to System.getenv("ANDROID_KEY_PASSWORD"),
+            )
+            mapOf(
+                "storeFile" to needKeystore(env, "ANDROID_KEYSTORE_PATH", source),
+                "storePassword" to need(env, "ANDROID_KEYSTORE_PASSWORD", source),
+                "keyAlias" to need(env, "ANDROID_KEY_ALIAS", source),
+                "keyPassword" to need(env, "ANDROID_KEY_PASSWORD", source),
+            )
+        } else if (propsFile.isFile) {
+            val source = "файл ${propsFile.absolutePath}"
+            val props = Properties()
+            propsFile.inputStream().use { props.load(it) }
+            val values = props.stringPropertyNames().associateWith { props.getProperty(it) }
+            mapOf(
+                "storeFile" to needKeystore(values, "storeFile", source),
+                "storePassword" to need(values, "storePassword", source),
+                "keyAlias" to need(values, "keyAlias", source),
+                "keyPassword" to need(values, "keyPassword", source),
+            )
+        } else {
+            null
+        }
+    }
+
+    if (releaseSigning != null) {
+        val keystoreFile = rootProject.file(releaseSigning.getValue("storeFile"))
+        signingConfigs {
+            create("release") {
+                storeFile = keystoreFile
+                storePassword = releaseSigning.getValue("storePassword")
+                keyAlias = releaseSigning.getValue("keyAlias")
+                keyPassword = releaseSigning.getValue("keyPassword")
+            }
+        }
+    } else {
+        logger.warn(
+            "Plastinka: ключ подписи не задан, release будет неподписанным " +
+                "(задайте ANDROID_KEYSTORE_PATH/_PASSWORD, ANDROID_KEY_ALIAS/_PASSWORD или android/keystore.properties)."
+        )
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
+            if (releaseSigning != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
     compileOptions {

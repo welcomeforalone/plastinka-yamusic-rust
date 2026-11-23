@@ -2,7 +2,8 @@ name: build-windows
 
 # Сборка под Windows x64 (MSVC). Иконку и свойства файла вшивает build.rs
 # через rc.exe из Windows SDK — он есть в образе windows-latest.
-# Ручной запуск с `release_tag` кладёт архив в уже созданный релиз.
+# Вызывается из release.yml (workflow_call), по push в main и вручную.
+# В релиз файлы кладёт только release.yml.
 
 on:
   push:
@@ -15,14 +16,16 @@ on:
       - "build.rs"
       - ".github/workflows/build-windows.yml"
   workflow_dispatch:
+  workflow_call:
     inputs:
-      release_tag:
-        description: "Тег релиза, куда положить архив (пусто — только артефакт)"
+      ref:
+        description: "Коммит или тег для сборки (пусто — текущий)"
+        type: string
         required: false
         default: ""
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -33,6 +36,8 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -51,34 +56,16 @@ jobs:
 
       - name: Package
         run: |
-          $name = 'plastinka-windows-x64'
           New-Item -ItemType Directory -Force out | Out-Null
-          Copy-Item target\release\Plastinka.exe out\
-          Compress-Archive -Path out\* -DestinationPath "$name.zip" -Force
-          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          Copy-Item target\release\Plastinka.exe out\Plastinka.exe
+          $hash = (Get-FileHash out\Plastinka.exe -Algorithm SHA256).Hash.ToLower()
           # Перевод строки LF: иначе `sha256sum -c` не находит файл из-за \r.
-          [IO.File]::WriteAllText("$PWD\$name.zip.sha256", "$hash  $name.zip`n")
+          [IO.File]::WriteAllText("$PWD\out\Plastinka.exe.sha256", "$hash  Plastinka.exe`n")
 
       - uses: actions/upload-artifact@v4
         with:
           name: plastinka-windows-x64
           path: |
-            plastinka-windows-x64.zip
-            plastinka-windows-x64.zip.sha256
+            out/Plastinka.exe
+            out/Plastinka.exe.sha256
           retention-days: 30
-
-  release:
-    needs: build
-    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: plastinka-windows-x64
-      - name: Upload to release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.release_tag }}
-        run: |
-          gh release upload "$TAG" --clobber --repo "$GITHUB_REPOSITORY" \
-            plastinka-windows-x64.zip plastinka-windows-x64.zip.sha256
