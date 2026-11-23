@@ -100,7 +100,11 @@ jobs:
           tools="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
           echo "apksigner из $tools"
           "$tools/apksigner" verify --print-certs "$apk" | tee "$RUNNER_TEMP/certs.txt"
-          actual="$(sed -n 's/^Signer #1 certificate SHA-256 digest: *//p' "$RUNNER_TEMP/certs.txt" | head -1 | tr 'A-F' 'a-f' | tr -d ': ')"
+          # Формат строки зависит от версии apksigner («Signer #1 certificate
+          # SHA-256 digest:» или «V2 Signer: certificate SHA-256 digest:»),
+          # поэтому берём все такие строки. Отпечаток у всех подписей должен
+          # быть один и равен ожидаемому.
+          actual="$(sed -n 's/.*certificate SHA-256 digest: *//p' "$RUNNER_TEMP/certs.txt" | tr 'A-F' 'a-f' | tr -d ': ' | sort -u | paste -sd ' ' -)"
           if [ "$actual" != "$ANDROID_CERT_SHA256" ]; then
             echo "::error::Отпечаток сертификата APK не совпал. Ожидался $ANDROID_CERT_SHA256, получен ${actual:-пусто}"
             exit 1

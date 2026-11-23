@@ -88,7 +88,9 @@ EF:5E:8C:87:69:8A:9F:E5:53:3D:CD:A1:57:89:22:7C:E6:E4:2A:CD:6C:55:E1:F9:C6:5D:3C
 apksigner verify --print-certs plastinka-android.apk
 ```
 
-Строка `Signer #1 certificate SHA-256 digest` должна совпасть с отпечатком выше.
+Значение в строке `certificate SHA-256 digest` (в зависимости от версии
+`apksigner` она начинается с `Signer #1` или `V2 Signer:`) должно совпасть с
+отпечатком выше.
 Тот же отпечаток workflow `build-android.yml` сверяет при каждой сборке.
 
 При смене ключа поменять отпечаток в `build-android.yml` (переменная
