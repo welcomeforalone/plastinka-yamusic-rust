@@ -6,7 +6,7 @@
 
 mod anim;
 mod corners;
-mod covers;
+pub(crate) mod covers;
 mod dark;
 mod drag_pulse;
 mod filter;
@@ -34,6 +34,7 @@ mod visualizer;
 mod widgets;
 
 use std::io::Write as _;
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -549,6 +550,7 @@ pub enum Message {
         mini::MiniPrefs,
         EqState,
         SyncConfig,
+        Option<PathBuf>,
     ),
     ToggleSidebar,
     SetAccent(theme::Accent),
@@ -651,6 +653,8 @@ pub struct App {
     sync: Option<Service>,
     /// Настройки `[sync]`: хранит окно, пишет в `config.toml`.
     sync_cfg: SyncConfig,
+    /// Папка скачанных треков (`download_dir` в `config.toml`); по умолчанию нет.
+    download_dir: Option<PathBuf>,
     /// Имя компьютера для имени устройства по умолчанию.
     sync_default_name: String,
     /// Служба не запустилась (хранилище паролей и т. п.): повторно не пробуем,
@@ -731,6 +735,7 @@ impl App {
             discord_override: None,
             sync: None,
             sync_cfg: SyncConfig::default(),
+            download_dir: None,
             sync_default_name: default_device_name(),
             sync_failed: false,
             media: None,
@@ -779,6 +784,7 @@ impl App {
                     mini::MiniPrefs::from_config(&config.mini_player),
                     config.equalizer(),
                     config.sync.clone(),
+                    config.download_dir.clone().map(PathBuf::from),
                 )
             }),
         ]);
@@ -1309,9 +1315,21 @@ impl App {
                 mini_prefs,
                 eq,
                 sync,
+                download_dir,
             ) => {
                 self.discord_override = discord_override;
                 self.sync_cfg = sync;
+                // С тестовыми хуками папка только из хука: настоящую не трогаем.
+                self.download_dir = if storage::test_hooks_active() {
+                    std::env::var_os("PLASTINKA_TEST_DOWNLOAD_DIR")
+                        .filter(|dir| !dir.is_empty())
+                        .map(PathBuf::from)
+                } else {
+                    download_dir
+                };
+                if let Screen::Main(library) = &mut self.screen {
+                    library.set_download_dir(self.download_dir.clone());
+                }
                 self.apply_eq(eq);
                 // Открытый мини-плеер уже стоит где стоит: берём только раскладку
                 // и положение на следующее открытие.
@@ -1604,6 +1622,11 @@ impl App {
                             self.wave_settings = settings;
                             self.save_prefs()
                         }
+                        Some(library::Effect::DownloadDir(dir)) => {
+                            self.show_toast(format!("Папка для скачивания: {}", dir.display()));
+                            self.download_dir = Some(dir);
+                            self.save_prefs()
+                        }
                         Some(library::Effect::TogetherPaired(device)) => {
                             self.sync_cfg.remember(device);
                             self.save_prefs()
@@ -1793,6 +1816,7 @@ impl App {
                 self.wave_settings.clone(),
                 self.mini_prefs,
                 self.sync_cfg.clone(),
+                self.download_dir.clone(),
             ),
             Message::PrefsSaved,
         )
@@ -2364,6 +2388,7 @@ impl App {
         // Параметры эквалайзера уходят плееру вместе с громкостью и качеством.
         library.set_equalizer(self.eq.settings);
         library.set_wave_settings(self.wave_settings.clone());
+        library.set_download_dir(self.download_dir.clone());
         // Окно могло остаться в трее: серия дней его не засчитывает.
         library.listen_minimized(self.paused());
         self.screen = Screen::Main(Box::new(library));
@@ -2822,6 +2847,7 @@ async fn save_prefs(
     wave_settings: api::WaveSettings,
     mini_prefs: mini::MiniPrefs,
     sync: SyncConfig,
+    download_dir: Option<PathBuf>,
 ) -> Result<(), Failure> {
     let path = AppDirs::discover()?.config_file();
     storage::blocking(move || {
@@ -2832,6 +2858,7 @@ async fn save_prefs(
         wave_settings.write(&mut config.wave_settings);
         mini_prefs.write(&mut config.mini_player);
         config.sync = sync;
+        config.download_dir = download_dir.map(|dir| dir.to_string_lossy().into_owned());
         config.save(&path)
     })
     .await

@@ -11,6 +11,7 @@ mod lyrics;
 mod play_audio;
 mod rotor;
 mod stream;
+mod track_meta;
 mod tracks;
 mod wave_settings;
 
@@ -46,6 +47,7 @@ pub use stream::{
     AudioQuality, Codec, StreamError, StreamInfo, StreamSource, fetch_mp3_source,
     fetch_stream_source,
 };
+pub use track_meta::{TrackMeta, fetch_track_meta};
 pub use tracks::{
     ArtistRef, LikedIds, Loudness, LyricsInfo, TRACKS_BATCH, Track, Warning, add_disliked_tracks,
     add_liked_tracks, artists_text, fetch_liked_ids, fetch_tracks, normalization_gain,

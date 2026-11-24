@@ -37,6 +37,9 @@ keyring-core = "1.0.1"
 # Apache-2.0), остальное в сборке уже есть.
 mdns-sd = { version = "0.22", default-features = false }
 md-5 = "0.11"
+# Теги скачанных треков (ID3v2, MP4, Vorbis), MIT OR Apache-2.0. Фича по умолчанию
+# нужна: без неё крейт не собирается.
+lofty = "0.25.5"
 open = "5.4.5"
 reqwest = { version = "0.13", features = ["form", "json"] }
 # Системный диалог выбора своего файла (FckCensor).

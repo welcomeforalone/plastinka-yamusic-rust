@@ -71,6 +71,7 @@ pub enum Category {
     Sound,
     Equalizer,
     Lyrics,
+    Downloads,
     Plugins,
     Discord,
     Together,
@@ -81,11 +82,12 @@ pub enum Category {
 
 impl Category {
     /// Разделы в порядке навигации.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Appearance,
         Self::Sound,
         Self::Equalizer,
         Self::Lyrics,
+        Self::Downloads,
         Self::Plugins,
         Self::Discord,
         Self::Together,
@@ -100,6 +102,7 @@ impl Category {
             Self::Sound => "Звук",
             Self::Equalizer => "Эквалайзер",
             Self::Lyrics => "Текст песни",
+            Self::Downloads => "Скачивание",
             Self::Plugins => "Плагины",
             Self::Discord => "Discord",
             Self::Together => "Слушать вместе",
@@ -116,6 +119,7 @@ impl Category {
             Self::Sound => "Качество потока и громкость",
             Self::Equalizer => "Десять полос, пресеты и предусилитель",
             Self::Lyrics => "Откуда брать текст",
+            Self::Downloads => "Папка и порядок скачивания треков",
             Self::Plugins => "Встроенные модули, по умолчанию выключены",
             Self::Discord => "Статус «Слушает» в профиле Discord",
             Self::Together => "Один трек на двух ваших устройствах в одной сети",
@@ -131,6 +135,7 @@ impl Category {
             Self::Sound => Icon::Volume,
             Self::Equalizer => Icon::Equalizer,
             Self::Lyrics => Icon::Lyrics,
+            Self::Downloads => Icon::Download,
             Self::Plugins => Icon::Plug,
             Self::Discord => Icon::Chat,
             Self::Together => Icon::Devices,
@@ -143,7 +148,7 @@ impl Category {
     fn group(self) -> Group {
         match self {
             Self::Appearance => Group::Main,
-            Self::Sound | Self::Equalizer | Self::Lyrics => Group::Player,
+            Self::Sound | Self::Equalizer | Self::Lyrics | Self::Downloads => Group::Player,
             Self::Plugins => Group::Extensions,
             Self::Discord | Self::Together => Group::Network,
             Self::Startup | Self::Account | Self::About => Group::System,

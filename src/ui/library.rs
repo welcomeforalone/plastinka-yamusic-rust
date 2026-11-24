@@ -9,6 +9,7 @@
 
 mod browse;
 mod copies;
+mod downloads;
 mod history_screen;
 mod listen;
 mod lyrics;
@@ -376,6 +377,8 @@ pub enum Message {
     Audio(audio::Event),
     /// Плагины: загрузка данных, меню трека, замены.
     Plugin(plugins::Msg),
+    /// Скачивание: «Скачать», «Скачать всё», папка.
+    Download(downloads::Msg),
     /// «Моя волна».
     Wave(wave::Msg),
     /// «Слушать вместе»: события службы и кнопки.
@@ -421,6 +424,8 @@ pub enum Effect {
     Relogin,
     /// Всплывающее сообщение.
     Toast(String),
+    /// Папка скачивания выбрана: запомнить в `config.toml`.
+    DownloadDir(std::path::PathBuf),
     /// Новое сопряжение: запомнить в `config.toml`.
     TogetherPaired(crate::storage::config::PairedDevice),
     /// Открыть диалог (подтверждение восстановления статистики).
@@ -550,6 +555,8 @@ pub struct Library {
     /// Задачи, которые набрались за одно сообщение (поиск версии без
     /// цензуры, «Не нравится»): уходят вместе с ответом.
     tasks: Vec<Task<Message>>,
+    /// Скачивание треков: папка, очередь, выбор папки.
+    dl: downloads::Downloads,
     /// Где последний раз нажали мышь: там открывается меню трека.
     pointer: Point,
     menu: Option<TrackMenu>,
@@ -813,6 +820,7 @@ impl Library {
             slop: Slop::default(),
             io: PluginIo::default(),
             tasks: Vec::new(),
+            dl: downloads::Downloads::default(),
             pointer: Point::ORIGIN,
             menu: None,
             replace: None,
@@ -1457,6 +1465,7 @@ impl Library {
             }
             Message::Audio(event) => self.audio_event(event),
             Message::Plugin(msg) => return self.plugin_update(msg),
+            Message::Download(msg) => return self.download_update(msg),
             Message::Wave(msg) => return self.wave_update(msg),
             Message::ToggleLike(track) => return self.toggle_like(track),
             Message::LikeDone(track, target, result) => {
@@ -2528,7 +2537,12 @@ impl Library {
                 )
             }
             Likes::Ready(tracks) if tracks.is_empty() => column![
-                container(liked_header(tracks, false)).padding(Padding {
+                container(liked_header(
+                    tracks,
+                    false,
+                    iced::widget::Space::new().into()
+                ))
+                .padding(Padding {
                     top: PAGE_TOP,
                     right: PAGE_SIDE,
                     bottom: 0.0,
@@ -2576,7 +2590,16 @@ impl Library {
                     .into()
                 };
                 column![
-                    container(liked_header(tracks, true)).padding(Padding {
+                    container(liked_header(
+                        tracks,
+                        true,
+                        downloads::download_all_action(
+                            &ListKey::Liked,
+                            self.can_download(),
+                            !tracks.is_empty(),
+                        ),
+                    ))
+                    .padding(Padding {
                         top: PAGE_TOP,
                         right: PAGE_SIDE,
                         bottom: 0.0,
@@ -3439,7 +3462,11 @@ fn edit_likes(
     changed
 }
 
-fn liked_header<'a>(tracks: &[Track], with_actions: bool) -> Element<'a, App> {
+fn liked_header<'a>(
+    tracks: &[Track],
+    with_actions: bool,
+    download: Element<'a, App>,
+) -> Element<'a, App> {
     // `sum` паникует при переполнении, а длительность приходит от сервера.
     let total = tracks
         .iter()
@@ -3481,6 +3508,7 @@ fn liked_header<'a>(tracks: &[Track], with_actions: bool) -> Element<'a, App> {
                     "Перемешать",
                     Some(Lib(Message::ShuffleList(ListKey::Liked))),
                 ),
+                download,
                 widgets::icon_button(Icon::More, Size::M, false, Some(Lib(Message::Noop))),
             ]
             .spacing(10)

@@ -62,6 +62,17 @@ pub enum Sound {
     Url(String),
 }
 
+/// Байты поддельного потока: тишина в MP3 или FLAC. Для проверки скачивания
+/// без сети (хук `PLASTINKA_TEST_STREAM`). Только в отладочной сборке.
+#[cfg(debug_assertions)]
+pub(crate) fn fake_audio(flac: bool, seconds: usize) -> Vec<u8> {
+    if flac {
+        fake::silent_flac(seconds)
+    } else {
+        fake::silent_mp3(seconds)
+    }
+}
+
 /// Команды окна.
 #[derive(Debug, Clone)]
 pub enum Command {

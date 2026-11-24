@@ -635,7 +635,7 @@ fn about() -> Result<(), CliError> {
     writeln!(out, "{DISCLAIMER}")?;
     writeln!(
         out,
-        "Только потоковое воспроизведение, нужна активная подписка Плюс."
+        "Нужна активная подписка Плюс. Скачивание — только по команде, в выбранную папку."
     )?;
     writeln!(out)?;
     writeln!(out, "Настройки: {}", dirs.config_dir().display())?;

@@ -26,6 +26,7 @@ pub fn entries<'a>(category: Category, ctx: &Ctx<'a>) -> Vec<Entry<'a>> {
         Category::Sound => sound(ctx.prefs),
         Category::Equalizer => super::eq_page::entries(ctx),
         Category::Lyrics => lyrics(ctx.prefs),
+        Category::Downloads => ctx.library.download_entries(),
         Category::Plugins => ctx.library.plugin_entries(),
         Category::Discord => discord(ctx.prefs),
         Category::Together => ctx.library.together_entries(),
@@ -800,7 +801,8 @@ fn account<'a>(ctx: &Ctx<'a>) -> Vec<Entry<'a>> {
 fn about<'a>(prefs: Prefs, update: &'a UpdateState) -> Vec<Entry<'a>> {
     const VERSION: &str = concat!("Версия ", env!("CARGO_PKG_VERSION"));
     const STREAMING: &str = "Музыка воспроизводится потоком через API Яндекс Музыки по вашей \
-                             подписке. Аудио не сохраняется на диск.";
+                             подписке. Звук сохраняется на диск только когда вы сами нажимаете \
+                             «Скачать», и только в выбранную вами папку.";
     let product = row![
         widgets::logo(44.0),
         column![

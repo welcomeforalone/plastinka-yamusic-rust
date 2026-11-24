@@ -864,7 +864,14 @@ impl Library {
                 theme::text_primary(),
             )),
             list_stats(&album.tracks),
-            list_actions(&key, self.any_playable(&album.tracks)),
+            super::downloads::with_download(
+                list_actions(&key, self.any_playable(&album.tracks)),
+                super::downloads::download_all_action(
+                    &key,
+                    self.can_download(),
+                    self.any_playable(&album.tracks),
+                ),
+            ),
         );
         self.track_page(key, header, &album.tracks, covers, "В альбоме нет треков")
     }
@@ -898,7 +905,14 @@ impl Library {
             card.title.clone(),
             Some(byline),
             stats,
-            list_actions(&key, self.any_playable(&playlist.tracks)),
+            super::downloads::with_download(
+                list_actions(&key, self.any_playable(&playlist.tracks)),
+                super::downloads::download_all_action(
+                    &key,
+                    self.can_download(),
+                    self.any_playable(&playlist.tracks),
+                ),
+            ),
         );
         self.track_page(
             key,
