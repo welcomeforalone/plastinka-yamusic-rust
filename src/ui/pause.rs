@@ -76,6 +76,10 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Pause<'_, Message> {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        #[cfg(debug_assertions)]
+        if matches!(event, Event::Window(window::Event::RedrawRequested(_))) {
+            super::fps::frame();
+        }
         if swallows(self.paused, event) {
             return;
         }

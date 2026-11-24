@@ -6,14 +6,16 @@ use iced::border::Radius;
 use iced::widget::{Space, button, center, column, container, row, toggler, tooltip};
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding};
 
-use super::controls::{padded_row, setting_row, switch};
+use super::controls::{padded_row, setting_row, switch, switch_if};
 use super::{Category, Ctx, Entry};
 use crate::api::{self, AudioQuality};
 use crate::storage::config;
 use crate::ui::Message as App;
 use crate::ui::icons::{Icon, icon};
 use crate::ui::library::avatar;
+use crate::ui::render;
 use crate::ui::theme::{self, Style};
+use crate::ui::updates::State as UpdateState;
 use crate::ui::widgets::{self, Kind, Size};
 use crate::ui::{Dialog, Prefs, Zoom, palette};
 
@@ -27,8 +29,9 @@ pub fn entries<'a>(category: Category, ctx: &Ctx<'a>) -> Vec<Entry<'a>> {
         Category::Plugins => ctx.library.plugin_entries(),
         Category::Discord => discord(ctx.prefs),
         Category::Together => ctx.library.together_entries(),
+        Category::Startup => startup(ctx),
         Category::Account => account(ctx),
-        Category::About => about(),
+        Category::About => about(ctx.prefs, ctx.update),
     }
 }
 
@@ -399,6 +402,17 @@ fn appearance<'a>(prefs: Prefs, palette: &'a palette::State) -> Vec<Entry<'a>> {
             "спектр анимация эквалайзер",
             switch(prefs.visualizer, |_| App::ToggleVisualizer),
         ),
+        item(
+            "Рендер на видеокарте",
+            if prefs.gpu_render != render::boot_gpu() {
+                "Перезапустите Plastinka, чтобы применить. Рендер на видеокарте: меньше нагрузка на процессор, но около 300 МБ памяти вместо 100 МБ"
+            } else {
+                "Меньше нагрузка на процессор, но около 300 МБ памяти вместо 100 МБ. Действует после перезапуска"
+            }
+            .to_owned(),
+            "видеокарта gpu рендер память процессор производительность",
+            switch(prefs.gpu_render, |_| App::ToggleGpuRender),
+        ),
     ]
 }
 
@@ -695,6 +709,40 @@ fn discord<'a>(prefs: Prefs) -> Vec<Entry<'a>> {
     entries
 }
 
+// ------------------------------------------------------------ запуск и трей
+
+/// «Запуск и трей»: сворачивание в трей и автозапуск. Без трея первая строка
+/// неактивна; автозапуск остаётся, но окно тогда стартует видимым.
+fn startup<'a>(ctx: &Ctx<'a>) -> Vec<Entry<'a>> {
+    let tray = ctx.tray;
+    vec![
+        item(
+            "Сворачивать в трей при закрытии",
+            if tray {
+                "Крестик прячет окно в трей, музыка играет дальше. Выход — из меню значка в трее"
+            } else {
+                "Трей недоступен в этой системе"
+            }
+            .to_owned(),
+            "трей закрыть крестик свернуть фон значок область уведомлений",
+            switch_if(ctx.prefs.close_to_tray && tray, tray, |_| {
+                App::ToggleCloseToTray
+            }),
+        ),
+        item(
+            "Запускать вместе с системой",
+            if tray {
+                "Plastinka стартует спрятанной в трей"
+            } else {
+                "Трей недоступен в этой системе: окно стартует видимым"
+            }
+            .to_owned(),
+            "автозапуск запуск система старт загрузка автозагрузка",
+            switch(ctx.autostart, |_| App::ToggleAutostart),
+        ),
+    ]
+}
+
 // ---------------------------------------------------------------- аккаунт
 
 /// «Аккаунт»: имя, подписка, выход.
@@ -749,7 +797,7 @@ fn account<'a>(ctx: &Ctx<'a>) -> Vec<Entry<'a>> {
 // ------------------------------------------------------------ о программе
 
 /// «О программе»: версия, обязательная строка правила 4, лицензии.
-fn about<'a>() -> Vec<Entry<'a>> {
+fn about<'a>(prefs: Prefs, update: &'a UpdateState) -> Vec<Entry<'a>> {
     const VERSION: &str = concat!("Версия ", env!("CARGO_PKG_VERSION"));
     const STREAMING: &str = "Музыка воспроизводится потоком через API Яндекс Музыки по вашей \
                              подписке. Аудио не сохраняется на диск.";
@@ -784,6 +832,19 @@ fn about<'a>() -> Vec<Entry<'a>> {
             "версия лицензии лицензия",
             product.into(),
         ),
+        item(
+            "Проверять обновления автоматически",
+            "При запуске и раз в 6 часов. Скачивается только с GitHub проекта, файл сверяется по SHA-256"
+                .to_owned(),
+            "обновление обновить версия автообновление github",
+            switch(prefs.auto_update, |_| App::ToggleAutoUpdate),
+        ),
+        item(
+            "Обновления",
+            update.status(),
+            "обновление обновить проверить версия релиз",
+            update_controls(update),
+        ),
         Entry::new(
             "Неофициальный клиент",
             format!("{} {STREAMING}", crate::DISCLAIMER),
@@ -791,4 +852,41 @@ fn about<'a>() -> Vec<Entry<'a>> {
             notice.into(),
         ),
     ]
+}
+
+/// Кнопки строки «Обновления»: что доступно в текущем состоянии.
+fn update_controls<'a>(update: &'a UpdateState) -> Element<'a, App> {
+    const CHECK: &str = "Проверить обновления";
+    let check = |enabled: bool| {
+        widgets::action(
+            Kind::Secondary,
+            None,
+            CHECK,
+            enabled.then_some(App::UpdateCheck),
+        )
+    };
+    let buttons: Vec<Element<'a, App>> = match update {
+        UpdateState::Checking | UpdateState::Downloading(_) => vec![check(false)],
+        UpdateState::Installed(_) => vec![widgets::action(
+            Kind::Primary,
+            None,
+            "Перезапустить",
+            Some(App::UpdateRestart),
+        )],
+        UpdateState::Available(found) => vec![
+            if found.package.is_some() {
+                widgets::action(Kind::Primary, None, "Обновить", Some(App::UpdateInstall))
+            } else {
+                widgets::action(
+                    Kind::Primary,
+                    None,
+                    "Открыть страницу релиза",
+                    Some(App::OpenUrl(found.page_url.clone())),
+                )
+            },
+            check(true),
+        ],
+        _ => vec![check(true)],
+    };
+    row(buttons).spacing(8).align_y(Alignment::Center).into()
 }

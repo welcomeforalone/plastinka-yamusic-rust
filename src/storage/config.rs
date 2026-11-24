@@ -47,6 +47,19 @@ pub struct Config {
     /// Визуализатор спектра под плеером.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub visualizer: Option<bool>,
+    /// Рендер окна на видеокарте (wgpu). По умолчанию выключен: окно
+    /// рисуется на процессоре (tiny-skia), это легче по памяти. Действует
+    /// после перезапуска.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub gpu_render: Option<bool>,
+    /// Автоматически проверять обновления на GitHub (по умолчанию нет): при
+    /// запуске и раз в 6 часов. Скачивает и ставит только кнопка «Обновить».
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub auto_update: Option<bool>,
+    /// Крестик главного окна прячет его в трей, музыка играет дальше (по
+    /// умолчанию да). Если трея в системе нет, крестик закрывает программу.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub close_to_tray: Option<bool>,
     /// Качество звука: `lossless`, `normal` или `low`. Неизвестное значение
     /// окно заменяет на `normal`.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
@@ -581,13 +594,19 @@ mod tests {
     #[test]
     fn save_and_load_round_trip() {
         let path = temp_config_path();
-        let mut config = Config::default();
+        let mut config = Config {
+            gpu_render: Some(true),
+            close_to_tray: Some(false),
+            ..Config::default()
+        };
         let (id, created) = config.ensure_device_id();
         assert!(created);
         config.save(&path).unwrap();
 
         let mut loaded = Config::load(&path).unwrap();
         assert_eq!(loaded, config);
+        assert_eq!(loaded.gpu_render, Some(true));
+        assert_eq!(loaded.close_to_tray, Some(false));
         assert_eq!(loaded.ensure_device_id(), (id, false));
         if let Some(dir) = path.parent() {
             let _ = fs::remove_dir_all(dir);
@@ -612,6 +631,9 @@ mod tests {
 accent = 5
 scale = \"big\"
 visualizer = \"yes\"
+gpu_render = 3
+auto_update = \"да\"
+close_to_tray = \"нет\"
 ",
         )
         .unwrap();
@@ -619,6 +641,9 @@ visualizer = \"yes\"
         assert_eq!(config.accent, None);
         assert_eq!(config.scale, None);
         assert_eq!(config.visualizer, None);
+        assert_eq!(config.gpu_render, None);
+        assert_eq!(config.auto_update, None);
+        assert_eq!(config.close_to_tray, None);
         assert_eq!(config.scale_percent(), 100);
     }
 

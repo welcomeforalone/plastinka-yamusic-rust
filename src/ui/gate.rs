@@ -738,6 +738,9 @@ const LICENSES: &[(&str, &str)] = &[
         "mdns-sd, if-addrs — поиск устройств в сети",
         "Apache-2.0 или MIT",
     ),
+    ("tray-icon, muda — значок в трее", "MIT или Apache-2.0"),
+    ("ksni — значок в трее в Linux", "Unlicense"),
+    ("auto-launch — автозапуск", "MIT"),
 ];
 
 fn licenses<'a>() -> Element<'a, Message> {

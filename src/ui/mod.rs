@@ -10,6 +10,8 @@ mod covers;
 mod dark;
 mod drag_pulse;
 mod filter;
+#[cfg(debug_assertions)]
+mod fps;
 mod gate;
 mod heartbeat;
 mod history;
@@ -23,14 +25,16 @@ mod palette;
 mod pause;
 mod pointer;
 mod queue;
+mod render;
 mod scroll;
 mod settings;
 mod theme;
+mod updates;
 mod visualizer;
 mod widgets;
 
 use std::io::Write as _;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use iced::animation::Animation;
@@ -41,7 +45,9 @@ use iced::{Element, Length, Size, Subscription, Task, keyboard};
 use crate::APP_NAME;
 use crate::api::{self, AccountStatus, ApiError, AudioQuality, PlaybackPermit};
 use crate::auth::{self, AuthError, DeviceCode, OAuthApp};
+use crate::autostart;
 use crate::discord;
+use crate::instance;
 use crate::media_controls;
 use crate::net::{self, NetError};
 use crate::player::eq::EqState;
@@ -52,9 +58,34 @@ use crate::storage::{self, AppDirs, StorageError};
 use crate::sync::service::{Service, ServiceConfig};
 use crate::sync::store::{SecretStore, default_device_name};
 use crate::texts::sentence;
+use crate::tray;
+use crate::update;
+
+/// Как запущена программа (флаги командной строки).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Launch {
+    /// `--tray`: окно не открывается, пока его не попросят (значок в трее).
+    pub tray: bool,
+}
+
+/// Параметры запуска: `App::boot` — обычная функция без аргументов.
+static LAUNCH: OnceLock<Launch> = OnceLock::new();
+
+fn launch() -> Launch {
+    LAUNCH.get().copied().unwrap_or_default()
+}
 
 /// Запускает окно. Блокирует поток до закрытия окна.
-pub fn run() -> iced::Result {
+pub fn run(launch: Launch) -> iced::Result {
+    let _ = LAUNCH.set(launch);
+    // Рендер выбирается до запуска iced: см. `render`. Не вышло прочитать
+    // настройку — берём значение по умолчанию (программный рендер).
+    let gpu = AppDirs::discover()
+        .ok()
+        .and_then(|dirs| Config::load(&dirs.config_file()).ok())
+        .and_then(|config| config.gpu_render)
+        .unwrap_or(false);
+    render::choose(gpu);
     // Окон два (главное и мини-плеер), поэтому `daemon`: он не закрывается
     // сам, выход — явный (`iced::exit`) при закрытии главного окна.
     let mut app = iced::daemon(App::boot, App::update, App::view)
@@ -71,20 +102,46 @@ pub fn run() -> iced::Result {
 }
 
 fn window_settings() -> window::Settings {
-    window::Settings {
+    let settings = window::Settings {
         size: Size::new(1280.0, 800.0),
         min_size: Some(Size::new(960.0, 600.0)),
         // Свой заголовок окна: системная рамка не нужна. В macOS наоборот:
         // системная рамка нужна ради кнопок «светофора» (см. `main_platform_specific`).
         decorations: cfg!(target_os = "macos"),
         // Углы в Linux скругляем сами: за ними должно быть видно рабочий стол.
-        transparent: corners::ENABLED,
+        transparent: corners::ENABLED && !render::software(),
         // Закрытие обрабатываем сами: несохранённый токен надо отозвать.
         exit_on_close_request: false,
         icon: app_icon(),
         platform_specific: main_platform_specific(),
         ..window::Settings::default()
+    };
+    #[cfg(debug_assertions)]
+    let settings = test_window(settings);
+    settings
+}
+
+/// Отладочный хук `PLASTINKA_TEST_WINDOW=x,y,ширина,высота` (логические
+/// единицы, только с тестовыми хуками): главное окно сразу открывается в этом
+/// месте и этого размера. Для замеров `bench/tools`: окно за краем экрана не
+/// мелькает и не мешает пользователю.
+#[cfg(debug_assertions)]
+fn test_window(mut settings: window::Settings) -> window::Settings {
+    if !storage::test_hooks_active() {
+        return settings;
     }
+    let Ok(value) = std::env::var("PLASTINKA_TEST_WINDOW") else {
+        return settings;
+    };
+    let numbers: Vec<f32> = value
+        .split(',')
+        .filter_map(|part| part.trim().parse().ok())
+        .collect();
+    if let [x, y, width, height] = numbers.as_slice() {
+        settings.position = window::Position::Specific(iced::Point::new(*x, *y));
+        settings.size = Size::new(*width, *height);
+    }
+    settings
 }
 
 /// Платформенные параметры главного окна. В macOS заголовок системный, но
@@ -131,6 +188,10 @@ pub(crate) fn platform_specific() -> window::settings::PlatformSpecific {
 #[cfg(target_os = "linux")]
 const APP_ID: &str = "plastinka";
 
+/// Период кадров подписки на программном рендере: 30 кадров в секунду.
+const SOFTWARE_FRAME: Duration = Duration::from_millis(33);
+/// Как часто проверять обновления, пока включена автопроверка.
+const UPDATE_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 /// Через сколько повторять запрос, если нет сети.
 const OFFLINE_RETRY: Duration = Duration::from_secs(10);
 /// Сколько показывать «Скопировано» и всплывающее сообщение.
@@ -261,6 +322,12 @@ pub struct Prefs {
     /// Масштаб окна, проценты.
     pub scale: u32,
     pub visualizer: bool,
+    /// Рендер на видеокарте; действует после перезапуска (см. `render`).
+    pub gpu_render: bool,
+    /// Проверять обновления автоматически (по умолчанию нет).
+    pub auto_update: bool,
+    /// Крестик прячет окно в трей (если трей есть).
+    pub close_to_tray: bool,
     /// Качество звука и нормализация громкости (раздел «Звук»).
     pub quality: AudioQuality,
     pub normalize: bool,
@@ -282,6 +349,9 @@ impl Default for Prefs {
             theme_mode: theme::ThemeMode::default(),
             scale: config::SCALE_DEFAULT,
             visualizer: true,
+            gpu_render: false,
+            auto_update: false,
+            close_to_tray: true,
             quality: AudioQuality::default(),
             normalize: false,
             lyrics_lrclib: true,
@@ -312,6 +382,9 @@ impl Prefs {
                 .unwrap_or_default(),
             scale: config.scale_percent(),
             visualizer: config.visualizer.unwrap_or(true),
+            gpu_render: config.gpu_render.unwrap_or(false),
+            auto_update: config.auto_update.unwrap_or(false),
+            close_to_tray: config.close_to_tray.unwrap_or(true),
             quality: config
                 .audio_quality
                 .as_deref()
@@ -354,6 +427,9 @@ impl Prefs {
         config.theme_mode = Some(self.theme_mode.key().to_owned());
         config.scale = Some(i64::from(self.scale));
         config.visualizer = Some(self.visualizer);
+        config.gpu_render = Some(self.gpu_render);
+        config.auto_update = Some(self.auto_update);
+        config.close_to_tray = Some(self.close_to_tray);
         config.audio_quality = Some(self.quality.key().to_owned());
         config.normalize = Some(self.normalize);
         config.lyrics_lrclib = Some(self.lyrics_lrclib);
@@ -411,6 +487,21 @@ pub enum Message {
     NativeHandle(Option<isize>),
     /// Команда системного плеера (медиаклавиши, оверлей, MPRIS).
     Media(media_controls::Command),
+    /// Значок в трее заводится на первом сообщении, уже в цикле окна.
+    /// Номер попытки создать значок (с нуля).
+    TrayInit(u8),
+    /// Щелчок по значку или пункт его меню.
+    Tray(tray::Action),
+    /// Второй запуск программы просит показать окно.
+    ShowRequested,
+    /// Полный выход (в отличие от `CloseWindow`, которое может спрятать окно).
+    Exit,
+    /// Автозапуск: что сказала система, переключатель, итог записи.
+    AutostartLoaded(Result<bool, String>),
+    ToggleAutostart,
+    AutostartSet(bool, Result<(), String>),
+    /// Переключатель «Сворачивать в трей при закрытии».
+    ToggleCloseToTray,
     WindowResized(Size),
     /// Свёрнуто ли окно (`None` — платформа не ответила, считаем «нет»).
     Minimized(Option<bool>),
@@ -422,6 +513,7 @@ pub enum Message {
     ToggleMaximize,
     #[cfg(not(target_os = "macos"))]
     Minimize,
+    /// Кнопка закрытия в заголовке: прячет окно в трей или закрывает программу.
     CloseWindow,
     #[cfg(not(target_os = "macos"))]
     ResizeWindow(window::Direction),
@@ -473,6 +565,19 @@ pub enum Message {
     OpenEqualizer,
     Zoom(Zoom),
     ToggleVisualizer,
+    ToggleGpuRender,
+    /// Автопроверка обновлений: переключатель, таймер и запуск.
+    ToggleAutoUpdate,
+    UpdateAuto,
+    /// Кнопка «Проверить обновления».
+    UpdateCheck,
+    /// Итог проверки; `true` — по кнопке.
+    UpdateChecked(bool, Result<update::Check, String>),
+    /// Кнопка «Обновить»: скачать, сверить и заменить файл.
+    UpdateInstall,
+    UpdateInstalled(Result<update::Installed, String>),
+    /// Кнопка «Перезапустить» после обновления.
+    UpdateRestart,
     /// Качество звука и нормализация громкости (панель «Настройки звука»).
     SetAudioQuality(AudioQuality),
     SetNormalize(bool),
@@ -503,6 +608,11 @@ pub struct App {
     size: Size,
     /// Окно свёрнуто: перерисовки стоят (см. `pause`).
     minimized: bool,
+    /// Главное окно спрятано в трей (его нет на экране). Для перерисовок это
+    /// то же, что свёрнутое окно.
+    hidden: bool,
+    /// Значок в трее; `None` — трея нет или он не создался.
+    tray: Option<tray::Tray>,
     /// Масштаб экрана ОС (DPI) главного окна.
     dpi: f32,
     /// Окно развёрнуто или на весь экран: углы прямые (см. `corners`).
@@ -576,6 +686,8 @@ pub struct App {
     started: Instant,
     now: Instant,
     toast: Option<(String, Instant)>,
+    /// Версия, о которой уже сообщили всплывающим сообщением в этом запуске.
+    update_toasted: Option<String>,
 }
 
 impl App {
@@ -584,11 +696,21 @@ impl App {
             .ok()
             .map(|dirs| dirs.cache_dir().to_path_buf());
         let now = Instant::now();
-        let (main_window, open_main) = window::open(window_settings());
+        // С `--tray` окно не открывается совсем: его покажет значок в трее
+        // (или сразу, если трей не создался, см. `Message::TrayInit`).
+        let start_hidden = launch().tray;
+        let (main_window, open_main) = if start_hidden {
+            (None, Task::none())
+        } else {
+            let (id, open) = window::open(window_settings());
+            (Some(id), open.map(|id| Message::WindowOpened(Some(id))))
+        };
         let app = Self {
-            window: Some(main_window),
+            window: main_window,
             size: window_settings().size,
             minimized: false,
+            hidden: start_hidden,
+            tray: None,
             dpi: 1.0,
             maximized: false,
             fullscreen: false,
@@ -630,9 +752,20 @@ impl App {
             started: now,
             now,
             toast: None,
+            update_toasted: None,
         };
         let task = Task::batch([
-            open_main.map(|id| Message::WindowOpened(Some(id))),
+            // Остаток прошлого обновления (`Plastinka.exe.old`) убираем тихо.
+            Task::perform(
+                storage::blocking(|| {
+                    update::cleanup();
+                    Ok(())
+                }),
+                |_| Message::Noop,
+            ),
+            open_main,
+            Task::done(Message::TrayInit(0)),
+            Task::perform(load_autostart(), Message::AutostartLoaded),
             Task::perform(load_token(), Message::TokenLoaded),
             iced::system::theme().map(Message::SystemTone),
             // Не прочитались настройки — всё по умолчанию.
@@ -703,6 +836,8 @@ impl App {
     /// Обработка сообщения. Сменился экран или раздел — он появляется плавно.
     fn update(&mut self, message: Message) -> Task<Message> {
         self.now = Instant::now();
+        #[cfg(debug_assertions)]
+        fps::message();
         let before = self.page_key();
         // Кадры и секундные тики статус не меняют.
         let discord_relevant = !matches!(
@@ -714,6 +849,7 @@ impl App {
         let task = if discord_relevant {
             self.sync_discord();
             self.sync_media();
+            self.sync_tray();
             Task::batch([task, self.sync_together()])
         } else {
             task
@@ -971,7 +1107,7 @@ impl App {
                 return if self.mini == Some(id) {
                     self.close_mini(false)
                 } else {
-                    self.close()
+                    self.request_close()
                 };
             }
             Message::MiniOpen => return self.open_mini(),
@@ -1029,10 +1165,7 @@ impl App {
             }
             Message::Minimized(state) => {
                 self.minimized = state.unwrap_or(false);
-                // Свёрнутое окно серию дней не отмечает.
-                if let Screen::Main(library) = &mut self.screen {
-                    library.listen_minimized(self.minimized);
-                }
+                self.apply_paused();
             }
             Message::Maximized(maximized) => self.maximized = maximized,
             Message::WindowMode(mode) => self.fullscreen = mode == window::Mode::Fullscreen,
@@ -1044,7 +1177,59 @@ impl App {
             Message::ToggleMaximize => return self.with_window(window::toggle_maximize),
             #[cfg(not(target_os = "macos"))]
             Message::Minimize => return self.with_window(|id| window::minimize(id, true)),
-            Message::CloseWindow => return self.close(),
+            Message::CloseWindow => return self.request_close(),
+            Message::Exit => return self.close(),
+            Message::TrayInit(attempt) => match tray::Tray::create() {
+                Ok(tray) => {
+                    self.tray = Some(tray);
+                    self.settings.tray = true;
+                }
+                // Служба значков может подняться позже: пока окно спрятано,
+                // оно остаётся спрятанным до последней неудачной попытки.
+                Err(err) if err.retry && attempt + 1 < tray::ATTEMPTS => {
+                    return Task::perform(tokio::time::sleep(tray::RETRY_EVERY), move |()| {
+                        Message::TrayInit(attempt + 1)
+                    });
+                }
+                Err(err) => {
+                    // Без трея работаем как раньше: крестик закрывает программу.
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "Предупреждение: значок в трее недоступен: {}",
+                        err.text
+                    );
+                    if self.hidden {
+                        return self.show_window();
+                    }
+                }
+            },
+            Message::Tray(action) => return self.tray_action(action),
+            Message::ShowRequested => return self.show_window(),
+            Message::AutostartLoaded(result) => {
+                self.settings.autostart = result.unwrap_or(false);
+            }
+            Message::ToggleAutostart => {
+                let enable = !self.settings.autostart;
+                // С тестовыми хуками в систему ничего не пишем.
+                if storage::test_hooks_active() {
+                    self.settings.autostart = enable;
+                } else {
+                    return Task::perform(set_autostart(enable), move |result| {
+                        Message::AutostartSet(enable, result)
+                    });
+                }
+            }
+            Message::AutostartSet(enable, result) => match result {
+                Ok(()) => self.settings.autostart = enable,
+                Err(text) => self.show_toast(text),
+            },
+            Message::ToggleCloseToTray => {
+                let prefs = Prefs {
+                    close_to_tray: !self.prefs.close_to_tray,
+                    ..self.prefs
+                };
+                return self.change_prefs(prefs);
+            }
             #[cfg(not(target_os = "macos"))]
             Message::ResizeWindow(direction) => {
                 drag_pulse::start();
@@ -1142,10 +1327,11 @@ impl App {
                 self.sidebar = anim::settled(prefs.sidebar_collapsed, anim::PANEL);
                 self.apply_prefs(prefs);
                 let plugins = self.apply_plugins(plugins);
+                let check = self.auto_update_check();
                 if rescaled {
-                    return Task::batch([plugins, self.refresh_size()]);
+                    return Task::batch([plugins, check, self.refresh_size()]);
                 }
-                return plugins;
+                return Task::batch([plugins, check]);
             }
             Message::SetSyncEnabled(on) => {
                 self.sync_cfg.enabled = Some(on);
@@ -1289,6 +1475,62 @@ impl App {
             Message::ToggleVisualizer => {
                 let prefs = Prefs {
                     visualizer: !self.prefs.visualizer,
+                    ..self.prefs
+                };
+                return self.change_prefs(prefs);
+            }
+            Message::ToggleAutoUpdate => {
+                let prefs = Prefs {
+                    auto_update: !self.prefs.auto_update,
+                    ..self.prefs
+                };
+                let enabled = prefs.auto_update;
+                let save = self.change_prefs(prefs);
+                // Включили — проверяем сразу, а не через 6 часов.
+                return if enabled {
+                    Task::batch([save, self.auto_update_check()])
+                } else {
+                    save
+                };
+            }
+            Message::UpdateAuto => return self.auto_update_check(),
+            Message::UpdateCheck => {
+                if self.settings.update.start_check() {
+                    return Task::perform(check_update(), |result| {
+                        Message::UpdateChecked(true, result)
+                    });
+                }
+            }
+            Message::UpdateChecked(manual, result) => {
+                if let Some(version) = self.settings.update.finish_check(result, manual)
+                    && self.update_toasted.as_deref() != Some(version.as_str())
+                {
+                    self.show_toast(format!(
+                        "Доступна Plastinka {version} — Настройки → О программе"
+                    ));
+                    self.update_toasted = Some(version);
+                }
+            }
+            Message::UpdateInstall => {
+                if let Some(package) = self.settings.update.start_install() {
+                    return Task::perform(install_update(package), Message::UpdateInstalled);
+                }
+            }
+            Message::UpdateInstalled(result) => self.settings.update.installed(result),
+            Message::UpdateRestart => {
+                if let Some(exe) = self.settings.update.restart_target() {
+                    match update::restart(&exe) {
+                        // Обычный выход окна: все сохранения успевают пройти.
+                        Ok(()) => return self.close(),
+                        Err(err) => {
+                            self.show_toast(format!("Не удалось перезапустить: {err}"));
+                        }
+                    }
+                }
+            }
+            Message::ToggleGpuRender => {
+                let prefs = Prefs {
+                    gpu_render: !self.prefs.gpu_render,
                     ..self.prefs
                 };
                 return self.change_prefs(prefs);
@@ -1616,6 +1858,8 @@ impl App {
     /// Закрывает окно. Несохранённый токен сначала отзывается, но не дольше
     /// [`REVOKE_ON_CLOSE`]: без сети окно всё равно закроется.
     fn close(&mut self) -> Task<Message> {
+        // Значок убираем до выхода: иначе Windows оставит его до наведения мыши.
+        self.tray = None;
         // Статус в Discord очищается до закрытия окна и больше не появляется.
         self.discord = None;
         // Время прослушивания: файл небольшой, пишем до выхода синхронно.
@@ -1628,7 +1872,7 @@ impl App {
         // запоминается до выхода.
         if self.mini.take().is_some() {
             // Выходим только после записи: иначе выход оборвёт её.
-            return self.save_prefs().chain(Task::done(Message::CloseWindow));
+            return self.save_prefs().chain(Task::done(Message::Exit));
         }
         self.closing = true;
         let (Some(token), Ok(http)) = (self.unsaved.take(), self.http()) else {
@@ -1638,8 +1882,111 @@ impl App {
             async move {
                 let _ = tokio::time::timeout(REVOKE_ON_CLOSE, revoke(http, token)).await;
             },
-            |()| Message::CloseWindow,
+            |()| Message::Exit,
         )
+    }
+
+    /// Крестик главного окна: с треем и включённой настройкой окно прячется
+    /// (музыка играет), иначе программа закрывается.
+    fn request_close(&mut self) -> Task<Message> {
+        if self.tray.is_some() && self.prefs.close_to_tray && !self.closing {
+            return self.hide_window();
+        }
+        self.close()
+    }
+
+    /// Прячет главное окно в трей. Где окно скрыть нельзя (Wayland), оно
+    /// закрывается совсем и открывается заново при показе.
+    fn hide_window(&mut self) -> Task<Message> {
+        if self.hidden {
+            return Task::none();
+        }
+        self.hidden = true;
+        self.apply_paused();
+        let Some(id) = self.window else {
+            return Task::none();
+        };
+        if tray::hide_by_closing() {
+            self.window = None;
+            window::close(id)
+        } else {
+            window::set_mode(id, window::Mode::Hidden)
+        }
+    }
+
+    /// Показывает главное окно: из трея, из свёрнутого или просто поднимает
+    /// его, если оно на виду.
+    fn show_window(&mut self) -> Task<Message> {
+        let was_hidden = std::mem::replace(&mut self.hidden, false);
+        self.apply_paused();
+        let Some(id) = self.window else {
+            // Последний размер: `self.size` в единицах раскладки, окну нужны
+            // логические единицы, то есть с учётом масштаба программы.
+            let mut settings = window_settings();
+            let scale = self.prefs.scale as f32 / 100.0;
+            let size = Size::new(self.size.width * scale, self.size.height * scale);
+            if size.width.is_finite() && size.height.is_finite() && size.width > 0.0 {
+                settings.size = size;
+            }
+            let (id, open) = window::open(settings);
+            self.window = Some(id);
+            return open.map(|id| Message::WindowOpened(Some(id)));
+        };
+        let mut tasks = Vec::new();
+        if was_hidden {
+            tasks.push(window::set_mode(id, window::Mode::Windowed));
+        }
+        tasks.push(window::minimize(id, false));
+        tasks.push(window::gain_focus(id));
+        Task::batch(tasks)
+    }
+
+    fn tray_action(&mut self, action: tray::Action) -> Task<Message> {
+        use media_controls::Command;
+        match action {
+            tray::Action::Show => self.show_window(),
+            tray::Action::Toggle if self.hidden => self.show_window(),
+            tray::Action::Toggle => self.hide_window(),
+            tray::Action::PlayPause => self.handle(Message::Media(Command::Toggle)),
+            tray::Action::Next => self.handle(Message::Media(Command::Next)),
+            tray::Action::Previous => self.handle(Message::Media(Command::Previous)),
+            tray::Action::Quit => self.close(),
+        }
+    }
+
+    /// Окно не на виду (свёрнуто или в трее): кадры и серия дней стоят.
+    fn paused(&self) -> bool {
+        self.minimized || self.hidden
+    }
+
+    fn apply_paused(&mut self) {
+        let paused = self.paused();
+        #[cfg(debug_assertions)]
+        fps::set_minimized(paused);
+        // Окно не на виду серию дней не отмечает.
+        if let Screen::Main(library) = &mut self.screen {
+            library.listen_minimized(paused);
+        }
+    }
+
+    /// Приводит значок в трее к состоянию окна и плеера.
+    fn sync_tray(&mut self) {
+        let Some(tray) = &mut self.tray else {
+            return;
+        };
+        let mut view = tray::View {
+            hidden: self.hidden,
+            ..tray::View::default()
+        };
+        if let Screen::Main(library) = &self.screen {
+            view.player = true;
+            let state = library.media_state();
+            view.playing = state.playing;
+            if let Some(track) = state.track {
+                view.track = format!("{} — {}", track.artists, track.title);
+            }
+        }
+        tray.apply(&view);
     }
 
     /// Esc: закрыть диалог, иначе меню трека, иначе полноэкранный плеер,
@@ -1661,6 +2008,17 @@ impl App {
             }
         }
         Task::none()
+    }
+
+    /// Автоматическая проверка обновлений: только если она включена и ничего
+    /// другого не идёт. Состояние не трогает, пока не пришёл ответ.
+    fn auto_update_check(&self) -> Task<Message> {
+        if !self.prefs.auto_update || self.settings.update.busy() {
+            return Task::none();
+        }
+        Task::perform(check_update(), |result| {
+            Message::UpdateChecked(false, result)
+        })
     }
 
     fn show_toast(&mut self, text: String) {
@@ -2006,6 +2364,8 @@ impl App {
         // Параметры эквалайзера уходят плееру вместе с громкостью и качеством.
         library.set_equalizer(self.eq.settings);
         library.set_wave_settings(self.wave_settings.clone());
+        // Окно могло остаться в трее: серия дней его не засчитывает.
+        library.listen_minimized(self.paused());
         self.screen = Screen::Main(Box::new(library));
         task.map(Message::Library)
     }
@@ -2061,6 +2421,10 @@ impl App {
                 _ => None,
             }),
         ];
+        // Автопроверка обновлений раз в 6 часов (первая — при запуске).
+        if self.prefs.auto_update {
+            subscriptions.push(iced::time::every(UPDATE_EVERY).map(|_| Message::UpdateAuto));
+        }
         // Положение мини-плеера запоминаем, только пока оно открыто.
         if self.mini.is_some() {
             subscriptions.push(iced::event::listen_with(|event, _, id| match event {
@@ -2081,6 +2445,14 @@ impl App {
         if ticking {
             subscriptions.push(iced::time::every(Duration::from_secs(1)).map(Message::Tick));
         }
+        // На программном рендере кадры гонит подписка: одно сообщение — одна
+        // перерисовка. Пока окно тянут (модальный цикл Windows, подписки
+        // стоят), кадры ведёт `heartbeat`, и вместе они не работают.
+        // Период 33 мс, а не `heartbeat::PERIOD`: таймер iced срабатывает
+        // чуть раньше срока, и с 30 мс кадров выходило около 38 в секунду.
+        if render::software() && !drag_pulse::active() && self.wants_frames() {
+            subscriptions.push(iced::time::every(SOFTWARE_FRAME).map(Message::Frame));
+        }
         // Кадры гонит невидимый виджет `heartbeat` из самой перерисовки (в
         // `decorate`): так анимации и спектр идут и пока окно тянут за
         // заголовок или край, когда таймеры и подписки стоят.
@@ -2100,6 +2472,14 @@ impl App {
                 }),
             );
         }
+        // Второй запуск просит показать окно (только пока мы первый экземпляр).
+        if instance::serving() {
+            subscriptions
+                .push(Subscription::run(instance::requests).map(|()| Message::ShowRequested));
+        }
+        if self.tray.is_some() {
+            subscriptions.push(Subscription::run(tray::actions).map(Message::Tray));
+        }
         if let Some(controls) = &self.media {
             subscriptions.push(
                 Subscription::run_with(controls.events(), |events: &media_controls::Events| {
@@ -2113,7 +2493,7 @@ impl App {
 
     /// Нужны ли кадры: окно не свёрнуто, и что-то движется.
     fn wants_frames(&self) -> bool {
-        !self.minimized && (self.transitioning() || self.animating())
+        !self.paused() && (self.transitioning() || self.animating())
     }
 
     /// Идёт ли то, чему нужны кадры раз в 30 мс: спиннеры, скелетон, спектр.
@@ -2183,7 +2563,7 @@ impl App {
             ))
         });
         // Мини-плеер не разворачивается, масштаба у него нет.
-        let radius = corners::radius(corners::ENABLED, false, false, 1.0);
+        let radius = corners::radius(corners::ENABLED && !render::software(), false, false, 1.0);
         match corners::eraser(radius) {
             Some(eraser) => stack![view, eraser]
                 .width(Length::Fill)
@@ -2274,7 +2654,7 @@ impl App {
         let transitioning = self.transitioning();
         // Свёрнутому окну кадры не нужны (и пауза всё равно их не пропустит).
         let layers = layers.push(heartbeat::heartbeat(
-            self.wants_frames(),
+            self.wants_frames() && (!render::software() || drag_pulse::active()),
             transitioning,
             Message::Frame,
         ));
@@ -2283,7 +2663,12 @@ impl App {
         let layers = layers.push(resize_edges());
         // Скругление углов — поверх всего, мышь не ловит.
         let scale = self.prefs.scale as f32 / 100.0;
-        let radius = corners::radius(corners::ENABLED, self.maximized, self.fullscreen, scale);
+        let radius = corners::radius(
+            corners::ENABLED && !render::software(),
+            self.maximized,
+            self.fullscreen,
+            scale,
+        );
         let layers = match corners::eraser(radius) {
             Some(eraser) => layers.push(eraser),
             None => layers,
@@ -2297,7 +2682,7 @@ impl App {
             layers.into()
         };
         // В свёрнутом окне (клиентская область не 0×0) перерисовку не просим.
-        pause::pause(root, self.minimized)
+        pause::pause(root, self.paused())
     }
 }
 
@@ -2383,7 +2768,36 @@ async fn load_token() -> Result<Option<Arc<StoredToken>>, Failure> {
     .map_err(Failure::from)
 }
 
+/// Включён ли автозапуск в системе. С тестовыми хуками реестр не трогаем.
+async fn load_autostart() -> Result<bool, String> {
+    if storage::test_hooks_active() {
+        return Ok(false);
+    }
+    tokio::task::spawn_blocking(autostart::is_enabled)
+        .await
+        .unwrap_or_else(|_| Err("фоновая операция прервалась".to_owned()))
+}
+
+/// Включает или выключает автозапуск в системе (реестр, файл на диске).
+async fn set_autostart(enable: bool) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || autostart::set_enabled(enable))
+        .await
+        .unwrap_or_else(|_| Err("фоновая операция прервалась".to_owned()))
+}
+
 /// Отзывает токен на сервере. Ошибка не важна: токена на компьютере нет.
+/// Проверка обновлений на GitHub; ошибка — текст для пользователя.
+async fn check_update() -> Result<update::Check, String> {
+    update::check().await.map_err(|err| err.to_string())
+}
+
+/// Скачивание, сверка SHA-256 и замена файла программы.
+async fn install_update(package: update::Package) -> Result<update::Installed, String> {
+    update::install(package)
+        .await
+        .map_err(|err| err.to_string())
+}
+
 async fn revoke(http: reqwest::Client, token: Arc<StoredToken>) {
     let config = load_config().await.unwrap_or_default();
     let app = OAuthApp::from_config(&config);

@@ -684,7 +684,8 @@ fn still_volume(volume: f32) -> Animation<f32> {
 
 /// Отладочный хук `PLASTINKA_TEST_START` (только с тестовыми хуками, один
 /// раз за запуск): сообщения, которые окно получило бы от пользователя.
-/// `liked-wave` — играть «Мне нравится» и открыть «Мою волну»; `wave` —
+/// `play` — играть «Мне нравится» и открыть этот список (замеры
+/// `bench/tools`); `liked-wave` — играть «Мне нравится» и открыть «Мою волну»; `wave` —
 /// запустить «Мою волну»; `lyrics` — играть «Мне нравится» и открыть панель
 /// текста; `queue` — то же с панелью очереди; `fullscreen` — то же с полноэкранным плеером; `wave-menu` —
 /// запустить «Мою волну» и открыть меню её настроек. Ничего не сохраняет.
@@ -696,6 +697,10 @@ fn test_start() -> Vec<Task<Message>> {
         return Vec::new();
     }
     match std::env::var("PLASTINKA_TEST_START").as_deref() {
+        Ok("play") => vec![
+            Task::done(Message::PlayList(ListKey::Liked)),
+            Task::done(Message::Nav(Section::Liked)),
+        ],
         Ok("liked-wave") => vec![
             Task::done(Message::PlayList(ListKey::Liked)),
             Task::done(Message::Nav(Section::Wave)),
@@ -2100,6 +2105,9 @@ impl Library {
                     eq_name: &settings_state.eq_name,
                     width,
                     pixel_scale: self.pixel_scale(prefs),
+                    update: &settings_state.update,
+                    tray: settings_state.tray,
+                    autostart: settings_state.autostart,
                 },
                 settings_state,
                 // Размер окна уже в единицах раскладки (см. `App::refresh_size`).
