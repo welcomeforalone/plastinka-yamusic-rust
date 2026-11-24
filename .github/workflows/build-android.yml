@@ -1,5 +1,10 @@
 name: build-android
 
+# Подписанный release APK. Подпись берётся из секретов репозитория
+# (release.yml передаёт их через `secrets: inherit`). Без секретов сборка
+# останавливается: неподписанный APK в релиз не попадёт.
+# Вызывается из release.yml (workflow_call), по push в main и вручную.
+
 on:
   push:
     branches: [main]
@@ -7,6 +12,21 @@ on:
       - "android/**"
       - ".github/workflows/build-android.yml"
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Коммит или тег для сборки (пусто — текущий)"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  # Открытый отпечаток SHA-256 сертификата подписи APK. При смене ключа
+  # поменять здесь и в docs/RELEASING.md.
+  ANDROID_CERT_SHA256: ef5e8c87698a9fe5533dcda15789227ce6e42acd6c55e1f9c65d3caad1c576fa
 
 jobs:
   android:
@@ -17,6 +37,36 @@ jobs:
         working-directory: android
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Check signing secrets
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          missing=""
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Не заданы секреты репозитория:$missing. Подробности в docs/RELEASING.md."
+            exit 1
+          fi
+
+      - name: Restore keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          path="$RUNNER_TEMP/plastinka-release.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$path"
+          chmod 600 "$path"
+          echo "ANDROID_KEYSTORE_PATH=$path" >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v4
         with:
@@ -26,23 +76,56 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Build release APK
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
           ./gradlew :app:assembleRelease --no-daemon
 
       - name: Verify signature
         run: |
-          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
-          APK="app/build/outputs/apk/release/app-release.apk"
-          "$APKSIGNER" verify --print-certs "$APK" | head -3
+          set -euo pipefail
+          dir=app/build/outputs/apk/release
+          if [ -e "$dir/app-release-unsigned.apk" ]; then
+            echo "::error::Получен неподписанный APK (app-release-unsigned.apk): подпись не применена"
+            exit 1
+          fi
+          apk="$dir/app-release.apk"
+          if [ ! -f "$apk" ]; then
+            echo "::error::Не найден $apk"
+            exit 1
+          fi
+          tools="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          echo "apksigner из $tools"
+          "$tools/apksigner" verify --print-certs "$apk" | tee "$RUNNER_TEMP/certs.txt"
+          # Формат строки зависит от версии apksigner («Signer #1 certificate
+          # SHA-256 digest:» или «V2 Signer: certificate SHA-256 digest:»),
+          # поэтому берём все такие строки. Отпечаток у всех подписей должен
+          # быть один и равен ожидаемому.
+          actual="$(sed -n 's/.*certificate SHA-256 digest: *//p' "$RUNNER_TEMP/certs.txt" | tr 'A-F' 'a-f' | tr -d ': ' | sort -u | paste -sd ' ' -)"
+          if [ "$actual" != "$ANDROID_CERT_SHA256" ]; then
+            echo "::error::Отпечаток сертификата APK не совпал. Ожидался $ANDROID_CERT_SHA256, получен ${actual:-пусто}"
+            exit 1
+          fi
 
-      - name: Rename artifact
+      - name: Package
         run: |
+          set -euo pipefail
           mkdir -p out
           cp app/build/outputs/apk/release/app-release.apk out/plastinka-android.apk
+          cd out
+          sha256sum plastinka-android.apk > plastinka-android.apk.sha256
 
       - uses: actions/upload-artifact@v4
         with:
           name: plastinka-android
-          path: android/out/plastinka-android.apk
+          path: |
+            android/out/plastinka-android.apk
+            android/out/plastinka-android.apk.sha256
           retention-days: 30
+
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/plastinka-release.jks"

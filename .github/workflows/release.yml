@@ -1,0 +1,238 @@
+name: release
+
+# Единый релиз: по тегу vX.Y.Z собираются все четыре платформы, затем
+# создаётся ЧЕРНОВИК релиза со всеми файлами. Публикует черновик человек.
+# Подробности — в docs/RELEASING.md.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Существующий тег vX.Y.Z"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      sha: ${{ steps.meta.outputs.sha }}
+    steps:
+      - name: Check tag format
+        id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$REF_NAME"
+          fi
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Тег «$tag» не подходит под формат vX.Y.Z"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+
+      - name: Check versions
+        id: meta
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+          import tomllib
+
+          tag = os.environ["TAG"]
+          version = tag[1:]
+          errors = []
+
+          def fail(message):
+              errors.append(message)
+              print(f"::error::{message}")
+
+          with open("Cargo.toml", "rb") as f:
+              cargo = tomllib.load(f)
+          cargo_version = cargo.get("package", {}).get("version")
+          if cargo_version != version:
+              fail(f"Cargo.toml: package.version = {cargo_version!r}, а тег требует {version!r}")
+
+          with open("Cargo.lock", "rb") as f:
+              lock = tomllib.load(f)
+          lock_versions = [
+              p.get("version") for p in lock.get("package", []) if p.get("name") == "plastinka"
+          ]
+          if len(lock_versions) != 1:
+              fail(f"Cargo.lock: пакет plastinka найден {len(lock_versions)} раз, ожидался один")
+          elif lock_versions[0] != version:
+              fail(f"Cargo.lock: версия plastinka = {lock_versions[0]!r}, а тег требует {version!r}")
+
+          gradle_path = "android/app/build.gradle.kts"
+          with open(gradle_path, encoding="utf-8") as f:
+              gradle = f.read()
+          name_match = re.search(r'versionName\s*=\s*"([^"]*)"', gradle)
+          if name_match is None:
+              fail(f"{gradle_path}: не найден versionName")
+          elif name_match.group(1) != version:
+              fail(f"{gradle_path}: versionName = {name_match.group(1)!r}, а тег требует {version!r}")
+          code_match = re.search(r"versionCode\s*=\s*(\S+)", gradle)
+          if code_match is None:
+              fail(f"{gradle_path}: не найден versionCode")
+          elif not re.fullmatch(r"[0-9]+", code_match.group(1)) or int(code_match.group(1)) <= 0:
+              fail(f"{gradle_path}: versionCode = {code_match.group(1)!r}, нужно целое число больше нуля")
+
+          if errors:
+              sys.exit(1)
+
+          import subprocess
+
+          sha = subprocess.run(
+              ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+          ).stdout.strip()
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"tag={tag}\n")
+              out.write(f"version={version}\n")
+              out.write(f"sha={sha}\n")
+          print(f"Версия {version}, коммит {sha}")
+          PY
+
+  windows:
+    needs: version
+    uses: ./.github/workflows/build-windows.yml
+    with:
+      ref: ${{ needs.version.outputs.sha }}
+
+  linux:
+    needs: version
+    uses: ./.github/workflows/build-linux.yml
+    with:
+      ref: ${{ needs.version.outputs.sha }}
+
+  macos:
+    needs: version
+    uses: ./.github/workflows/build-macos.yml
+    with:
+      ref: ${{ needs.version.outputs.sha }}
+
+  android:
+    needs: version
+    uses: ./.github/workflows/build-android.yml
+    with:
+      ref: ${{ needs.version.outputs.sha }}
+    secrets: inherit
+
+  release:
+    needs: [version, windows, linux, macos, android]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Check files
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          main="Plastinka.exe plastinka-linux-x86_64.tar.gz plastinka-macos.zip plastinka-android.apk"
+          expected=""
+          for f in $main; do
+            expected="$expected$f"$'\n'"$f.sha256"$'\n'
+          done
+          expected="$(printf '%s' "$expected" | LC_ALL=C sort)"
+          actual="$(find . -type f -printf '%P\n' | LC_ALL=C sort)"
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::Набор файлов в dist не совпал с ожидаемым."
+            echo "Ожидалось:"
+            echo "$expected"
+            echo "Получено:"
+            echo "$actual"
+            exit 1
+          fi
+          for f in $main; do
+            sha256sum -c "$f.sha256"
+          done
+          : > SHA256SUMS.txt
+          for f in $(printf '%s\n' $main | LC_ALL=C sort); do
+            sha256sum "$f" >> SHA256SUMS.txt
+          done
+          cat SHA256SUMS.txt
+
+      - name: Create or update draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/notes.md"
+          cat > "$notes" <<'NOTES'
+          Неофициальный клиент, не связан с ООО «Яндекс». Для прослушивания нужна своя подписка Плюс.
+
+          ## Что нового
+
+          - …
+
+          ## Файлы
+
+          | Файл | Платформа |
+          |---|---|
+          | `Plastinka.exe` | Windows |
+          | `plastinka-linux-x86_64.tar.gz` | Linux x86_64 |
+          | `plastinka-macos.zip` | macOS (Apple Silicon и Intel) |
+          | `plastinka-android.apk` | Android |
+
+          Проверить загрузку: `sha256sum -c SHA256SUMS.txt`.
+          NOTES
+
+          files=(
+            dist/Plastinka.exe dist/Plastinka.exe.sha256
+            dist/plastinka-linux-x86_64.tar.gz dist/plastinka-linux-x86_64.tar.gz.sha256
+            dist/plastinka-macos.zip dist/plastinka-macos.zip.sha256
+            dist/plastinka-android.apk dist/plastinka-android.apk.sha256
+            dist/SHA256SUMS.txt
+          )
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            is_draft="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::Релиз $TAG уже опубликован, файлы не заменяю"
+              exit 1
+            fi
+            gh release upload "$TAG" --clobber --repo "$GITHUB_REPOSITORY" "${files[@]}"
+          else
+            gh release create "$TAG" --draft --verify-tag --repo "$GITHUB_REPOSITORY" \
+              --title "Plastinka $VERSION" --notes-file "$notes" "${files[@]}"
+          fi
+
+          url="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url --jq .url)"
+          {
+            echo "## Черновик релиза Plastinka $VERSION"
+            echo
+            echo "$url"
+          } >> "$GITHUB_STEP_SUMMARY"

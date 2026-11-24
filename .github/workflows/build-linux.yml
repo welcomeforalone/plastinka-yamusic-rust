@@ -3,7 +3,8 @@ name: build-linux
 # Сборка под Linux x86_64. Собираем в Ubuntu 22.04 (glibc 2.35): бинарник с
 # такой glibc запускается почти на любом современном дистрибутиве — Arch,
 # CachyOS, Fedora, Ubuntu 22.04+, Debian 12+, openSUSE и т. д.
-# Ручной запуск с `release_tag` кладёт архив в уже созданный релиз.
+# Вызывается из release.yml (workflow_call), по push в main и вручную.
+# В релиз файлы кладёт только release.yml.
 
 on:
   push:
@@ -16,14 +17,16 @@ on:
       - "packaging/linux/**"
       - ".github/workflows/build-linux.yml"
   workflow_dispatch:
+  workflow_call:
     inputs:
-      release_tag:
-        description: "Тег релиза, куда положить архив (пусто — только артефакт)"
+      ref:
+        description: "Коммит или тег для сборки (пусто — текущий)"
+        type: string
         required: false
         default: ""
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -40,6 +43,8 @@ jobs:
             libasound2-dev
 
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Rust
         run: |
@@ -119,19 +124,3 @@ jobs:
           ./install.sh --uninstall
           test ! -e "$desktop"
           test ! -e "$HOME/.local/bin/Plastinka"
-
-  release:
-    needs: [build, arch-check]
-    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: plastinka-linux-x86_64
-      - name: Upload to release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.release_tag }}
-        run: |
-          gh release upload "$TAG" --clobber --repo "$GITHUB_REPOSITORY" \
-            plastinka-linux-x86_64.tar.gz plastinka-linux-x86_64.tar.gz.sha256
