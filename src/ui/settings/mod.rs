@@ -74,13 +74,14 @@ pub enum Category {
     Plugins,
     Discord,
     Together,
+    Startup,
     Account,
     About,
 }
 
 impl Category {
     /// Разделы в порядке навигации.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Appearance,
         Self::Sound,
         Self::Equalizer,
@@ -88,6 +89,7 @@ impl Category {
         Self::Plugins,
         Self::Discord,
         Self::Together,
+        Self::Startup,
         Self::Account,
         Self::About,
     ];
@@ -101,6 +103,7 @@ impl Category {
             Self::Plugins => "Плагины",
             Self::Discord => "Discord",
             Self::Together => "Слушать вместе",
+            Self::Startup => "Запуск и трей",
             Self::Account => "Аккаунт",
             Self::About => "О программе",
         }
@@ -116,6 +119,7 @@ impl Category {
             Self::Plugins => "Встроенные модули, по умолчанию выключены",
             Self::Discord => "Статус «Слушает» в профиле Discord",
             Self::Together => "Один трек на двух ваших устройствах в одной сети",
+            Self::Startup => "Сворачивание в трей и автозапуск",
             Self::Account => "Профиль и подписка",
             Self::About => "Версия, лицензии, авторство",
         }
@@ -130,6 +134,7 @@ impl Category {
             Self::Plugins => Icon::Plug,
             Self::Discord => Icon::Chat,
             Self::Together => Icon::Devices,
+            Self::Startup => Icon::MiniPlayer,
             Self::Account => Icon::Artist,
             Self::About => Icon::About,
         }
@@ -141,7 +146,7 @@ impl Category {
             Self::Sound | Self::Equalizer | Self::Lyrics => Group::Player,
             Self::Plugins => Group::Extensions,
             Self::Discord | Self::Together => Group::Network,
-            Self::Account | Self::About => Group::System,
+            Self::Startup | Self::Account | Self::About => Group::System,
         }
     }
 }
@@ -153,6 +158,12 @@ pub struct State {
     pub query: String,
     /// Поле имени своего пресета эквалайзера.
     pub eq_name: eq_page::NameField,
+    /// Обновление программы («О программе»).
+    pub update: super::updates::State,
+    /// Значок в трее создан (иначе строки «в трей» неактивны).
+    pub tray: bool,
+    /// Автозапуск включён в системе (в `config.toml` не пишется).
+    pub autostart: bool,
 }
 
 impl Default for State {
@@ -161,6 +172,9 @@ impl Default for State {
             category: Category::Appearance,
             query: String::new(),
             eq_name: eq_page::NameField::default(),
+            update: super::updates::State::default(),
+            tray: false,
+            autostart: false,
         }
     }
 }
@@ -273,6 +287,12 @@ pub struct Ctx<'a> {
     pub width: f32,
     /// Физических пикселей в логическом (для аватара).
     pub pixel_scale: f32,
+    /// Состояние обновления программы.
+    pub update: &'a super::updates::State,
+    /// Значок в трее создан.
+    pub tray: bool,
+    /// Автозапуск включён в системе.
+    pub autostart: bool,
 }
 
 // ------------------------------------------------------------------ поиск
@@ -717,6 +737,9 @@ mod tests {
             theme_mode: theme::ThemeMode::Light,
             scale: 150,
             visualizer: false,
+            gpu_render: true,
+            auto_update: true,
+            close_to_tray: false,
             quality: AudioQuality::Low,
             normalize: true,
             lyrics_lrclib: false,

@@ -65,8 +65,22 @@ pub fn padded_row<'a>(
 
 /// Переключатель настройки в цветах акцента.
 pub fn switch<'a>(on: bool, on_toggle: impl Fn(bool) -> App + 'a) -> Element<'a, App> {
-    toggler(on)
-        .on_toggle(on_toggle)
+    switch_if(on, true, on_toggle)
+}
+
+/// Переключатель, который можно сделать неактивным (без `on_toggle` он серый).
+pub fn switch_if<'a>(
+    on: bool,
+    enabled: bool,
+    on_toggle: impl Fn(bool) -> App + 'a,
+) -> Element<'a, App> {
+    let toggle = toggler(on);
+    let toggle = if enabled {
+        toggle.on_toggle(on_toggle)
+    } else {
+        toggle
+    };
+    toggle
         .size(22)
         .style(|_, status| {
             let (on, hovered) = match status {

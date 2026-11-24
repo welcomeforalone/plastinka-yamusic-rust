@@ -11,6 +11,7 @@ use clap::error::{ContextKind, ErrorKind};
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};
 use plastinka::api::{self, ApiError, Subscription};
 use plastinka::auth::{self, AuthError, OAuthApp};
+use plastinka::instance;
 use plastinka::net::{self, NetError};
 use plastinka::storage::config::Config;
 use plastinka::storage::token::TokenStore;
@@ -86,6 +87,14 @@ struct Cli {
     #[arg(short = 'V', long = "version", action = ArgAction::Version)]
     _version: Option<bool>,
 
+    /// Служебный флаг: программа перезапущена после обновления
+    #[arg(long = "after-update", hide = true)]
+    after_update: bool,
+
+    /// Запустить свёрнутым в трей
+    #[arg(long = "tray")]
+    tray: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -148,7 +157,16 @@ fn main() -> ExitCode {
     };
     // Без команды открывается окно. У iced свой рантайм tokio.
     if cli.command.is_none() {
-        return match plastinka::ui::run() {
+        // Один экземпляр: второй запуск просит первый показать окно и выходит.
+        // Запуск из автозапуска (`--tray`) окно не показывает.
+        // После обновления старый процесс ещё выходит: ждём его блокировку.
+        if instance::claim(cli.after_update) == instance::Claim::Running {
+            if !cli.tray {
+                instance::ask_to_show();
+            }
+            return ExitCode::SUCCESS;
+        }
+        return match plastinka::ui::run(plastinka::ui::Launch { tray: cli.tray }) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 let text = format!("Ошибка: не удалось открыть окно: {err}");

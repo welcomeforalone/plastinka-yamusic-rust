@@ -97,6 +97,12 @@ pub async fn fetch_history(
     http: &reqwest::Client,
     token: &str,
 ) -> Result<Vec<HistoryDay>, ApiError> {
+    // Отладочный хук `PLASTINKA_TEST_CATALOG`: с фальшивым токеном история
+    // пустая, запрос к сервису не идёт (иначе 401 вернул бы окно на вход).
+    #[cfg(debug_assertions)]
+    if super::test_hook("PLASTINKA_TEST_CATALOG", token)?.is_some() {
+        return Ok(Vec::new());
+    }
     let (status, body) = request(http, token).await?;
     let days = parse_history(status, &body)?;
     // Треки без полной модели — одним набором id.

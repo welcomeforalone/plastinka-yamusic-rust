@@ -375,7 +375,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Smooth<'_, Message> {
                 }
             }
             if more {
-                shell.request_redraw();
+                super::heartbeat::next_frame(shell, *now);
             }
         }
     }
