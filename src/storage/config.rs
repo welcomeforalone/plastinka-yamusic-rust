@@ -47,11 +47,11 @@ pub struct Config {
     /// Визуализатор спектра под плеером.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub visualizer: Option<bool>,
-    /// Рендер окна на видеокарте (wgpu). По умолчанию выключен: окно
-    /// рисуется на процессоре (tiny-skia), это легче по памяти. Действует
-    /// после перезапуска.
+    /// Аппаратное ускорение: окно рисуется видеокартой (wgpu). По умолчанию
+    /// включено; выключенное — программный рендер (tiny-skia), легче по памяти.
+    /// Действует после перезапуска.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
-    pub gpu_render: Option<bool>,
+    pub hardware_acceleration: Option<bool>,
     /// Автоматически проверять обновления на GitHub (по умолчанию нет): при
     /// запуске и раз в 6 часов. Скачивает и ставит только кнопка «Обновить».
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
@@ -595,7 +595,7 @@ mod tests {
     fn save_and_load_round_trip() {
         let path = temp_config_path();
         let mut config = Config {
-            gpu_render: Some(true),
+            hardware_acceleration: Some(false),
             close_to_tray: Some(false),
             ..Config::default()
         };
@@ -605,7 +605,7 @@ mod tests {
 
         let mut loaded = Config::load(&path).unwrap();
         assert_eq!(loaded, config);
-        assert_eq!(loaded.gpu_render, Some(true));
+        assert_eq!(loaded.hardware_acceleration, Some(false));
         assert_eq!(loaded.close_to_tray, Some(false));
         assert_eq!(loaded.ensure_device_id(), (id, false));
         if let Some(dir) = path.parent() {
@@ -631,7 +631,7 @@ mod tests {
 accent = 5
 scale = \"big\"
 visualizer = \"yes\"
-gpu_render = 3
+hardware_acceleration = 3
 auto_update = \"да\"
 close_to_tray = \"нет\"
 ",
@@ -641,7 +641,7 @@ close_to_tray = \"нет\"
         assert_eq!(config.accent, None);
         assert_eq!(config.scale, None);
         assert_eq!(config.visualizer, None);
-        assert_eq!(config.gpu_render, None);
+        assert_eq!(config.hardware_acceleration, None);
         assert_eq!(config.auto_update, None);
         assert_eq!(config.close_to_tray, None);
         assert_eq!(config.scale_percent(), 100);

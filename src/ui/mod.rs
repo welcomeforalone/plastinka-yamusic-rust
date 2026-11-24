@@ -79,12 +79,12 @@ fn launch() -> Launch {
 pub fn run(launch: Launch) -> iced::Result {
     let _ = LAUNCH.set(launch);
     // Рендер выбирается до запуска iced: см. `render`. Не вышло прочитать
-    // настройку — берём значение по умолчанию (программный рендер).
+    // настройку — берём значение по умолчанию (аппаратное ускорение).
     let gpu = AppDirs::discover()
         .ok()
         .and_then(|dirs| Config::load(&dirs.config_file()).ok())
-        .and_then(|config| config.gpu_render)
-        .unwrap_or(false);
+        .and_then(|config| config.hardware_acceleration)
+        .unwrap_or(true);
     render::choose(gpu);
     // Окон два (главное и мини-плеер), поэтому `daemon`: он не закрывается
     // сам, выход — явный (`iced::exit`) при закрытии главного окна.
@@ -322,8 +322,8 @@ pub struct Prefs {
     /// Масштаб окна, проценты.
     pub scale: u32,
     pub visualizer: bool,
-    /// Рендер на видеокарте; действует после перезапуска (см. `render`).
-    pub gpu_render: bool,
+    /// Аппаратное ускорение (рендер на видеокарте); действует после перезапуска (см. `render`).
+    pub hardware_acceleration: bool,
     /// Проверять обновления автоматически (по умолчанию нет).
     pub auto_update: bool,
     /// Крестик прячет окно в трей (если трей есть).
@@ -349,7 +349,7 @@ impl Default for Prefs {
             theme_mode: theme::ThemeMode::default(),
             scale: config::SCALE_DEFAULT,
             visualizer: true,
-            gpu_render: false,
+            hardware_acceleration: true,
             auto_update: false,
             close_to_tray: true,
             quality: AudioQuality::default(),
@@ -382,7 +382,7 @@ impl Prefs {
                 .unwrap_or_default(),
             scale: config.scale_percent(),
             visualizer: config.visualizer.unwrap_or(true),
-            gpu_render: config.gpu_render.unwrap_or(false),
+            hardware_acceleration: config.hardware_acceleration.unwrap_or(true),
             auto_update: config.auto_update.unwrap_or(false),
             close_to_tray: config.close_to_tray.unwrap_or(true),
             quality: config
@@ -427,7 +427,7 @@ impl Prefs {
         config.theme_mode = Some(self.theme_mode.key().to_owned());
         config.scale = Some(i64::from(self.scale));
         config.visualizer = Some(self.visualizer);
-        config.gpu_render = Some(self.gpu_render);
+        config.hardware_acceleration = Some(self.hardware_acceleration);
         config.auto_update = Some(self.auto_update);
         config.close_to_tray = Some(self.close_to_tray);
         config.audio_quality = Some(self.quality.key().to_owned());
@@ -565,7 +565,7 @@ pub enum Message {
     OpenEqualizer,
     Zoom(Zoom),
     ToggleVisualizer,
-    ToggleGpuRender,
+    ToggleHardwareAcceleration,
     /// Автопроверка обновлений: переключатель, таймер и запуск.
     ToggleAutoUpdate,
     UpdateAuto,
@@ -1528,9 +1528,9 @@ impl App {
                     }
                 }
             }
-            Message::ToggleGpuRender => {
+            Message::ToggleHardwareAcceleration => {
                 let prefs = Prefs {
-                    gpu_render: !self.prefs.gpu_render,
+                    hardware_acceleration: !self.prefs.hardware_acceleration,
                     ..self.prefs
                 };
                 return self.change_prefs(prefs);
