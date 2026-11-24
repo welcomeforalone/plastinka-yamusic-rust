@@ -48,9 +48,12 @@ impl Pipeline {
                 (bounds.height * transform.sy) as u32,
             ),
         ) {
+            // Plastinka: учитываем сдвиг из `transform`. Области перерисовки
+            // рисуются в свой буфер со сдвигом (см. `Renderer::draw`); без
+            // `tx`/`ty` значок попадал мимо своего места и пропадал.
             pixels.draw_pixmap(
-                (bounds.x * transform.sx) as i32,
-                (bounds.y * transform.sy) as i32,
+                (bounds.x * transform.sx + transform.tx).floor() as i32,
+                (bounds.y * transform.sy + transform.ty).floor() as i32,
                 image,
                 &tiny_skia::PixmapPaint {
                     opacity,
