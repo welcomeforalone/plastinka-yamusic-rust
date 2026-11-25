@@ -642,10 +642,87 @@ impl Control {
             stream: shared.stream(),
             seeks,
         };
-        if self.last_progress.as_ref() != Some(&progress) {
+        if should_send(self.last_progress.as_ref(), &progress) {
             self.last_progress = Some(progress.clone());
             self.emit(progress);
         }
+    }
+}
+
+/// Отправлять ли позицию окну. Окну хватает целых секунд: событие уходит,
+/// когда сменилась секунда позиции или что-то ещё (трек, буферизация, поток,
+/// число перемоток). Так окно без фокуса просыпается раз в секунду, а не
+/// пять раз. Внутри события позиция остаётся точной (с шагом 0,1 с).
+fn should_send(last: Option<&Event>, new: &Event) -> bool {
+    let (
+        Some(Event::Progress {
+            id: last_id,
+            position: last_position,
+            buffering: last_buffering,
+            stream: last_stream,
+            seeks: last_seeks,
+        }),
+        Event::Progress {
+            id,
+            position,
+            buffering,
+            stream,
+            seeks,
+        },
+    ) = (last, new)
+    else {
+        return true;
+    };
+    last_id != id
+        || last_buffering != buffering
+        || last_stream != stream
+        || last_seeks != seeks
+        || last_position.as_secs() != position.as_secs()
+}
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+
+    fn progress(millis: u64, buffering: bool, seeks: u64) -> Event {
+        Event::Progress {
+            id: 1,
+            position: Duration::from_millis(millis),
+            buffering,
+            stream: None,
+            seeks,
+        }
+    }
+
+    #[test]
+    fn progress_is_sent_once_per_second() {
+        let first = progress(1_000, false, 0);
+        assert!(should_send(None, &first));
+        assert!(!should_send(Some(&first), &progress(1_200, false, 0)));
+        assert!(!should_send(Some(&first), &progress(1_900, false, 0)));
+        assert!(should_send(Some(&first), &progress(2_000, false, 0)));
+        // Позиция вернулась назад (например, повтор трека): секунда другая.
+        assert!(should_send(Some(&progress(5_000, false, 0)), &first));
+    }
+
+    #[test]
+    fn other_changes_are_sent_at_once() {
+        let base = progress(1_000, false, 0);
+        assert!(should_send(Some(&base), &progress(1_100, true, 0)));
+        assert!(should_send(Some(&base), &progress(1_100, false, 1)));
+        let mut other = progress(1_100, false, 0);
+        if let Event::Progress { id, .. } = &mut other {
+            *id = 2;
+        }
+        assert!(should_send(Some(&base), &other));
+        let mut stream = progress(1_100, false, 0);
+        if let Event::Progress { stream, .. } = &mut stream {
+            *stream = Some(StreamInfo {
+                codec: Codec::Mp3,
+                kbps: None,
+            });
+        }
+        assert!(should_send(Some(&base), &stream));
     }
 }
 

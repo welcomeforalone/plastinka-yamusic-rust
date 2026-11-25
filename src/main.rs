@@ -11,6 +11,7 @@ use clap::error::{ContextKind, ErrorKind};
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};
 use plastinka::api::{self, ApiError, Subscription};
 use plastinka::auth::{self, AuthError, OAuthApp};
+use plastinka::instance;
 use plastinka::net::{self, NetError};
 use plastinka::storage::config::Config;
 use plastinka::storage::token::TokenStore;
@@ -38,6 +39,27 @@ fn attach_console() {
 /// В отладке и вне Windows своя консоль уже есть.
 #[cfg(not(all(windows, not(debug_assertions))))]
 fn attach_console() {}
+
+/// Подсказка про другой бэкенд wgpu: выбор есть только в Linux (Vulkan и
+/// OpenGL); в Windows собран один DX12, в macOS — Metal.
+#[cfg(all(unix, not(target_os = "macos")))]
+const BACKEND_HINT: &str =
+    "Можно также попробовать другой бэкенд: переменная окружения WGPU_BACKEND=gl (или vulkan). ";
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+const BACKEND_HINT: &str = "";
+
+/// Текст ошибки запуска окна. Рисует только видеокарта (wgpu), запасного
+/// программного рендера нет, поэтому сбой отрисовки объясняем отдельно.
+fn startup_error_text(err: &iced::Error) -> String {
+    match err {
+        iced::Error::GraphicsCreationFailed(reason) => format!(
+            "{}{}Подробности: {reason}",
+            "Ошибка: не удалось запустить отрисовку на видеокарте. Обновите драйвер видеокарты. ",
+            BACKEND_HINT
+        ),
+        other => format!("Ошибка: не удалось открыть окно: {other}"),
+    }
+}
 
 /// Показывает ошибку запуска окна: в релизе под Windows консоли нет, и текст
 /// в stderr пользователь не увидит.
@@ -85,6 +107,14 @@ struct Cli {
     /// Показать версию
     #[arg(short = 'V', long = "version", action = ArgAction::Version)]
     _version: Option<bool>,
+
+    /// Служебный флаг: программа перезапущена после обновления
+    #[arg(long = "after-update", hide = true)]
+    after_update: bool,
+
+    /// Запустить свёрнутым в трей
+    #[arg(long = "tray")]
+    tray: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -148,10 +178,19 @@ fn main() -> ExitCode {
     };
     // Без команды открывается окно. У iced свой рантайм tokio.
     if cli.command.is_none() {
-        return match plastinka::ui::run() {
+        // Один экземпляр: второй запуск просит первый показать окно и выходит.
+        // Запуск из автозапуска (`--tray`) окно не показывает.
+        // После обновления старый процесс ещё выходит: ждём его блокировку.
+        if instance::claim(cli.after_update) == instance::Claim::Running {
+            if !cli.tray {
+                instance::ask_to_show();
+            }
+            return ExitCode::SUCCESS;
+        }
+        return match plastinka::ui::run(plastinka::ui::Launch { tray: cli.tray }) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
-                let text = format!("Ошибка: не удалось открыть окно: {err}");
+                let text = startup_error_text(&err);
                 let _ = writeln!(io::stderr(), "{text}");
                 show_startup_error(&text);
                 ExitCode::FAILURE

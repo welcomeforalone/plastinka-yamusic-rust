@@ -35,7 +35,7 @@ use iced::{Element, Event, Length, Rectangle, Size, Theme, mouse, window};
 
 /// Как часто публиковать кадр, если не нужна плавность по частоте экрана:
 /// спиннерам и спектру хватает 30 в секунду.
-const PERIOD: Duration = Duration::from_millis(30);
+pub const PERIOD: Duration = Duration::from_millis(30);
 
 /// Невидимый виджет. `active` — кадры нужны; `smooth` — на каждой
 /// перерисовке (переходы), а не раз в [`PERIOD`].
@@ -127,9 +127,10 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Heartbeat<'_, Message> 
         _viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_mut::<State>();
+        let smooth = self.smooth;
         let now = match event {
             Event::Window(window::Event::Moved(_) | window::Event::Resized(_)) => {
-                if redraw_on_motion(state.last, Instant::now(), self.active, self.smooth) {
+                if redraw_on_motion(state.last, Instant::now(), self.active, smooth) {
                     shell.request_redraw();
                 }
                 return;
@@ -141,12 +142,12 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Heartbeat<'_, Message> 
             state.last = None;
             return;
         }
-        if due(state.last, *now, self.smooth) {
+        if due(state.last, *now, smooth) {
             state.last = Some(*now);
             shell.publish((self.on_frame)(*now));
         }
         let last = state.last.unwrap_or(*now);
-        match next_redraw(last, self.smooth) {
+        match next_redraw(last, smooth) {
             Redraw::Now => shell.request_redraw(),
             Redraw::At(at) => shell.request_redraw_at(window::RedrawRequest::At(at)),
         }

@@ -11,6 +11,7 @@ use iced::widget::{
 use iced::{Alignment, Border, Element, Length, Padding, Shadow};
 
 use super::anim;
+use super::library;
 use super::scroll;
 
 use super::icons::{Icon, icon, spinner};
@@ -170,8 +171,13 @@ pub const TITLE_BAR_HEIGHT: f32 = 36.0;
 const TRAFFIC_LIGHTS_INSET: f32 = 76.0;
 
 /// Полоса заголовка: тянет окно, двойной клик разворачивает. В macOS своих
-/// кнопок нет: слева системные, поэтому слева отступ.
-pub fn title_bar<'a>(with_brand: bool) -> Element<'a, Message> {
+/// кнопок нет: слева системные, поэтому слева отступ. `center` — подпись по
+/// центру окна (таймер YandexMusicTime): лежит поверх полосы и мышь не
+/// ловит, поэтому перетаскивание и двойной клик работают и под ней.
+pub fn title_bar<'a>(
+    with_brand: bool,
+    center: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
     let brand: Element<'a, Message> = if with_brand {
         row![
             widgets::logo(18.0),
@@ -209,7 +215,14 @@ pub fn title_bar<'a>(with_brand: bool) -> Element<'a, Message> {
         window_button(Icon::WindowMaximize, Message::ToggleMaximize, false),
         window_button(Icon::WindowClose, Message::CloseWindow, true),
     ];
-    bar.height(TITLE_BAR_HEIGHT).into()
+    let bar = bar.height(TITLE_BAR_HEIGHT);
+    match center {
+        Some(center) => iced::widget::stack![bar, center]
+            .width(Length::Fill)
+            .height(TITLE_BAR_HEIGHT)
+            .into(),
+        None => bar.into(),
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -646,12 +659,20 @@ pub fn toast<'a>(text: &'a str, insets: (f32, f32), shown: f32) -> Element<'a, M
 /// Диалог поверх затемнения. Клик мимо карточки закрывает его.
 /// `shown` — доля появления; `interactive: false` — диалог уже закрыт и тает,
 /// клики проходят сквозь него.
-pub fn dialog<'a>(dialog: Dialog, shown: f32, interactive: bool) -> Element<'a, Message> {
+/// `detail` — пояснение с данными для диалога восстановления статистики.
+pub fn dialog<'a>(
+    dialog: Dialog,
+    shown: f32,
+    interactive: bool,
+    detail: &str,
+) -> Element<'a, Message> {
     let body: Element<'a, Message> = match dialog {
         Dialog::Licenses => licenses(),
         Dialog::ConfirmLogout => confirm_logout(),
         Dialog::ConfirmResetSettings => confirm_reset_settings(),
         Dialog::SloplessConsent => slopless_consent(),
+        Dialog::ConfirmListenReset => confirm_listen_reset(),
+        Dialog::ConfirmListenRestore => confirm_listen_restore(detail.to_owned()),
     };
     let close = right(widgets::icon_button(
         Icon::Close,
@@ -710,12 +731,16 @@ const LICENSES: &[(&str, &str)] = &[
     // MPL-2.0: код symphonia не меняем, исходники — github.com/pdeljanov/Symphonia.
     ("symphonia — декодер MP3, FLAC, Ogg, WAV, AAC", "MPL-2.0"),
     ("rfd — окно выбора файла", "MIT"),
+    ("chrono — местное время и дата", "MIT или Apache-2.0"),
     ("rodio, cpal — вывод звука", "MIT или Apache-2.0"),
     ("md-5 — подпись ссылок", "MIT или Apache-2.0"),
     (
         "mdns-sd, if-addrs — поиск устройств в сети",
         "Apache-2.0 или MIT",
     ),
+    ("tray-icon, muda — значок в трее", "MIT или Apache-2.0"),
+    ("ksni — значок в трее в Linux", "Unlicense"),
+    ("auto-launch — автозапуск", "MIT"),
 ];
 
 fn licenses<'a>() -> Element<'a, Message> {
@@ -786,6 +811,64 @@ fn confirm_reset_settings<'a>() -> Element<'a, Message> {
                 None,
                 "Сбросить",
                 Some(Message::Settings(super::settings::Msg::ResetAll))
+            ),
+            widgets::action(Kind::Secondary, None, "Отмена", Some(Message::CloseDialog)),
+        ]
+        .spacing(12),
+    ]
+    .spacing(16)
+    .padding(Padding::default().top(4))
+    .into()
+}
+
+fn confirm_listen_reset<'a>() -> Element<'a, Message> {
+    column![
+        theme::line(
+            "Сбросить время прослушивания?",
+            Style::Title,
+            theme::text_primary()
+        ),
+        theme::label(
+            "Удалится всё накопленное время. Серия дней подряд и рекорд останутся. Отменить сброс нельзя.",
+            Style::Body,
+            theme::text_secondary()
+        ),
+        row![
+            widgets::action(
+                Kind::Danger,
+                None,
+                "Сбросить",
+                Some(Message::Library(library::Message::Listen(
+                    library::ListenMsg::ResetConfirmed
+                )))
+            ),
+            widgets::action(Kind::Secondary, None, "Отмена", Some(Message::CloseDialog)),
+        ]
+        .spacing(12),
+    ]
+    .spacing(16)
+    .padding(Padding::default().top(4))
+    .into()
+}
+
+/// Текст с цифрами копии приходит из окна (`detail`): диалог без данных
+/// внутри (`Dialog` — `Copy`) их не знает.
+fn confirm_listen_restore<'a>(detail: String) -> Element<'a, Message> {
+    column![
+        theme::line(
+            "Восстановить статистику из копии?",
+            Style::Title,
+            theme::text_primary()
+        ),
+        theme::label(detail, Style::Body, theme::text_secondary()),
+        row![
+            widgets::action(
+                Kind::Primary,
+                None,
+                "Восстановить",
+                Some(Message::Library(library::Message::Listen(
+                    library::ListenMsg::RestoreConfirmed
+                )))
             ),
             widgets::action(Kind::Secondary, None, "Отмена", Some(Message::CloseDialog)),
         ]

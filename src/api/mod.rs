@@ -35,6 +35,7 @@ pub use catalog::{
 pub use history::{
     HistoryContext, HistoryDay, HistoryItem, Ymd, day_label, fetch_history, today_utc,
 };
+pub(crate) use history::{civil_from_days, days_from_civil, parse_date};
 pub use lyrics::{LyricsFormat, fetch_lyrics_text};
 pub use play_audio::{PlayReport, Tracker as PlayTracker, new_play_id, send_quietly};
 pub use rotor::{

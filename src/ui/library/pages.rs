@@ -434,6 +434,10 @@ impl Library {
         section: Section,
         http: Option<&reqwest::Client>,
     ) -> Task<Message> {
+        // Без плагина YandexMusicTime экрана «Статистика» нет.
+        if section == Section::Stats && !self.plugins.listen_time {
+            return Task::none();
+        }
         let changed = section != self.section || !self.stack.is_empty();
         self.stack.clear();
         if section != self.section {

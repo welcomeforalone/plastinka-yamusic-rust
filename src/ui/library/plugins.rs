@@ -15,12 +15,13 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Color, Element, Length, Padding, Point, Size, Task};
 
-use super::{App, Effect, Lib, Library, Message};
+use super::{App, Effect, Lib, Library, Message, START_SECTION, Section};
 use crate::api::{self, AlbumCard, ArtistRef, Found, SearchKind, Track};
 use crate::player::{Command, Sound};
 use crate::plugins::fckcensor::{
     self, AlbumPatch, Censor, Decision, ExplicitCache, ListState, Replacement, Replacements,
 };
+use crate::plugins::listen_time::Period;
 use crate::plugins::slopless::{self, Label};
 use crate::plugins::{PluginSettings, copy_name, stale, unix_now};
 use crate::relink::{self, Relinks};
@@ -28,7 +29,7 @@ use crate::texts::{plural, sentence};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::queue::ListKey;
 use crate::ui::settings::Entry;
-use crate::ui::settings::controls::{setting_row, switch};
+use crate::ui::settings::controls::{segments, setting_row, switch};
 use crate::ui::theme::{self, Style};
 use crate::ui::widgets::{self, Kind, Size as ButtonSize};
 use crate::ui::{Dialog, Failure, FailureKind, anim};
@@ -317,6 +318,15 @@ impl Library {
         }
         if !settings.fckcensor {
             self.replace = None;
+        }
+        if before.listen_time != settings.listen_time {
+            tasks.push(self.listen_settings(settings.listen_time));
+        }
+        // Плагин выключили, пока открыта «Статистика»: уходим на раздел по
+        // умолчанию (при скрытом пункте меню экран остаётся доступен).
+        if !settings.listen_time && self.section == Section::Stats {
+            let http = self.http.clone();
+            tasks.push(self.nav(START_SECTION, http.as_ref()));
         }
         Task::batch(tasks)
     }
@@ -1248,7 +1258,129 @@ impl Library {
                 switch(settings.vibe, change(settings, |s, on| s.vibe = on)),
             ),
         ));
+
+        entries.push(self.listen_entry());
         entries
+    }
+
+    /// YandexMusicTime: плагин и подстроки настройки заголовка.
+    fn listen_entry(&self) -> Entry<'_> {
+        let settings = &self.plugins;
+        let hint =
+            "Время прослушивания и серия дней подряд: таймер в заголовке окна и экран «Статистика»";
+        let mut rows = column![setting_row(
+            "YandexMusicTime",
+            hint.to_owned(),
+            switch(
+                settings.listen_time,
+                change(settings, |s, on| s.listen_time = on),
+            ),
+        )];
+        if settings.listen_time {
+            rows = rows.push(sub_row(
+                "Время в заголовке",
+                "По центру заголовка окна".to_owned(),
+                switch(
+                    settings.listen_timer,
+                    change(settings, |s, on| s.listen_timer = on),
+                ),
+            ));
+            if settings.listen_timer {
+                rows = rows.push(self.listen_period_row());
+                rows = rows.push(sub_row(
+                    "Секунды",
+                    "Показывать секунды в таймере".to_owned(),
+                    switch(
+                        settings.listen_seconds,
+                        change(settings, |s, on| s.listen_seconds = on),
+                    ),
+                ));
+            }
+            if settings.listen_timer || settings.listen_streak {
+                rows = rows.push(sub_row(
+                    "Подписи",
+                    "«За день:», «Дней подряд:»".to_owned(),
+                    switch(
+                        settings.listen_label,
+                        change(settings, |s, on| s.listen_label = on),
+                    ),
+                ));
+            }
+            rows = rows.push(sub_row(
+                "Серия дней подряд",
+                "Сколько дней подряд вы открывали приложение. Пропущенный день обнуляет серию; если скрыть её здесь, счёт не сбрасывается"
+                    .to_owned(),
+                switch(
+                    settings.listen_streak,
+                    change(settings, |s, on| s.listen_streak = on),
+                ),
+            ));
+            if settings.listen_streak {
+                rows = rows.push(sub_row(
+                    "Огонёк вместо текста",
+                    "Цвет огонька меняется на 10, 50, 100 днях и на каждой следующей сотне"
+                        .to_owned(),
+                    switch(
+                        settings.listen_flame,
+                        change(settings, |s, on| s.listen_flame = on),
+                    ),
+                ));
+            }
+            rows = rows.push(sub_row(
+                "Пункт «Статистика» в меню",
+                "Экран со временем по периодам и серией".to_owned(),
+                switch(
+                    settings.listen_menu,
+                    change(settings, |s, on| s.listen_menu = on),
+                ),
+            ));
+            rows = rows.push(sub_row(
+                "Экран статистики",
+                "Открывается и при скрытом пункте меню".to_owned(),
+                widgets::action(
+                    Kind::Secondary,
+                    None,
+                    "Открыть",
+                    Some(Lib(Message::Nav(Section::Stats))),
+                ),
+            ));
+        }
+        Entry::new(
+            "YandexMusicTime",
+            hint,
+            "время статистика таймер стрик серия дни подряд огонёк прослушивание",
+            rows.into(),
+        )
+    }
+
+    /// «Что показывать»: сегменты стоят под подписью, а не справа от неё, —
+    /// шесть сегментов не помещаются рядом с текстом в узком окне.
+    fn listen_period_row(&self) -> Element<'_, App> {
+        let base = self.plugins.clone();
+        let choice = segments(
+            Period::ALL
+                .into_iter()
+                .map(|period| (period, period.short())),
+            self.plugins.listen_period,
+            move |period| {
+                App::SetPlugins(PluginSettings {
+                    listen_period: period,
+                    ..base.clone()
+                })
+            },
+        );
+        container(
+            column![
+                theme::line("Что показывать", Style::BodyStrong, theme::text_primary()),
+                choice,
+            ]
+            .spacing(8),
+        )
+        .padding(Padding {
+            left: 20.0,
+            ..Padding::from([16, 0])
+        })
+        .into()
     }
 
     fn censor_status(&self) -> Element<'_, App> {

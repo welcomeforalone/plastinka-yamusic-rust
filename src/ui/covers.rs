@@ -53,11 +53,53 @@ const ALLOWED_HOSTS: [&str; 3] = [
     "t2.genius.com",
 ];
 
+/// Сколько сжатых байт обложек держать в памяти. Около 25 МБ — это больше
+/// тысячи обложек: за день прослушивания в предел не упираемся, но память не
+/// растёт бесконечно. Вытесненная обложка снова берётся из дискового кэша.
+const MAX_CACHED_BYTES: usize = 24 * 1024 * 1024;
+/// Вес неудавшейся обложки в том же счёте байт: записи копеечные, но и их
+/// накопится не бесконечно много.
+const FAILED_WEIGHT: usize = 512;
+
 enum Entry {
     Loading,
-    /// Картинка и когда она пришла: свежая обложка проявляется плавно.
-    Ready(image::Handle, Instant),
-    Failed,
+    /// Картинка, когда она пришла (свежая обложка проявляется плавно), размер
+    /// сжатых байт и номер последнего показа (для вытеснения).
+    Ready {
+        handle: image::Handle,
+        at: Instant,
+        bytes: usize,
+        used: u64,
+    },
+    /// Не вышло загрузить; `used` — номер последнего показа.
+    Failed {
+        used: u64,
+    },
+}
+
+impl Entry {
+    /// Вес записи в общем счёте байт (`Loading` не весит и не вытесняется).
+    fn weight(&self) -> usize {
+        match self {
+            Self::Loading => 0,
+            Self::Ready { bytes, .. } => *bytes,
+            Self::Failed { .. } => FAILED_WEIGHT,
+        }
+    }
+
+    /// Номер последнего показа; у `Loading` его нет: его не вытесняют.
+    fn used(&self) -> Option<u64> {
+        match self {
+            Self::Loading => None,
+            Self::Ready { used, .. } | Self::Failed { used } => Some(*used),
+        }
+    }
+
+    fn touch(&mut self, tick: u64) {
+        if let Self::Ready { used, .. } | Self::Failed { used } = self {
+            *used = tick;
+        }
+    }
 }
 
 /// Размер обложки: маленькая — в строках списка и в плеере, средняя — в
@@ -84,6 +126,13 @@ pub type Key = (Grade, String);
 pub struct Covers {
     cache_dir: Option<PathBuf>,
     entries: HashMap<Key, Entry>,
+    /// Сумма весов `entries` (см. [`Entry::weight`]) и её предел.
+    cached_bytes: usize,
+    max_bytes: usize,
+    /// Номер последнего вызова `show`: свежесть записей для вытеснения.
+    tick: u64,
+    /// Ключи, видимые при последнем `show`: их не вытесняют.
+    visible: HashSet<Key>,
     /// Что видно сейчас и ещё не загружено, по порядку.
     wanted: Vec<Key>,
     /// Когда пришла последняя обложка: пока она проявляется, нужны кадры.
@@ -118,9 +167,17 @@ pub enum Art<'a> {
 
 impl Covers {
     pub fn new(cache_dir: Option<PathBuf>) -> Self {
+        Self::with_limit(cache_dir, MAX_CACHED_BYTES)
+    }
+
+    fn with_limit(cache_dir: Option<PathBuf>, max_bytes: usize) -> Self {
         Self {
             cache_dir: cache_dir.map(|dir| dir.join("covers")),
             entries: HashMap::new(),
+            cached_bytes: 0,
+            max_bytes,
+            tick: 0,
+            visible: HashSet::new(),
             wanted: Vec::new(),
             last_ready: None,
             big: Vec::new(),
@@ -217,11 +274,11 @@ impl Covers {
             return Art::Missing;
         };
         match self.entries.get(&(grade, uri.to_owned())) {
-            Some(Entry::Ready(handle, at)) => {
+            Some(Entry::Ready { handle, at, .. }) => {
                 let age = now.saturating_duration_since(*at).as_secs_f32();
                 Art::Ready(handle, (age / anim::COVER.as_secs_f32()).clamp(0.0, 1.0))
             }
-            Some(Entry::Failed) => Art::Missing,
+            Some(Entry::Failed { .. }) => Art::Missing,
             Some(Entry::Loading) | None => Art::Loading,
         }
     }
@@ -233,13 +290,26 @@ impl Covers {
         visible: impl IntoIterator<Item = (Grade, &'a str)>,
         http: Option<&reqwest::Client>,
     ) -> Task<Message> {
+        self.tick = self.tick.wrapping_add(1);
         let mut seen = HashSet::new();
-        self.wanted = visible
-            .into_iter()
-            .filter(|(grade, uri)| cover_url(uri, grade.size()).is_some())
-            .map(|(grade, uri)| (grade, uri.to_owned()))
-            .filter(|key| !self.entries.contains_key(key) && seen.insert(key.clone()))
-            .collect();
+        let mut wanted = Vec::new();
+        self.visible.clear();
+        for (grade, uri) in visible {
+            if cover_url(uri, grade.size()).is_none() {
+                continue;
+            }
+            let key = (grade, uri.to_owned());
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            // Видимое отмечаем свежим; чего нет (в том числе вытесненное) — просим.
+            match self.entries.get_mut(&key) {
+                Some(entry) => entry.touch(self.tick),
+                None => wanted.push(key.clone()),
+            }
+            self.visible.insert(key);
+        }
+        self.wanted = wanted;
         self.pump(http)
     }
 
@@ -254,12 +324,50 @@ impl Covers {
             Some(bytes) => {
                 let now = Instant::now();
                 self.last_ready = Some(now);
-                Entry::Ready(image::Handle::from_bytes(bytes), now)
+                Entry::Ready {
+                    bytes: bytes.len(),
+                    handle: image::Handle::from_bytes(bytes),
+                    at: now,
+                    used: self.tick,
+                }
             }
-            None => Entry::Failed,
+            None => Entry::Failed { used: self.tick },
         };
-        self.entries.insert(key, entry);
+        self.put(key, entry);
+        self.evict();
         self.pump(http)
+    }
+
+    /// Кладёт запись, поддерживая сумму весов (старая запись того же ключа
+    /// вычитается).
+    fn put(&mut self, key: Key, entry: Entry) {
+        self.cached_bytes = self.cached_bytes.saturating_add(entry.weight());
+        if let Some(old) = self.entries.insert(key, entry) {
+            self.cached_bytes = self.cached_bytes.saturating_sub(old.weight());
+        }
+    }
+
+    /// Пока сумма больше предела, удаляет самые давние готовые записи. Не
+    /// трогает `Loading` и то, что видно сейчас.
+    fn evict(&mut self) {
+        if self.cached_bytes <= self.max_bytes {
+            return;
+        }
+        let mut old: Vec<(u64, Key)> = self
+            .entries
+            .iter()
+            .filter(|(key, _)| !self.visible.contains(*key))
+            .filter_map(|(key, entry)| Some((entry.used()?, key.clone())))
+            .collect();
+        old.sort_by_key(|(used, _)| *used);
+        for (_, key) in old {
+            if self.cached_bytes <= self.max_bytes {
+                break;
+            }
+            if let Some(entry) = self.entries.remove(&key) {
+                self.cached_bytes = self.cached_bytes.saturating_sub(entry.weight());
+            }
+        }
     }
 
     /// Проявляется ли сейчас какая-нибудь обложка.
@@ -280,11 +388,11 @@ impl Covers {
         let free = MAX_IN_FLIGHT
             .saturating_sub(in_flight)
             .min(self.wanted.len());
-        let tasks: Vec<_> = self
-            .wanted
-            .drain(..free)
+        let started: Vec<Key> = self.wanted.drain(..free).collect();
+        let tasks: Vec<_> = started
+            .into_iter()
             .map(|key| {
-                self.entries.insert(key.clone(), Entry::Loading);
+                self.put(key.clone(), Entry::Loading);
                 let http = http.clone();
                 let cache_dir = self.cache_dir.clone();
                 Task::perform(
@@ -572,6 +680,77 @@ fn write_atomically(path: &Path, data: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key(n: u32) -> Key {
+        (Grade::Small, format!("avatars.yandex.net/get-music/{n}/%%"))
+    }
+
+    fn uri(n: u32) -> String {
+        key(n).1
+    }
+
+    /// Показывает обложки `ns` и сразу «загружает» недостающие по 100 байт.
+    fn show_and_load(covers: &mut Covers, ns: &[u32]) {
+        let uris: Vec<String> = ns.iter().map(|n| uri(*n)).collect();
+        let _ = covers.show(uris.iter().map(|uri| (Grade::Small, uri.as_str())), None);
+        for key in std::mem::take(&mut covers.wanted) {
+            let _ = covers.finished(key, Some(vec![0; 100]), None);
+        }
+    }
+
+    fn has(covers: &Covers, n: u32) -> bool {
+        covers.entries.contains_key(&key(n))
+    }
+
+    #[test]
+    fn oldest_cover_is_evicted_first() {
+        let mut covers = Covers::with_limit(None, 250);
+        show_and_load(&mut covers, &[1]);
+        show_and_load(&mut covers, &[2]);
+        show_and_load(&mut covers, &[3]);
+        // 300 байт при пределе 250: ушла самая давняя.
+        assert!(!has(&covers, 1));
+        assert!(has(&covers, 2) && has(&covers, 3));
+        assert_eq!(covers.cached_bytes, 200);
+    }
+
+    #[test]
+    fn visible_and_loading_are_never_evicted() {
+        let mut covers = Covers::with_limit(None, 150);
+        show_and_load(&mut covers, &[1, 2, 3]);
+        // Все три видны: предел превышен, но вытеснять нечего.
+        assert!(has(&covers, 1) && has(&covers, 2) && has(&covers, 3));
+        assert_eq!(covers.cached_bytes, 300);
+        covers.put(key(9), Entry::Loading);
+        show_and_load(&mut covers, &[3]);
+        let _ = covers.finished(key(4), Some(vec![0; 100]), None);
+        assert!(has(&covers, 9));
+        assert!(has(&covers, 3));
+        assert!(!has(&covers, 1) && !has(&covers, 2));
+    }
+
+    #[test]
+    fn reloading_same_key_keeps_sum_correct() {
+        let mut covers = Covers::with_limit(None, 10_000);
+        let _ = covers.finished(key(1), Some(vec![0; 100]), None);
+        let _ = covers.finished(key(1), Some(vec![0; 40]), None);
+        assert_eq!(covers.cached_bytes, 40);
+        let _ = covers.finished(key(1), None, None);
+        assert_eq!(covers.cached_bytes, FAILED_WEIGHT);
+        covers.put(key(1), Entry::Loading);
+        assert_eq!(covers.cached_bytes, 0);
+    }
+
+    #[test]
+    fn evicted_cover_is_wanted_again() {
+        let mut covers = Covers::with_limit(None, 150);
+        show_and_load(&mut covers, &[1]);
+        show_and_load(&mut covers, &[2]);
+        assert!(!has(&covers, 1));
+        let uris = [uri(1)];
+        let _ = covers.show(uris.iter().map(|uri| (Grade::Small, uri.as_str())), None);
+        assert_eq!(covers.wanted, vec![key(1)]);
+    }
 
     fn side_of(handle: Option<&image::Handle>) -> Option<u32> {
         match handle {

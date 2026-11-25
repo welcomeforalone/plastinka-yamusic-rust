@@ -97,6 +97,12 @@ pub async fn fetch_history(
     http: &reqwest::Client,
     token: &str,
 ) -> Result<Vec<HistoryDay>, ApiError> {
+    // Отладочный хук `PLASTINKA_TEST_CATALOG`: с фальшивым токеном история
+    // пустая, запрос к сервису не идёт (иначе 401 вернул бы окно на вход).
+    #[cfg(debug_assertions)]
+    if super::test_hook("PLASTINKA_TEST_CATALOG", token)?.is_some() {
+        return Ok(Vec::new());
+    }
     let (status, body) = request(http, token).await?;
     let days = parse_history(status, &body)?;
     // Треки без полной модели — одним набором id.
@@ -293,7 +299,7 @@ pub fn parse_date(text: &str) -> Option<Ymd> {
 }
 
 /// Номер дня от 1970-01-01 (григорианский календарь).
-fn days_from_civil((year, month, day): Ymd) -> i64 {
+pub(crate) fn days_from_civil((year, month, day): Ymd) -> i64 {
     let y = i64::from(year) - i64::from(month <= 2);
     let era = y.div_euclid(400);
     let yoe = y.rem_euclid(400);
@@ -304,7 +310,7 @@ fn days_from_civil((year, month, day): Ymd) -> i64 {
 }
 
 /// Дата по номеру дня.
-fn civil_from_days(days: i64) -> Ymd {
+pub(crate) fn civil_from_days(days: i64) -> Ymd {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
