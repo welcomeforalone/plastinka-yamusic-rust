@@ -15,7 +15,7 @@
 //! На других платформах модального цикла нет, функции пустые.
 
 #[cfg(windows)]
-pub use imp::{active, set_wanted, set_window, start};
+pub use imp::{set_wanted, set_window, start};
 
 #[cfg(not(windows))]
 pub fn set_window(_hwnd: isize) {}
@@ -25,12 +25,6 @@ pub fn set_wanted(_wanted: bool) {}
 
 #[cfg(not(windows))]
 pub fn start() {}
-
-/// Идёт ли перетаскивание (таймер ещё жив). Вне Windows никогда.
-#[cfg(not(windows))]
-pub fn active() -> bool {
-    false
-}
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
@@ -95,11 +89,6 @@ mod imp {
     /// Нужны ли сейчас кадры (спектр, спиннеры, переходы).
     pub fn set_wanted(wanted: bool) {
         WANTED.store(wanted, Ordering::Relaxed);
-    }
-
-    /// Идёт ли перетаскивание: таймер запущен и ещё не погасил себя.
-    pub fn active() -> bool {
-        TIMER.load(Ordering::Relaxed) != 0
     }
 
     /// Запускает таймер, если он ещё не запущен.

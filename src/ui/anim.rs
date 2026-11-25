@@ -217,7 +217,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for HoverFill<'_, Message> 
         match event {
             Event::Window(window::Event::RedrawRequested(now)) => {
                 if state.animation.is_animating(*now) {
-                    super::heartbeat::next_frame(shell, *now);
+                    shell.request_redraw();
                 }
             }
             Event::Mouse(_) | Event::Window(_) | Event::Touch(_) => {

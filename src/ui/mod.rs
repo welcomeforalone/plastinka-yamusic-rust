@@ -13,6 +13,7 @@ mod filter;
 #[cfg(debug_assertions)]
 mod fps;
 mod gate;
+mod gpu;
 mod heartbeat;
 mod history;
 mod history_store;
@@ -25,7 +26,6 @@ mod palette;
 mod pause;
 mod pointer;
 mod queue;
-mod render;
 mod scroll;
 mod settings;
 mod theme;
@@ -78,14 +78,8 @@ fn launch() -> Launch {
 /// Запускает окно. Блокирует поток до закрытия окна.
 pub fn run(launch: Launch) -> iced::Result {
     let _ = LAUNCH.set(launch);
-    // Рендер выбирается до запуска iced: см. `render`. Не вышло прочитать
-    // настройку — берём значение по умолчанию (аппаратное ускорение).
-    let gpu = AppDirs::discover()
-        .ok()
-        .and_then(|dirs| Config::load(&dirs.config_file()).ok())
-        .and_then(|config| config.hardware_acceleration)
-        .unwrap_or(true);
-    render::choose(gpu);
+    // Какую видеокарту будить — до запуска iced: см. `gpu`.
+    gpu::prefer_low_power();
     // Окон два (главное и мини-плеер), поэтому `daemon`: он не закрывается
     // сам, выход — явный (`iced::exit`) при закрытии главного окна.
     let mut app = iced::daemon(App::boot, App::update, App::view)
@@ -93,8 +87,7 @@ pub fn run(launch: Launch) -> iced::Result {
         .theme(App::theme)
         .scale_factor(App::scale_factor)
         .subscription(App::subscription)
-        .default_font(theme::REGULAR)
-        .antialiasing(true);
+        .default_font(theme::REGULAR);
     for font in theme::FONTS {
         app = app.font(font);
     }
@@ -109,7 +102,7 @@ fn window_settings() -> window::Settings {
         // системная рамка нужна ради кнопок «светофора» (см. `main_platform_specific`).
         decorations: cfg!(target_os = "macos"),
         // Углы в Linux скругляем сами: за ними должно быть видно рабочий стол.
-        transparent: corners::ENABLED && !render::software(),
+        transparent: corners::ENABLED,
         // Закрытие обрабатываем сами: несохранённый токен надо отозвать.
         exit_on_close_request: false,
         icon: app_icon(),
@@ -188,8 +181,6 @@ pub(crate) fn platform_specific() -> window::settings::PlatformSpecific {
 #[cfg(target_os = "linux")]
 const APP_ID: &str = "plastinka";
 
-/// Период кадров подписки на программном рендере: 30 кадров в секунду.
-const SOFTWARE_FRAME: Duration = Duration::from_millis(33);
 /// Как часто проверять обновления, пока включена автопроверка.
 const UPDATE_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 /// Через сколько повторять запрос, если нет сети.
@@ -322,8 +313,6 @@ pub struct Prefs {
     /// Масштаб окна, проценты.
     pub scale: u32,
     pub visualizer: bool,
-    /// Аппаратное ускорение (рендер на видеокарте); действует после перезапуска (см. `render`).
-    pub hardware_acceleration: bool,
     /// Проверять обновления автоматически (по умолчанию нет).
     pub auto_update: bool,
     /// Крестик прячет окно в трей (если трей есть).
@@ -349,7 +338,6 @@ impl Default for Prefs {
             theme_mode: theme::ThemeMode::default(),
             scale: config::SCALE_DEFAULT,
             visualizer: true,
-            hardware_acceleration: true,
             auto_update: false,
             close_to_tray: true,
             quality: AudioQuality::default(),
@@ -382,7 +370,6 @@ impl Prefs {
                 .unwrap_or_default(),
             scale: config.scale_percent(),
             visualizer: config.visualizer.unwrap_or(true),
-            hardware_acceleration: config.hardware_acceleration.unwrap_or(true),
             auto_update: config.auto_update.unwrap_or(false),
             close_to_tray: config.close_to_tray.unwrap_or(true),
             quality: config
@@ -427,7 +414,6 @@ impl Prefs {
         config.theme_mode = Some(self.theme_mode.key().to_owned());
         config.scale = Some(i64::from(self.scale));
         config.visualizer = Some(self.visualizer);
-        config.hardware_acceleration = Some(self.hardware_acceleration);
         config.auto_update = Some(self.auto_update);
         config.close_to_tray = Some(self.close_to_tray);
         config.audio_quality = Some(self.quality.key().to_owned());
@@ -519,6 +505,8 @@ pub enum Message {
     ResizeWindow(window::Direction),
     Tick(Instant),
     Frame(Instant),
+    /// Окно получило (`true`) или потеряло фокус.
+    Focus(window::Id, bool),
     Key(keyboard::Event),
     /// Esc, в том числе когда клавишу уже забрало поле ввода.
     Escape,
@@ -565,7 +553,6 @@ pub enum Message {
     OpenEqualizer,
     Zoom(Zoom),
     ToggleVisualizer,
-    ToggleHardwareAcceleration,
     /// Автопроверка обновлений: переключатель, таймер и запуск.
     ToggleAutoUpdate,
     UpdateAuto,
@@ -611,6 +598,10 @@ pub struct App {
     /// Главное окно спрятано в трей (его нет на экране). Для перерисовок это
     /// то же, что свёрнутое окно.
     hidden: bool,
+    /// Какое окно приложения (главное или мини-плеер) сейчас в фокусе. Сначала
+    /// ни одно: фокус сообщает winit (`Focused`). Без фокуса декоративные
+    /// анимации не рисуются (см. `frames_wanted`).
+    focus: Option<window::Id>,
     /// Значок в трее; `None` — трея нет или он не создался.
     tray: Option<tray::Tray>,
     /// Масштаб экрана ОС (DPI) главного окна.
@@ -710,6 +701,7 @@ impl App {
             size: window_settings().size,
             minimized: false,
             hidden: start_hidden,
+            focus: None,
             tray: None,
             dpi: 1.0,
             maximized: false,
@@ -842,7 +834,7 @@ impl App {
         // Кадры и секундные тики статус не меняют.
         let discord_relevant = !matches!(
             message,
-            Message::Frame(_) | Message::Tick(_) | Message::MiniMoved(..)
+            Message::Frame(_) | Message::Tick(_) | Message::Focus(..) | Message::MiniMoved(..)
         );
         let task = self.handle(message);
         let task = Task::batch([task, self.sync_mini()]);
@@ -1239,11 +1231,20 @@ impl App {
                 self.now = now;
                 return self.tick(now);
             }
+            Message::Focus(id, focused) => {
+                if focused {
+                    self.focus = Some(id);
+                } else if self.focus == Some(id) {
+                    self.focus = None;
+                }
+                self.sync_focus();
+            }
             Message::Frame(now) => {
                 self.now = now;
+                let focused = self.focused();
                 if let Screen::Main(library) = &mut self.screen {
                     return library
-                        .frame(now, self.prefs.visualizer)
+                        .frame(now, self.prefs.visualizer && focused)
                         .map(Message::Library);
                 }
             }
@@ -1527,13 +1528,6 @@ impl App {
                         }
                     }
                 }
-            }
-            Message::ToggleHardwareAcceleration => {
-                let prefs = Prefs {
-                    hardware_acceleration: !self.prefs.hardware_acceleration,
-                    ..self.prefs
-                };
-                return self.change_prefs(prefs);
             }
             Message::PrefsSaved(result) => {
                 self.saving = false;
@@ -1835,6 +1829,11 @@ impl App {
         let Some(id) = self.mini.take() else {
             return Task::none();
         };
+        // Закрытое окно `Unfocused` может не прислать.
+        if self.focus == Some(id) {
+            self.focus = None;
+            self.sync_focus();
+        }
         let restore = self.with_window(|main| {
             if focus {
                 Task::batch([window::minimize(main, false), window::gain_focus(main)])
@@ -1903,6 +1902,10 @@ impl App {
         }
         self.hidden = true;
         self.apply_paused();
+        if self.focus.is_some() && self.focus == self.window {
+            self.focus = None;
+            self.sync_focus();
+        }
         let Some(id) = self.window else {
             return Task::none();
         };
@@ -1957,6 +1960,22 @@ impl App {
     /// Окно не на виду (свёрнуто или в трее): кадры и серия дней стоят.
     fn paused(&self) -> bool {
         self.minimized || self.hidden
+    }
+
+    /// Какое-то окно приложения в фокусе. Не путать с [`Self::paused`]: без
+    /// фокуса окно видно, но декоративные анимации ему не нужны.
+    fn focused(&self) -> bool {
+        self.focus.is_some()
+    }
+
+    /// Окно потеряло фокус: столбики спектра сразу опускаются, чтобы видимое
+    /// окно не показывало застывший спектр.
+    fn sync_focus(&mut self) {
+        if !self.focused()
+            && let Screen::Main(library) = &mut self.screen
+        {
+            library.clear_spectrum();
+        }
     }
 
     fn apply_paused(&mut self) {
@@ -2418,6 +2437,8 @@ impl App {
                 iced::Event::Window(window::Event::Rescaled(dpi)) => {
                     Some(Message::DpiChanged(id, dpi))
                 }
+                iced::Event::Window(window::Event::Focused) => Some(Message::Focus(id, true)),
+                iced::Event::Window(window::Event::Unfocused) => Some(Message::Focus(id, false)),
                 _ => None,
             }),
         ];
@@ -2434,9 +2455,9 @@ impl App {
                 _ => None,
             }));
         }
-        // Пока открыт мини-плеер, секундный тик обновляет его прогресс.
-        let ticking = self.mini.is_some()
-            || self.toast_anim.value()
+        // Прогресс мини-плеера обновляет позиция плеера (раз в секунду), тик ему
+        // не нужен.
+        let ticking = self.toast_anim.value()
             || match &self.screen {
                 Screen::Login(_) => true,
                 Screen::Problem(problem) => problem.retry_at.is_some(),
@@ -2444,14 +2465,6 @@ impl App {
             };
         if ticking {
             subscriptions.push(iced::time::every(Duration::from_secs(1)).map(Message::Tick));
-        }
-        // На программном рендере кадры гонит подписка: одно сообщение — одна
-        // перерисовка. Пока окно тянут (модальный цикл Windows, подписки
-        // стоят), кадры ведёт `heartbeat`, и вместе они не работают.
-        // Период 33 мс, а не `heartbeat::PERIOD`: таймер iced срабатывает
-        // чуть раньше срока, и с 30 мс кадров выходило около 38 в секунду.
-        if render::software() && !drag_pulse::active() && self.wants_frames() {
-            subscriptions.push(iced::time::every(SOFTWARE_FRAME).map(Message::Frame));
         }
         // Кадры гонит невидимый виджет `heartbeat` из самой перерисовки (в
         // `decorate`): так анимации и спектр идут и пока окно тянут за
@@ -2493,10 +2506,17 @@ impl App {
 
     /// Нужны ли кадры: окно не свёрнуто, и что-то движется.
     fn wants_frames(&self) -> bool {
-        !self.paused() && (self.transitioning() || self.animating())
+        frames_wanted(
+            self.paused(),
+            self.focused(),
+            self.transitioning(),
+            self.animating(),
+        )
     }
 
     /// Идёт ли то, чему нужны кадры раз в 30 мс: спиннеры, скелетон, спектр.
+    /// Это декоративные анимации, они бесконечны: без фокуса их не рисуем
+    /// (см. [`frames_wanted`]).
     fn animating(&self) -> bool {
         match &self.screen {
             Screen::Starting | Screen::Checking => true,
@@ -2562,8 +2582,10 @@ impl App {
                 self.now,
             ))
         });
+        // Без фокуса бегущая строка стоит.
+        let view = pause::idle(view, !self.focused());
         // Мини-плеер не разворачивается, масштаба у него нет.
-        let radius = corners::radius(corners::ENABLED && !render::software(), false, false, 1.0);
+        let radius = corners::radius(corners::ENABLED, false, false, 1.0);
         match corners::eraser(radius) {
             Some(eraser) => stack![view, eraser]
                 .width(Length::Fill)
@@ -2654,7 +2676,7 @@ impl App {
         let transitioning = self.transitioning();
         // Свёрнутому окну кадры не нужны (и пауза всё равно их не пропустит).
         let layers = layers.push(heartbeat::heartbeat(
-            self.wants_frames() && (!render::software() || drag_pulse::active()),
+            self.wants_frames(),
             transitioning,
             Message::Frame,
         ));
@@ -2663,12 +2685,7 @@ impl App {
         let layers = layers.push(resize_edges());
         // Скругление углов — поверх всего, мышь не ловит.
         let scale = self.prefs.scale as f32 / 100.0;
-        let radius = corners::radius(
-            corners::ENABLED && !render::software(),
-            self.maximized,
-            self.fullscreen,
-            scale,
-        );
+        let radius = corners::radius(corners::ENABLED, self.maximized, self.fullscreen, scale);
         let layers = match corners::eraser(radius) {
             Some(eraser) => layers.push(eraser),
             None => layers,
@@ -2681,9 +2698,24 @@ impl App {
         } else {
             layers.into()
         };
-        // В свёрнутом окне (клиентская область не 0×0) перерисовку не просим.
-        pause::pause(root, self.paused())
+        // Без фокуса декоративные виджеты не просят кадр сами, но конечные
+        // переходы доигрывают. В свёрнутом окне (клиентская область не 0×0)
+        // перерисовку не просим совсем.
+        let idle = pause::idle(root, is_idle(self.focused(), self.transitioning()));
+        pause::pause(idle, self.paused())
     }
+}
+
+/// Нужны ли кадры. Переходы (страницы, меню, диалоги) конечны и доигрывают
+/// всегда, пока окно не свёрнуто. Декоративные анимации (спектр, спиннеры,
+/// кольца «Моей волны») бесконечны и идут только в фокусе.
+fn frames_wanted(paused: bool, focused: bool, transitioning: bool, animating: bool) -> bool {
+    !paused && (transitioning || (focused && animating))
+}
+
+/// Окно без фокуса и без переходов: виджетам не передаём перерисовки.
+fn is_idle(focused: bool, transitioning: bool) -> bool {
+    !focused && !transitioning
 }
 
 /// Что нужно видам для анимаций в этом кадре.
@@ -2917,5 +2949,32 @@ mod tests {
         };
         assert_eq!(Prefs::from_config(&config).quality, AudioQuality::Normal);
         assert!(!Prefs::from_config(&Config::default()).normalize);
+    }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+
+    #[test]
+    fn decorative_frames_need_focus_transitions_do_not() {
+        // В фокусе: идёт всё.
+        assert!(frames_wanted(false, true, false, true));
+        assert!(frames_wanted(false, true, true, false));
+        // Без фокуса: спектр и спиннеры стоят, переходы доигрывают.
+        assert!(!frames_wanted(false, false, false, true));
+        assert!(frames_wanted(false, false, true, true));
+        // Ничего не движется.
+        assert!(!frames_wanted(false, true, false, false));
+        // Свёрнутое окно не рисуется никогда.
+        assert!(!frames_wanted(true, true, true, true));
+    }
+
+    #[test]
+    fn idle_only_without_focus_and_transitions() {
+        assert!(is_idle(false, false));
+        assert!(!is_idle(false, true));
+        assert!(!is_idle(true, false));
+        assert!(!is_idle(true, true));
     }
 }

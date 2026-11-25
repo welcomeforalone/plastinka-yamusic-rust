@@ -737,7 +737,6 @@ mod tests {
             theme_mode: theme::ThemeMode::Light,
             scale: 150,
             visualizer: false,
-            hardware_acceleration: true,
             auto_update: true,
             close_to_tray: false,
             quality: AudioQuality::Low,

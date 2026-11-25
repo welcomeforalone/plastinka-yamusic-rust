@@ -25,7 +25,21 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.6.7", features = ["derive"] }
 directories = "6.0.0"
 hmac = "0.13"
-iced = { version = "0.14.0", features = ["tokio", "svg", "image-without-codecs", "advanced"] }
+# Рендер только на видеокарте (`wgpu-bare`: без бэкендов wgpu по умолчанию и без
+# программного tiny-skia); исполнитель задач — tokio, без `thread-pool`. Бэкенды wgpu
+# подключены ниже по платформам.
+iced = { version = "0.14.0", default-features = false, features = [
+    "wgpu-bare",
+    "tokio",
+    "svg",
+    "image-without-codecs",
+    "advanced",
+    "crisp",
+    "web-colors",
+    "linux-theme-detection",
+    "x11",
+    "wayland",
+] }
 # Только кодеки для обложек: iced декодирует картинки через этот крейт.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 # Адреса своих сетевых интерфейсов для подключения вручную («Слушать вместе»).
@@ -38,7 +52,9 @@ keyring-core = "1.0.1"
 mdns-sd = { version = "0.22", default-features = false }
 md-5 = "0.11"
 open = "5.4.5"
-reqwest = { version = "0.13", features = ["form", "json"] }
+# Без `charset` из набора по умолчанию: он тянет encoding_rs (таблицы кодировок
+# на сотни КБ), а все ответы — UTF-8. TLS — rustls с aws-lc-rs, как и было.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "system-proxy", "form", "json"] }
 # Системный диалог выбора своего файла (FckCensor).
 rfd = "0.17.2"
 rodio = { version = "0.23", default-features = false, features = ["playback"] }
@@ -53,16 +69,32 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "
 toml = "1.2.0"
 uuid = { version = "1.29.0", features = ["v4"] }
 
+# Релиз: меньше бинарник. LTO на весь граф и одна единица кодогенерации
+# выкидывают неиспользуемый код зависимостей, `strip` убирает таблицу символов.
+# `panic` остаётся `unwind` (решение пользователя): паника в фоновом потоке
+# (сеть, звук) не роняет всё приложение.
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
+# Отладка: в своём коде только номера строк (для бэктрейсов), в зависимостях
+# отладочной информации нет — так `target/` растёт в разы медленнее.
+[profile.dev]
+debug = "line-tables-only"
+
 # В отладочной сборке зависимости (декодер MP3, вывод звука) оптимизируются:
 # без этого они в разы медленнее, и звук может рваться. Свой код — как обычно.
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
 
 [lints.rust]
 # Исключения с `#[allow(unsafe_code)]`: таймер перетаскивания окна в Windows
 # (src/ui/drag_pulse.rs), подключение к консоли терминала в релизе Windows
-# (`attach_console` в src/main.rs) и выбор рендера через переменную окружения
-# (src/ui/render.rs).
+# (`attach_console` в src/main.rs) и выбор видеокарты через переменную окружения
+# (src/ui/gpu.rs).
 unsafe_code = "deny"
 
 # Правило проекта: в рабочем коде ничего не паникует. В тестах разрешено (см. clippy.toml).
@@ -82,6 +114,13 @@ indexing_slicing = "deny"
 string_slice = "deny"
 
 [target."cfg(windows)".dependencies]
+# Бэкенды wgpu (MIT OR Apache-2.0) выбираем сами: iced с `wgpu-bare` их не включает,
+# а `wgpu/default` тянул бы все сразу. Версия та же, что у `iced_wgpu` (27.x), поэтому
+# в сборке одна копия. Windows: только DX12 — wgpu при запуске поднимает драйверы
+# всех собранных бэкендов, и с Vulkan и OpenGL окно занимало на 55 МБ больше
+# памяти (`bench/results/2026-11-25-backends.txt`). Без поддержки DX12 в
+# видеокарте Windows рисует программно (WARP). Linux: Vulkan и OpenGL; macOS: Metal.
+wgpu = { version = "27.0", default-features = false, features = ["dx12"] }
 windows-native-keyring-store = "1.1.0"
 # Системный плеер: медиаклавиши и оверлей Windows (SMTC), MIT.
 souvlaki = { version = "0.9.3", default-features = false }
@@ -105,6 +144,8 @@ winresource = { version = "0.1.34", default-features = false }
 tray-icon = { version = "0.26", default-features = false }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# Linux: Vulkan и OpenGL (подробности у зависимости для Windows выше).
+wgpu = { version = "27.0", default-features = false, features = ["vulkan", "gles"] }
 # В Linux — через ksni (Unlicense): StatusNotifierItem по D-Bus на чистом Rust,
 # без GTK и libappindicator.
 tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
@@ -116,14 +157,9 @@ zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rus
 zbus = "5.15"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# macOS: Metal (подробности у зависимости для Windows выше).
+wgpu = { version = "27.0", default-features = false, features = ["metal"] }
 # Токен в Связке ключей (Keychain).
 apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
 # Системный плеер: медиаклавиши и Now Playing.
 souvlaki = { version = "0.9.3", default-features = false }
-
-# Свой экземпляр программного рендера iced (MIT, `vendor/iced_tiny_skia`):
-# каждая область перерисовки рисуется в буфер своего размера, а не по маске
-# размером со всё окно. Без этого кадр «Моей волны» стоил почти ядро
-# процессора. Что изменено — `vendor/iced_tiny_skia/PLASTINKA.md`.
-[patch.crates-io]
-iced_tiny_skia = { path = "vendor/iced_tiny_skia" }

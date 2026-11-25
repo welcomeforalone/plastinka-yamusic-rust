@@ -1,11 +1,6 @@
 //! Пульс кадров: невидимый виджет, который гонит анимации из самой
 //! перерисовки.
 //!
-//! На программном рендере виджет работает только пока окно тянут (см. выбор в
-//! `App::subscription`): в остальное время кадры гонит подписка, иначе
-//! каждый кадр давал бы две перерисовки (одну от самого виджета, вторую от
-//! сообщения кадра).
-//!
 //! Зачем. Пока пользователь тянет окно за заголовок или за край, Windows
 //! крутит собственный (модальный) цикл, и главный цикл winit стоит: таймеры и
 //! подписки ничего не обновляют, спектр под плеером замирает. Единственное,
@@ -41,38 +36,6 @@ use iced::{Element, Event, Length, Rectangle, Size, Theme, mouse, window};
 /// Как часто публиковать кадр, если не нужна плавность по частоте экрана:
 /// спиннерам и спектру хватает 30 в секунду.
 pub const PERIOD: Duration = Duration::from_millis(30);
-
-/// Просит следующий кадр анимации. На видеокарте — на ближайшей перерисовке,
-/// на программном рендере (tiny-skia) — не раньше чем через [`PERIOD`]: там
-/// каждый кадр стоит процессора, и больше 30 в секунду не рисуем. Для
-/// одиночных просьб на смену состояния (курсор вошёл или вышел) не нужна:
-/// там хватает `shell.request_redraw()`.
-pub fn next_frame<Message>(shell: &mut Shell<'_, Message>, now: Instant) {
-    match frame_redraw(super::render::software(), now) {
-        Redraw::Now => shell.request_redraw(),
-        Redraw::At(at) => shell.request_redraw_at(window::RedrawRequest::At(at)),
-    }
-}
-
-/// Через сколько ждать следующего кадра, если виджет хотел `wait`: на
-/// программном рендере не меньше [`PERIOD`].
-pub fn frame_wait(wait: Duration) -> Duration {
-    throttled_wait(super::render::software(), wait)
-}
-
-/// Выбор срока кадра: видеокарта — сразу, программный рендер — через период.
-fn frame_redraw(software: bool, now: Instant) -> Redraw {
-    if software {
-        Redraw::At(now + PERIOD)
-    } else {
-        Redraw::Now
-    }
-}
-
-/// Ожидание до кадра с учётом рендера (см. [`frame_wait`]).
-fn throttled_wait(software: bool, wait: Duration) -> Duration {
-    if software { wait.max(PERIOD) } else { wait }
-}
 
 /// Невидимый виджет. `active` — кадры нужны; `smooth` — на каждой
 /// перерисовке (переходы), а не раз в [`PERIOD`].
@@ -164,8 +127,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Heartbeat<'_, Message> 
         _viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_mut::<State>();
-        // На программном рендере переходы тоже идут не чаще 30 кадров в секунду.
-        let smooth = self.smooth && !super::render::software();
+        let smooth = self.smooth;
         let now = match event {
             Event::Window(window::Event::Moved(_) | window::Event::Resized(_)) => {
                 if redraw_on_motion(state.last, Instant::now(), self.active, smooth) {
@@ -222,18 +184,6 @@ mod tests {
         let last = Instant::now();
         assert_eq!(next_redraw(last, false), Redraw::At(last + PERIOD));
         assert_eq!(next_redraw(last, true), Redraw::Now);
-    }
-
-    #[test]
-    fn software_render_caps_frames_at_period() {
-        let now = Instant::now();
-        assert_eq!(frame_redraw(false, now), Redraw::Now);
-        assert_eq!(frame_redraw(true, now), Redraw::At(now + PERIOD));
-        let frame = Duration::from_millis(16);
-        assert_eq!(throttled_wait(false, frame), frame);
-        assert_eq!(throttled_wait(true, frame), PERIOD);
-        let long = Duration::from_millis(500);
-        assert_eq!(throttled_wait(true, long), long);
     }
 
     #[test]

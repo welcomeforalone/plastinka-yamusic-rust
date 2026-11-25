@@ -89,7 +89,7 @@ pub fn settings(prefs: &MiniPrefs, pinned: bool) -> window::Settings {
         resizable: false,
         decorations: false,
         // Углы в Linux скругляем сами (см. `corners`).
-        transparent: super::corners::ENABLED && !super::render::software(),
+        transparent: super::corners::ENABLED,
         level: level(pinned),
         // Закрытие обрабатываем сами: вместе с окном нужно вернуть главное.
         exit_on_close_request: false,
@@ -233,10 +233,7 @@ mod tests {
         let s = settings(&MiniPrefs::default(), true);
         assert!(!s.decorations);
         assert!(!s.resizable);
-        assert_eq!(
-            s.transparent,
-            super::super::corners::ENABLED && !super::super::render::software()
-        );
+        assert_eq!(s.transparent, super::super::corners::ENABLED);
         assert_eq!(s.size, TALL);
         assert_eq!(s.level, window::Level::AlwaysOnTop);
         let placed = settings(

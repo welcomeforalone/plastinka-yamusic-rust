@@ -1014,6 +1014,11 @@ impl Library {
             .and_then(|track| track.cover_uri.as_deref())
     }
 
+    /// Столбики спектра сразу опускаются (окно потеряло фокус).
+    pub fn clear_spectrum(&mut self) {
+        self.spectrum.clear();
+    }
+
     /// Нужны ли кадры визуализатору: играет звук или столбики опускаются.
     pub fn visualizing(&self, enabled: bool) -> bool {
         enabled && (self.player.playing || self.spectrum.moving())

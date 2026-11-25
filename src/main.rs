@@ -40,6 +40,27 @@ fn attach_console() {
 #[cfg(not(all(windows, not(debug_assertions))))]
 fn attach_console() {}
 
+/// Подсказка про другой бэкенд wgpu: выбор есть только в Linux (Vulkan и
+/// OpenGL); в Windows собран один DX12, в macOS — Metal.
+#[cfg(all(unix, not(target_os = "macos")))]
+const BACKEND_HINT: &str =
+    "Можно также попробовать другой бэкенд: переменная окружения WGPU_BACKEND=gl (или vulkan). ";
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+const BACKEND_HINT: &str = "";
+
+/// Текст ошибки запуска окна. Рисует только видеокарта (wgpu), запасного
+/// программного рендера нет, поэтому сбой отрисовки объясняем отдельно.
+fn startup_error_text(err: &iced::Error) -> String {
+    match err {
+        iced::Error::GraphicsCreationFailed(reason) => format!(
+            "{}{}Подробности: {reason}",
+            "Ошибка: не удалось запустить отрисовку на видеокарте. Обновите драйвер видеокарты. ",
+            BACKEND_HINT
+        ),
+        other => format!("Ошибка: не удалось открыть окно: {other}"),
+    }
+}
+
 /// Показывает ошибку запуска окна: в релизе под Windows консоли нет, и текст
 /// в stderr пользователь не увидит.
 #[cfg(all(windows, not(debug_assertions)))]
@@ -169,7 +190,7 @@ fn main() -> ExitCode {
         return match plastinka::ui::run(plastinka::ui::Launch { tray: cli.tray }) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
-                let text = format!("Ошибка: не удалось открыть окно: {err}");
+                let text = startup_error_text(&err);
                 let _ = writeln!(io::stderr(), "{text}");
                 show_startup_error(&text);
                 ExitCode::FAILURE

@@ -47,11 +47,6 @@ pub struct Config {
     /// Визуализатор спектра под плеером.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub visualizer: Option<bool>,
-    /// Аппаратное ускорение: окно рисуется видеокартой (wgpu). По умолчанию
-    /// включено; выключенное — программный рендер (tiny-skia), легче по памяти.
-    /// Действует после перезапуска.
-    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
-    pub hardware_acceleration: Option<bool>,
     /// Автоматически проверять обновления на GitHub (по умолчанию нет): при
     /// запуске и раз в 6 часов. Скачивает и ставит только кнопка «Обновить».
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
@@ -595,7 +590,6 @@ mod tests {
     fn save_and_load_round_trip() {
         let path = temp_config_path();
         let mut config = Config {
-            hardware_acceleration: Some(false),
             close_to_tray: Some(false),
             ..Config::default()
         };
@@ -605,7 +599,6 @@ mod tests {
 
         let mut loaded = Config::load(&path).unwrap();
         assert_eq!(loaded, config);
-        assert_eq!(loaded.hardware_acceleration, Some(false));
         assert_eq!(loaded.close_to_tray, Some(false));
         assert_eq!(loaded.ensure_device_id(), (id, false));
         if let Some(dir) = path.parent() {
@@ -631,7 +624,6 @@ mod tests {
 accent = 5
 scale = \"big\"
 visualizer = \"yes\"
-hardware_acceleration = 3
 auto_update = \"да\"
 close_to_tray = \"нет\"
 ",
@@ -641,10 +633,22 @@ close_to_tray = \"нет\"
         assert_eq!(config.accent, None);
         assert_eq!(config.scale, None);
         assert_eq!(config.visualizer, None);
-        assert_eq!(config.hardware_acceleration, None);
         assert_eq!(config.auto_update, None);
         assert_eq!(config.close_to_tray, None);
         assert_eq!(config.scale_percent(), 100);
+    }
+
+    #[test]
+    fn removed_hardware_acceleration_key_is_ignored() {
+        // Настройку убрали вместе с программным рендером: старые конфиги
+        // с этим полем читаются как раньше.
+        let config: Config = toml::from_str(
+            "hardware_acceleration = false
+visualizer = false
+",
+        )
+        .unwrap();
+        assert_eq!(config.visualizer, Some(false));
     }
 
     #[test]

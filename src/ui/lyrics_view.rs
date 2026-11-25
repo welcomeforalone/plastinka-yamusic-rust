@@ -508,8 +508,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LyricsView<'_, Message>
                 let animating = state.moving(now) || state.color_running(now);
                 let playing = self.anchor.is_some_and(|anchor| anchor.playing);
                 let next = position.and_then(|position| until_next(&self.times, position));
-                if let Some(wait) =
-                    next_wake(animating, playing, next).map(super::heartbeat::frame_wait)
+                if let Some(wait) = next_wake(animating, playing, next)
                     && let Some(at) = now.checked_add(wait)
                 {
                     shell.request_redraw_at(window::RedrawRequest::At(at));

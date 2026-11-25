@@ -8,12 +8,24 @@
 //! `paused` не передаёт детям это событие, и никто не просит следующий кадр.
 //! Всё остальное (остальные события, раскладка, состояние, оверлеи) идёт
 //! содержимому как обычно, поэтому прокрутка и фокус не теряются.
+//!
+//! Та же обёртка работает и для окна без фокуса ([`idle`]): декоративные
+//! виджеты (столбики «играет», бегущая строка, курсор поля ввода) сами просят
+//! кадр на каждой перерисовке и без неё бы рисовали окно бесконечно. Но
+//! пока пользователь водит мышью по окну без фокуса, отклик на наведение
+//! нужен, поэтому после последнего ввода перерисовки идут ещё [`GRACE`].
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;
+use iced::advanced::widget::tree;
 use iced::advanced::widget::{self, Tree, Widget};
 use iced::advanced::{Clipboard, Shell, overlay};
+use iced::time::Instant;
 use iced::{Element, Event, Length, Rectangle, Size, Theme, Vector, mouse, window};
+
+/// Сколько после последнего ввода (мышь, касание, клавиатура) окно без фокуса
+/// ещё перерисовывается как обычно: хватает на плавное наведение.
+const GRACE: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// Обёртка: пока `paused`, дети не получают `RedrawRequested`.
 pub fn pause<'a, Message: 'a>(
@@ -23,20 +35,61 @@ pub fn pause<'a, Message: 'a>(
     Element::new(Pause {
         content: content.into(),
         paused,
+        grace: false,
+    })
+}
+
+/// Обёртка для окна без фокуса: пока `idle`, дети не получают
+/// `RedrawRequested`, кроме [`GRACE`] после ввода. В счётчик кадров не входит.
+pub fn idle<'a, Message: 'a>(
+    content: impl Into<Element<'a, Message>>,
+    idle: bool,
+) -> Element<'a, Message> {
+    Element::new(Pause {
+        content: content.into(),
+        paused: idle,
+        grace: true,
     })
 }
 
 struct Pause<'a, Message> {
     content: Element<'a, Message>,
     paused: bool,
+    /// Окно без фокуса: после недавнего ввода перерисовки не прячем.
+    grace: bool,
 }
 
-/// Нужно ли скрыть событие от детей.
-fn swallows(paused: bool, event: &Event) -> bool {
-    paused && matches!(event, Event::Window(window::Event::RedrawRequested(_)))
+/// Состояние обёртки: когда в последний раз был ввод.
+#[derive(Default)]
+struct State {
+    last_input: Option<Instant>,
+}
+
+/// Нужно ли скрыть событие от детей. `recent` — ввод был не раньше [`GRACE`]
+/// назад (учитывается, только если `grace`).
+fn swallows(paused: bool, grace: bool, recent: bool, event: &Event) -> bool {
+    paused
+        && !(grace && recent)
+        && matches!(event, Event::Window(window::Event::RedrawRequested(_)))
+}
+
+/// Ввод, после которого окно без фокуса перерисовывается как обычно.
+fn is_input(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Mouse(_) | Event::Touch(_) | Event::Keyboard(_)
+    )
 }
 
 impl<Message> Widget<Message, Theme, iced::Renderer> for Pause<'_, Message> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<State>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(State::default())
+    }
+
     fn children(&self) -> Vec<Tree> {
         vec![Tree::new(&self.content)]
     }
@@ -77,10 +130,17 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Pause<'_, Message> {
         viewport: &Rectangle,
     ) {
         #[cfg(debug_assertions)]
-        if matches!(event, Event::Window(window::Event::RedrawRequested(_))) {
+        if !self.grace && matches!(event, Event::Window(window::Event::RedrawRequested(_))) {
             super::fps::frame();
         }
-        if swallows(self.paused, event) {
+        let state = tree.state.downcast_mut::<State>();
+        if is_input(event) {
+            state.last_input = Some(Instant::now());
+        }
+        let recent = state
+            .last_input
+            .is_some_and(|at| Instant::now().saturating_duration_since(at) < GRACE);
+        if swallows(self.paused, self.grace, recent, event) {
             return;
         }
         if let Some(child) = tree.children.first_mut() {
@@ -162,9 +222,25 @@ mod tests {
     fn only_redraw_is_swallowed_while_paused() {
         let redraw = Event::Window(window::Event::RedrawRequested(Instant::now()));
         let resized = Event::Window(window::Event::Resized(Size::new(10.0, 10.0)));
-        assert!(swallows(true, &redraw));
-        assert!(!swallows(false, &redraw));
-        assert!(!swallows(true, &resized));
-        assert!(!swallows(true, &Event::Mouse(mouse::Event::CursorLeft)));
+        assert!(swallows(true, false, false, &redraw));
+        assert!(!swallows(false, false, false, &redraw));
+        assert!(!swallows(true, false, false, &resized));
+        assert!(!swallows(
+            true,
+            false,
+            false,
+            &Event::Mouse(mouse::Event::CursorLeft)
+        ));
+    }
+
+    #[test]
+    fn idle_window_redraws_shortly_after_input() {
+        let redraw = Event::Window(window::Event::RedrawRequested(Instant::now()));
+        assert!(swallows(true, true, false, &redraw));
+        assert!(!swallows(true, true, true, &redraw));
+        // Свёрнутому окну ввод ничего не возвращает.
+        assert!(swallows(true, false, true, &redraw));
+        assert!(is_input(&Event::Mouse(mouse::Event::CursorLeft)));
+        assert!(!is_input(&redraw));
     }
 }

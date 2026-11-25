@@ -13,7 +13,6 @@ use crate::storage::config;
 use crate::ui::Message as App;
 use crate::ui::icons::{Icon, icon};
 use crate::ui::library::avatar;
-use crate::ui::render;
 use crate::ui::theme::{self, Style};
 use crate::ui::updates::State as UpdateState;
 use crate::ui::widgets::{self, Kind, Size};
@@ -401,29 +400,6 @@ fn appearance<'a>(prefs: Prefs, palette: &'a palette::State) -> Vec<Entry<'a>> {
             "Спектр звука под плеером".to_owned(),
             "спектр анимация эквалайзер",
             switch(prefs.visualizer, |_| App::ToggleVisualizer),
-        ),
-        item(
-            "Использовать аппаратное ускорение",
-            if prefs.hardware_acceleration != render::boot_acceleration() {
-                concat!(
-                    "Перезапустите Plastinka, чтобы применить. Рисовать окно видеокартой. ",
-                    "Без ускорения меньше памяти (около 100 МБ вместо 300 МБ) — подходит для ",
-                    "слабых ПК, но больше нагрузка на процессор, а оверлеи FPS (RivaTuner и ",
-                    "подобные) работают только с ускорением"
-                )
-            } else {
-                concat!(
-                    "Рисовать окно видеокартой. Без ускорения меньше памяти (около 100 МБ ",
-                    "вместо 300 МБ) — подходит для слабых ПК, но больше нагрузка на процессор, ",
-                    "а оверлеи FPS (RivaTuner и подобные) работают только с ускорением. ",
-                    "Действует после перезапуска"
-                )
-            }
-            .to_owned(),
-            "аппаратное ускорение видеокарта gpu рендер память процессор производительность",
-            switch(prefs.hardware_acceleration, |_| {
-                App::ToggleHardwareAcceleration
-            }),
         ),
     ]
 }
