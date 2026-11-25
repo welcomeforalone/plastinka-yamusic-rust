@@ -169,7 +169,9 @@ class YandexApi(private val http: OkHttpClient) {
     suspend fun setLike(token: String, uid: Long, trackId: String, like: Boolean) {
         withContext(Dispatchers.IO) {
             if (!plausibleId(trackId)) return@withContext
-            val action = if (like) "add" else "remove"
+            // Поле `track-ids` понимают только `add-multiple` и `remove`; у `add` поле
+            // `track-id`, и на `track-ids` он отвечает 400 (как на десктопе).
+            val action = if (like) "add-multiple" else "remove"
             val body = FormBody.Builder().add("track-ids", trackId).build()
             http.newCall(
                 Request.Builder()
