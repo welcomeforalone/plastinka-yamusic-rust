@@ -908,13 +908,16 @@ fn week_row<'a>(row_data: &WeekRow) -> Element<'a, App> {
                 border: Border::default().rounded(4),
                 ..container::Style::default()
             });
-        let rest = Space::new().width(Length::FillPortion(
-            1000_u16.saturating_sub(row_data.permille),
-        ));
-        container(row![fill, rest])
-            .width(Length::Fill)
-            .height(8)
-            .into()
+        // Пустой остаток не добавляем: FillPortion(0) iced считает не
+        // «заливкой», а обычным элементом, и тот забирает всю ширину раньше
+        // полосы — у самого длинного дня полоса пропадала.
+        let rest = 1000_u16.saturating_sub(row_data.permille);
+        let parts = if rest == 0 {
+            row![fill]
+        } else {
+            row![fill, Space::new().width(Length::FillPortion(rest))]
+        };
+        container(parts).width(Length::Fill).height(8).into()
     };
     let line = row![
         container(theme::line(row_data.name, name_style, name_color)).width(120),
