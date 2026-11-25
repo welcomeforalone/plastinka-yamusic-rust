@@ -13,7 +13,11 @@ pub const DEVICE_ID_LEN: usize = 32;
 const MAX_TEXT_CHARS: usize = 512;
 const MAX_ARTISTS: usize = 20;
 const MAX_DURATION_MS: u64 = 86_400_000;
-const COVER_HOSTS: [&str; 2] = ["avatars.yandex.net/", "avatars.mds.yandex.net/"];
+const COVER_HOSTS: [&str; 3] = [
+    "avatars.yandex.net/",
+    "avatars.mds.yandex.net/",
+    "music-avatars.music.yandex.net/",
+];
 
 /// Идентификатор устройства: 32 hex-символа в нижнем регистре.
 pub fn is_device_id(id: &str) -> bool {
@@ -435,6 +439,7 @@ mod tests {
         };
         assert!(take("avatars.yandex.net/a/%%").is_some());
         assert!(take("avatars.mds.yandex.net/a/%%").is_some());
+        assert!(take("music-avatars.music.yandex.net/a/%%").is_some());
         assert_eq!(take("evil.example/avatars.yandex.net/%%"), None);
         assert_eq!(take("avatars.yandex.net.evil.com/a/%%"), None);
         assert_eq!(take("https://avatars.yandex.net/a/%%"), None);

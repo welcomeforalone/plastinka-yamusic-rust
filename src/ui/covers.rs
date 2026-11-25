@@ -45,11 +45,14 @@ const MAX_IN_FLIGHT: usize = 6;
 /// Больше картинка 300×300 не бывает; всё крупнее — не обложка.
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 /// Откуда можно брать обложки.
+/// `music-avatars.music.yandex.net` — с 25.11.2026 сервис отдаёт шаблоны
+/// обложек с этого хоста (картинки те же, что на `avatars.yandex.net`).
 /// `t2.genius.com` — обложки из списка FckCensor (только картинки, те же
 /// ограничения размера).
-const ALLOWED_HOSTS: [&str; 3] = [
+const ALLOWED_HOSTS: [&str; 4] = [
     "avatars.yandex.net",
     "avatars.mds.yandex.net",
+    "music-avatars.music.yandex.net",
     "t2.genius.com",
 ];
 
@@ -841,6 +844,15 @@ mod tests {
         assert_eq!(
             url.as_str(),
             "https://avatars.yandex.net/get-music-content/38044/abc/100x100"
+        );
+        let url = cover_url(
+            "music-avatars.music.yandex.net/get-music-content/38044/abc/%%",
+            SIZE,
+        )
+        .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://music-avatars.music.yandex.net/get-music-content/38044/abc/100x100"
         );
         for bad in [
             "avatars.example/abc/%%",

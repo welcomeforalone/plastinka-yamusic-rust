@@ -63,7 +63,11 @@ object SyncMessages {
     private const val MAX_DURATION_MS = 86_400_000L
     private val ID_RE = Regex("[0-9A-Za-z_-]{1,64}")
     private val DIGITS_RE = Regex("[0-9]{1,20}")
-    private val COVER_HOSTS = listOf("avatars.yandex.net/", "avatars.mds.yandex.net/")
+    private val COVER_HOSTS = listOf(
+        "avatars.yandex.net/",
+        "avatars.mds.yandex.net/",
+        "music-avatars.music.yandex.net/",
+    )
 
     private val json = Json
 

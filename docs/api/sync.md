@@ -228,8 +228,9 @@ AES-256-GCM. Nonce 12 байт: 4 нулевых байта и счётчик к
   `artists` — не больше 20 элементов.
 - `durationMs` — `null` или от 0 до 86 400 000.
 - `coverUri` — `null` или шаблон с `%%` только из видимых символов ASCII
-  (0x21–0x7e), который начинается с `avatars.yandex.net/` или
-  `avatars.mds.yandex.net/`. Иное — считать `null`.
+  (0x21–0x7e), который начинается с `avatars.yandex.net/`,
+  `avatars.mds.yandex.net/` или `music-avatars.music.yandex.net/` (этот хост
+  сервис отдаёт с 25.11.2026). Иное — считать `null`.
 - `available` (по умолчанию `false`) и `artists` (по умолчанию пусто) можно
   не присылать; отправитель присылает всегда.
 - `warning` — `null`, `"explicit"` или `"clean"`.

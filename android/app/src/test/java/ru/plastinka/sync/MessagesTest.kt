@@ -141,6 +141,10 @@ class MessagesTest {
             "avatars.mds.yandex.net/x/%%",
             stateTrack(trackJson(cover = "\"avatars.mds.yandex.net/x/%%\""))?.sourceCoverUri,
         )
+        assertEquals(
+            "music-avatars.music.yandex.net/x/%%",
+            stateTrack(trackJson(cover = "\"music-avatars.music.yandex.net/x/%%\""))?.sourceCoverUri,
+        )
         assertEquals("avatars.yandex.net/x/%%", stateTrack(trackJson())?.sourceCoverUri)
         assertNotNull(stateTrack(trackJson(cover = "null")))
     }

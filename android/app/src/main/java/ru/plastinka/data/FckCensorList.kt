@@ -38,7 +38,12 @@ data class AlbumPatch(
 )
 
 /** Хосты, с которых берутся обложки из списка (как `ALLOWED_HOSTS` на десктопе). */
-private val COVER_HOSTS = setOf("avatars.yandex.net", "avatars.mds.yandex.net", "t2.genius.com")
+private val COVER_HOSTS = setOf(
+    "avatars.yandex.net",
+    "avatars.mds.yandex.net",
+    "music-avatars.music.yandex.net",
+    "t2.genius.com",
+)
 
 /** Разобранный `list_v2.json`: подмены по номерам треков и альбомов и ссылки на звук. */
 class CensorList(

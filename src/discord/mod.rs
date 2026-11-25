@@ -384,7 +384,10 @@ pub fn cover_url(template: &str) -> Option<String> {
         .split(['/', '?', '#'])
         .next()
         .unwrap_or_default();
-    let trusted = matches!(host, "avatars.yandex.net" | "avatars.mds.yandex.net");
+    let trusted = matches!(
+        host,
+        "avatars.yandex.net" | "avatars.mds.yandex.net" | "music-avatars.music.yandex.net"
+    );
     (trusted && url.len() <= URL_LIMIT).then_some(url)
 }
 
@@ -567,6 +570,10 @@ mod tests {
         assert_eq!(
             cover_url("avatars.yandex.net/get-music-content/38044/abc/%%").as_deref(),
             Some("https://avatars.yandex.net/get-music-content/38044/abc/400x400")
+        );
+        assert_eq!(
+            cover_url("music-avatars.music.yandex.net/get-music-content/38044/abc/%%").as_deref(),
+            Some("https://music-avatars.music.yandex.net/get-music-content/38044/abc/400x400")
         );
         assert_eq!(cover_url("avatars.example/abc/%%"), None);
         assert_eq!(cover_url("avatars.yandex.net.evil.example/%%"), None);
