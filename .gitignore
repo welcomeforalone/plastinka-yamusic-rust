@@ -12,3 +12,4 @@
 
 # Сырые замеры `bench/tools/sampler.ps1` (CSV): в репозиторий идут только сводки в bench/results/*.txt
 *.csv
+__pycache__/

@@ -1518,6 +1518,22 @@ cargo fmt --check
 cargo test
 ```
 
+Замеры CPU, памяти и видеопамяти (60 секунд по сценарию, Windows и Linux) и
+сравнение с другими клиентами — `bench/README.md`. Скрипт сам собирает
+последний коммит, запускает программы и кликает по сценарию:
+`python bench	oolsench60.py all`.
+
+Каталог `target` чистится сам: хук `SessionStart` в `.claude/settings.json`
+в начале каждой сессии Claude Code запускает в фоне `tools/clean_target.py`.
+Он срабатывает, только если `target` (или `target` в `.claude/worktrees/*`)
+больше 20 ГБ, и удаляет только то, что не собиралось дольше 3 дней: старые
+копии крейтов (другие хеши того же крейта), старые каталоги `incremental`, а
+если этого мало — промежуточные файлы профилей, где ничего не собиралось 3
+дня (готовый `Plastinka.exe` остаётся). Профиль, где идёт сборка, не
+трогается. Журнал — `target/clean_target.log`. Вручную:
+`python tools/clean_target.py --dry-run` (только показать),
+`--limit-gb 10 --days 1` (свои пороги).
+
 В рабочем коде линты в `Cargo.toml` запрещают всё, что может паниковать:
 `unwrap`, `expect`, `panic!`, `unreachable!`, `println!`/`eprintln!` (вместо них
 `writeln!`), индексацию и срезы (вместо них `get`). В тестах это разрешено
@@ -1607,6 +1623,8 @@ client_secret, как у всех неофициальных клиентов. �
 | `android` | Клиент для Android: данные и API (`data`), сервис воспроизведения, эквалайзер, нормализация и спектр (`playback`), экраны на Compose (`ui`) |
 | `design` | Бриф и материалы дизайна |
 | `packaging/linux` | Ярлык `.desktop` и `install.sh` для Linux-архива |
+| `bench` | Замеры: сценарий на 60 с для Windows и Linux (`tools/bench60.py`), сравнение (`tools/compare.py`), старые скрипты PowerShell, итоги в `results/` |
+| `tools/clean_target.py` | Автоочистка `target` больше 20 ГБ от того, что не собиралось 3 дня |
 | `.github/workflows` | Сборки релизов: Linux (`build-linux.yml`), Windows (`build-windows.yml`), macOS (`build-macos.yml`) |
 
 ## Тестовые сценарии
