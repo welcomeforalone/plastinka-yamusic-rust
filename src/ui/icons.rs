@@ -1,4 +1,4 @@
-//! Иконки Lucide из `design/icons` (ISC), встроены в бинарник.
+//! Иконки Lucide из `assets/icons` (ISC), встроены в бинарник.
 
 use iced::widget::svg::{self, Svg};
 use iced::{Color, Radians};
@@ -18,6 +18,7 @@ pub enum Icon {
     Copy,
     Devices,
     Dislike,
+    Download,
     Empty,
     Equalizer,
     Error,
@@ -74,7 +75,7 @@ impl Icon {
     fn bytes(self) -> &'static [u8] {
         macro_rules! file {
             ($name:literal) => {
-                include_bytes!(concat!("../../design/icons/", $name, ".svg"))
+                include_bytes!(concat!("../../assets/icons/", $name, ".svg"))
             };
         }
         match self {
@@ -90,6 +91,7 @@ impl Icon {
             Self::Copy => file!("copy"),
             Self::Devices => include_bytes!("../../assets/icons/devices.svg"),
             Self::Dislike => file!("dislike"),
+            Self::Download => include_bytes!("../../assets/icons/download.svg"),
             Self::Empty => file!("empty"),
             Self::Equalizer => include_bytes!("../../assets/icons/equalizer.svg"),
             Self::Error => file!("error"),

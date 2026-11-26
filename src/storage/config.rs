@@ -87,6 +87,10 @@ pub struct Config {
     /// (по умолчанию да).
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub lyrics_lrclib: Option<bool>,
+    /// Папка для скачанных треков. Задаёт пользователь при первом «Скачать»;
+    /// по умолчанию нет.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub download_dir: Option<String>,
     /// Выбор в меню «Моей волны» (таблица `[wave_settings]`). Только у нас, в
     /// аккаунт не пишется.
     #[serde(

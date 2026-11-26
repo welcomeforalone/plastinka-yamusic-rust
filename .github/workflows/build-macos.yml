@@ -1,5 +1,9 @@
 name: build-macos
 
+# Универсальный (arm64 + x86_64) бинарник в бандле Plastinka.app с ad-hoc
+# подписью, без нотаризации. Вызывается из release.yml (workflow_call),
+# по push в main и вручную. В релиз файлы кладёт только release.yml.
+
 on:
   push:
     branches: [main]
@@ -8,16 +12,19 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "assets/**"
+      - "packaging/macos/**"
       - ".github/workflows/build-macos.yml"
   workflow_dispatch:
+  workflow_call:
     inputs:
-      release_tag:
-        description: "Тег релиза, куда положить архив (пусто — только артефакт)"
+      ref:
+        description: "Коммит или тег для сборки (пусто — текущий)"
+        type: string
         required: false
         default: ""
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   macos:
@@ -25,6 +32,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -33,53 +42,77 @@ jobs:
       - uses: swatinem/rust-cache@v2
 
       - name: Build aarch64 (Apple Silicon)
-        run: cargo build --release --target aarch64-apple-darwin
+        run: cargo build --release --locked --target aarch64-apple-darwin
 
       - name: Build x86_64 (Intel)
-        continue-on-error: true
         env:
           CMAKE_OSX_ARCHITECTURES: x86_64
-        run: cargo build --release --target x86_64-apple-darwin
+        run: cargo build --release --locked --target x86_64-apple-darwin
 
-      - name: Assemble artifact
+      - name: Universal binary
         run: |
+          set -euo pipefail
           mkdir out
-          if [ -f target/x86_64-apple-darwin/release/Plastinka ]; then
-            lipo -create -output out/Plastinka \
-              target/aarch64-apple-darwin/release/Plastinka \
-              target/x86_64-apple-darwin/release/Plastinka
-            echo "universal=true" >> "$GITHUB_OUTPUT"
-          else
-            cp target/aarch64-apple-darwin/release/Plastinka out/Plastinka
-            echo "universal=false" >> "$GITHUB_OUTPUT"
+          lipo -create -output out/Plastinka \
+            target/aarch64-apple-darwin/release/Plastinka \
+            target/x86_64-apple-darwin/release/Plastinka
+          archs="$(lipo -archs out/Plastinka)"
+          echo "Архитектуры: $archs"
+          for a in arm64 x86_64; do
+            case " $archs " in
+              *" $a "*) ;;
+              *) echo "::error::В универсальном бинарнике нет архитектуры $a (есть: $archs)"; exit 1 ;;
+            esac
+          done
+
+      - name: Assemble Plastinka.app
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "plastinka") | .version')"
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "::error::Не удалось получить версию пакета plastinka"
+            exit 1
           fi
-        id: assemble
+          echo "Версия: $version"
+
+          app=Plastinka.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp out/Plastinka "$app/Contents/MacOS/Plastinka"
+          chmod +x "$app/Contents/MacOS/Plastinka"
+
+          sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          plutil -lint "$app/Contents/Info.plist"
+
+          # Иконка: исходник 256x256, больше не растягиваем.
+          iconset=plastinka.iconset
+          mkdir "$iconset"
+          src=assets/app/plastinka.png
+          sips -z 16 16 "$src" --out "$iconset/icon_16x16.png"
+          sips -z 32 32 "$src" --out "$iconset/icon_16x16@2x.png"
+          sips -z 32 32 "$src" --out "$iconset/icon_32x32.png"
+          sips -z 64 64 "$src" --out "$iconset/icon_32x32@2x.png"
+          sips -z 128 128 "$src" --out "$iconset/icon_128x128.png"
+          sips -z 256 256 "$src" --out "$iconset/icon_128x128@2x.png"
+          sips -z 256 256 "$src" --out "$iconset/icon_256x256.png"
+          iconutil -c icns "$iconset" -o "$app/Contents/Resources/plastinka.icns"
+
+          # Ad-hoc подпись всего бандла (без нотаризации).
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
 
       - name: Smoke test
-        run: out/Plastinka --version
+        run: Plastinka.app/Contents/MacOS/Plastinka --version
 
-      - name: Zip
+      - name: Package
         run: |
-          chmod +x out/Plastinka
-          cd out && zip ../plastinka-macos.zip Plastinka
+          set -euo pipefail
+          ditto -c -k --keepParent Plastinka.app plastinka-macos.zip
+          shasum -a 256 plastinka-macos.zip > plastinka-macos.zip.sha256
 
       - uses: actions/upload-artifact@v4
         with:
           name: plastinka-macos
-          path: plastinka-macos.zip
+          path: |
+            plastinka-macos.zip
+            plastinka-macos.zip.sha256
           retention-days: 30
-
-  release:
-    needs: macos
-    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: plastinka-macos
-      - name: Upload to release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.release_tag }}
-        run: |
-          gh release upload "$TAG" --clobber --repo "$GITHUB_REPOSITORY" plastinka-macos.zip

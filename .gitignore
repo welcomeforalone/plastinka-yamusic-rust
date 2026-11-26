@@ -1,15 +1,15 @@
 /target
 *.pdb
 .env
+__pycache__/
 
-# Личные инструкции для агентов и исходники дизайна: только локально
+# Только локально, в публичный репозиторий не идут: инструкции для агентов,
+# исходники и заметки дизайна, замеры производительности, служебные скрипты
 /CLAUDE.md
 /.claude/
-/design/*.md
-/design/*.figcraft
-/docs/handoff/
 /.mcp.json
-
-# Сырые замеры `bench/tools/sampler.ps1` (CSV): в репозиторий идут только сводки в bench/results/*.txt
-*.csv
-__pycache__/
+/design/
+/docs/handoff/
+/docs/ui/
+/bench/
+/tools/

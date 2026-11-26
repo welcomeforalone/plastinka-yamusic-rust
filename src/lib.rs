@@ -1,11 +1,13 @@
 //! Plastinka — неофициальный десктопный клиент Яндекс Музыки.
 //!
-//! Только потоковое воспроизведение и только при активной подписке Плюс.
+//! Нужна активная подписка Плюс. Треки скачиваются только по явному действию
+//! пользователя в выбранную им папку.
 
 pub mod api;
 pub mod auth;
 pub mod autostart;
 pub mod discord;
+pub mod download;
 pub mod instance;
 pub mod lyrics;
 pub mod media_controls;

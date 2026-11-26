@@ -963,6 +963,15 @@ impl Library {
         let track = &menu.track;
         let shown = self.shown(track);
         let mut items: Vec<Element<'a, App>> = Vec::new();
+        if self.can_download() {
+            items.push(menu_item(
+                Icon::Download,
+                "Скачать".to_owned(),
+                Lib(Message::Download(super::downloads::Msg::Track(
+                    track.clone(),
+                ))),
+            ));
+        }
         if self.plugins.copy_name {
             items.push(menu_item(
                 Icon::Copy,

@@ -3,3 +3,6 @@ build/
 local.properties
 *.log
 .cxx/
+keystore.properties
+*.jks
+*.keystore

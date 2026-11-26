@@ -731,6 +731,7 @@ const LICENSES: &[(&str, &str)] = &[
     // MPL-2.0: код symphonia не меняем, исходники — github.com/pdeljanov/Symphonia.
     ("symphonia — декодер MP3, FLAC, Ogg, WAV, AAC", "MPL-2.0"),
     ("rfd — окно выбора файла", "MIT"),
+    ("lofty — теги скачанных файлов", "MIT или Apache-2.0"),
     ("chrono — местное время и дата", "MIT или Apache-2.0"),
     ("rodio, cpal — вывод звука", "MIT или Apache-2.0"),
     ("md-5 — подпись ссылок", "MIT или Apache-2.0"),

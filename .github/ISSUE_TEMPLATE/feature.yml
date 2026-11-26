@@ -1,0 +1,24 @@
+name: Идея
+description: Предложить новую возможность или улучшение
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: Что хочется
+      description: Опишите возможность и зачем она вам
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Где
+      multiple: true
+      options:
+        - Десктоп (Windows, Linux, macOS)
+        - Android
+  - type: textarea
+    id: example
+    attributes:
+      label: Как это сделано в других клиентах
+      description: Если видели такое в официальном клиенте или где-то ещё, опишите или приложите скриншот

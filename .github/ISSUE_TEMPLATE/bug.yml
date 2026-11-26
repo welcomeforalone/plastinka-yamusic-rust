@@ -1,0 +1,55 @@
+name: Ошибка
+description: Что-то работает не так, как должно
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо, что сообщаете! Не прикладывайте токен Яндекса, `config.toml` целиком и логи, где может быть токен.
+        Уязвимость — не сюда, а приватно: вкладка Security → Report a vulnerability.
+  - type: input
+    id: version
+    attributes:
+      label: Версия Plastinka
+      description: «Настройки → О программе» или `Plastinka --version`
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Система
+      options:
+        - Windows 11
+        - Windows 10
+        - Linux
+        - macOS
+        - Android
+    validations:
+      required: true
+  - type: input
+    id: platform-details
+    attributes:
+      label: Подробнее о системе
+      description: Дистрибутив и окружение (KDE, GNOME, Wayland или X11), модель телефона и версия Android
+      placeholder: CachyOS, KDE Plasma 6, Wayland
+  - type: textarea
+    id: what
+    attributes:
+      label: Что случилось
+      description: Что вы делали, что ожидали и что произошло
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Как повторить
+      placeholder: |
+        1. Открыть «Мою волну»
+        2. Нажать «Следующий» три раза
+        3. ...
+  - type: textarea
+    id: extra
+    attributes:
+      label: Скриншоты, текст ошибки
+      description: Можно перетащить картинку прямо сюда

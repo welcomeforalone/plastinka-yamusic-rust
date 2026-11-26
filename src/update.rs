@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use crate::net::{self, NetError};
 
 /// Репозиторий с релизами. Его могут переименовать: строка живёт только здесь.
-pub const UPDATE_REPO: &str = "welcomeforalone/yandex-music-rust";
+pub const UPDATE_REPO: &str = "welcomeforalone/plastinka";
 
 /// Версия этой сборки.
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -608,7 +608,7 @@ mod tests {
     const SAMPLE: &str = r#"{
         "tag_name": "v0.0.6",
         "name": "Версия 0.0.6",
-        "html_url": "https://github.com/welcomeforalone/yandex-music-rust/releases/tag/v0.0.6",
+        "html_url": "https://github.com/welcomeforalone/plastinka/releases/tag/v0.0.6",
         "draft": false,
         "prerelease": false,
         "assets": [

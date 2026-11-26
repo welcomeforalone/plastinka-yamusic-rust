@@ -455,7 +455,7 @@ fn prepare_big(bytes: Vec<u8>) -> Option<Big> {
 }
 
 /// Адрес картинки размера `size` из шаблона, только на разрешённых хостах.
-fn cover_url(template: &str, size: &str) -> Option<Url> {
+pub(crate) fn cover_url(template: &str, size: &str) -> Option<Url> {
     if !template.contains("%%") {
         return None;
     }
