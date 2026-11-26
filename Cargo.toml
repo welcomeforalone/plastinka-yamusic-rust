@@ -4,7 +4,7 @@ version = "0.0.6"
 edition = "2024"
 description = "Неофициальный клиент Яндекс Музыки для Windows, Linux и macOS"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/welcomeforalone/plastinka"
+repository = "https://github.com/welcomeforalone/plastinka-yamusic-rust"
 publish = false
 
 # Исполняемый файл называется с большой буквы (Plastinka.exe), пакет и библиотека — plastinka.

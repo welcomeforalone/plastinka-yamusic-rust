@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Вопрос или обсуждение
-    url: https://github.com/welcomeforalone/plastinka/discussions
+    url: https://github.com/welcomeforalone/plastinka-yamusic-rust/discussions
     about: Как что-то настроить, идеи на обсуждение, показать свою тему
   - name: Уязвимость
-    url: https://github.com/welcomeforalone/plastinka/security/advisories/new
+    url: https://github.com/welcomeforalone/plastinka-yamusic-rust/security/advisories/new
     about: Сообщить приватно, не в открытом issue

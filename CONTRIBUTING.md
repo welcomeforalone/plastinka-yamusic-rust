@@ -5,11 +5,11 @@
 
 ## Сообщить об ошибке или предложить идею
 
-- Ошибка — [новый issue](https://github.com/welcomeforalone/plastinka/issues/new/choose)
+- Ошибка — [новый issue](https://github.com/welcomeforalone/plastinka-yamusic-rust/issues/new/choose)
   по шаблону «Ошибка». Укажите версию (`Plastinka --version` или «Настройки →
   О программе»), систему и шаги.
 - Идея — шаблон «Идея» или раздел
-  [Discussions](https://github.com/welcomeforalone/plastinka/discussions).
+  [Discussions](https://github.com/welcomeforalone/plastinka-yamusic-rust/discussions).
 - Уязвимость — только приватно, см. [SECURITY.md](SECURITY.md).
 
 Никогда не прикладывайте токен Яндекса, `config.toml` целиком и логи, где

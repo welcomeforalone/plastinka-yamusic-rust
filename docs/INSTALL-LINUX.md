@@ -14,7 +14,7 @@ Arch, CachyOS, Manjaro, Fedora 36+, openSUSE, Ubuntu 22.04+, Debian 12+ и др�
 mkdir -p ~/plastinka-install
 cd ~/plastinka-install
 rm -rf plastinka-linux-x86_64 plastinka-linux-x86_64.tar.gz
-curl -fLO https://github.com/welcomeforalone/plastinka/releases/latest/download/plastinka-linux-x86_64.tar.gz
+curl -fLO https://github.com/welcomeforalone/plastinka-yamusic-rust/releases/latest/download/plastinka-linux-x86_64.tar.gz
 tar -xzf plastinka-linux-x86_64.tar.gz
 cd plastinka-linux-x86_64
 sh install.sh
@@ -33,7 +33,7 @@ sh install.sh
 каталоге до распаковки):
 
 ```sh
-curl -fLO https://github.com/welcomeforalone/plastinka/releases/latest/download/plastinka-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/welcomeforalone/plastinka-yamusic-rust/releases/latest/download/plastinka-linux-x86_64.tar.gz.sha256
 sha256sum -c plastinka-linux-x86_64.tar.gz.sha256
 ```
 

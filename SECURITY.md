@@ -3,7 +3,7 @@
 ## Как сообщить об уязвимости
 
 Не открывайте публичный issue. Напишите через
-[Private vulnerability reporting](https://github.com/welcomeforalone/plastinka/security/advisories/new)
+[Private vulnerability reporting](https://github.com/welcomeforalone/plastinka-yamusic-rust/security/advisories/new)
 (вкладка Security → Report a vulnerability). Отвечаем в течение недели.
 
 Опишите, что происходит, как это повторить, на какой версии и системе. Не
@@ -39,5 +39,5 @@
 ---
 
 **English.** Please report vulnerabilities privately via
-[GitHub Security Advisories](https://github.com/welcomeforalone/plastinka/security/advisories/new),
+[GitHub Security Advisories](https://github.com/welcomeforalone/plastinka-yamusic-rust/security/advisories/new),
 not in public issues. Never include your Yandex token or account data.

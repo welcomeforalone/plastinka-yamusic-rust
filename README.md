@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/welcomeforalone/plastinka/releases/latest"><img src="https://img.shields.io/github/v/release/welcomeforalone/plastinka?label=%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F&color=e5243b" alt="Версия"></a>
-  <a href="https://github.com/welcomeforalone/plastinka/releases"><img src="https://img.shields.io/github/downloads/welcomeforalone/plastinka/total?label=%D1%81%D0%BA%D0%B0%D1%87%D0%B8%D0%B2%D0%B0%D0%BD%D0%B8%D0%B9&color=e5243b" alt="Скачиваний"></a>
+  <a href="https://github.com/welcomeforalone/plastinka-yamusic-rust/releases/latest"><img src="https://img.shields.io/github/v/release/welcomeforalone/plastinka-yamusic-rust?label=%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F&color=e5243b" alt="Версия"></a>
+  <a href="https://github.com/welcomeforalone/plastinka-yamusic-rust/releases"><img src="https://img.shields.io/github/downloads/welcomeforalone/plastinka-yamusic-rust/total?label=%D1%81%D0%BA%D0%B0%D1%87%D0%B8%D0%B2%D0%B0%D0%BD%D0%B8%D0%B9&color=e5243b" alt="Скачиваний"></a>
   <img src="https://img.shields.io/badge/Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-222?logo=rust" alt="Платформы">
   <a href="LICENSE"><img src="https://img.shields.io/badge/%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F-GPL--3.0-222" alt="GPL-3.0"></a>
 </p>
@@ -47,12 +47,12 @@
 
 | Система | Файл | Как запустить |
 |---|---|---|
-| **Windows 10, 11** (x64) | [Plastinka.exe](https://github.com/welcomeforalone/plastinka/releases/latest/download/Plastinka.exe) | Скачайте и запустите. Установка не нужна |
-| **Linux** (x86_64, любой дистрибутив) | [plastinka-linux-x86_64.tar.gz](https://github.com/welcomeforalone/plastinka/releases/latest/download/plastinka-linux-x86_64.tar.gz) | Распакуйте и выполните `sh install.sh` |
-| **macOS** (Apple Silicon и Intel) | [plastinka-macos.zip](https://github.com/welcomeforalone/plastinka/releases/latest/download/plastinka-macos.zip) | Распакуйте и перенесите `Plastinka.app` в «Программы» |
-| **Android 8.0+** | [plastinka-android.apk](https://github.com/welcomeforalone/plastinka/releases/latest/download/plastinka-android.apk) | Откройте файл на телефоне и установите |
+| **Windows 10, 11** (x64) | [Plastinka.exe](https://github.com/welcomeforalone/plastinka-yamusic-rust/releases/latest/download/Plastinka.exe) | Скачайте и запустите. Установка не нужна |
+| **Linux** (x86_64, любой дистрибутив) | [plastinka-linux-x86_64.tar.gz](https://github.com/welcomeforalone/plastinka-yamusic-rust/releases/latest/download/plastinka-linux-x86_64.tar.gz) | Распакуйте и выполните `sh install.sh` |
+| **macOS** (Apple Silicon и Intel) | [plastinka-macos.zip](https://github.com/welcomeforalone/plastinka-yamusic-rust/releases/latest/download/plastinka-macos.zip) | Распакуйте и перенесите `Plastinka.app` в «Программы» |
+| **Android 8.0+** | [plastinka-android.apk](https://github.com/welcomeforalone/plastinka-yamusic-rust/releases/latest/download/plastinka-android.apk) | Откройте файл на телефоне и установите |
 
-Все версии и что в них нового — на странице [релизов](https://github.com/welcomeforalone/plastinka/releases).
+Все версии и что в них нового — на странице [релизов](https://github.com/welcomeforalone/plastinka-yamusic-rust/releases).
 Рядом с каждым файлом лежит `.sha256`, общий список — `SHA256SUMS.txt`.
 
 <details>
@@ -80,7 +80,7 @@ xattr -dr com.apple.quarantine /Applications/Plastinka.app
 
 ```sh
 mkdir -p ~/plastinka-install && cd ~/plastinka-install
-curl -fLO https://github.com/welcomeforalone/plastinka/releases/latest/download/plastinka-linux-x86_64.tar.gz
+curl -fLO https://github.com/welcomeforalone/plastinka-yamusic-rust/releases/latest/download/plastinka-linux-x86_64.tar.gz
 tar -xzf plastinka-linux-x86_64.tar.gz && cd plastinka-linux-x86_64 && sh install.sh
 ```
 
@@ -238,7 +238,7 @@ Manager, Secret Service, Keychain, Android Keystore) и отправляется
 Музыка та же самая, с серверов Яндекса. Отличается программа: она нативная,
 быстрая и лёгкая, в ней есть эквалайзер, темы, плагины, мини-плеер, Discord и
 версия для Linux. Чего-то из официального клиента может не быть: напишите в
-[issues](https://github.com/welcomeforalone/plastinka/issues), что вам нужно.
+[issues](https://github.com/welcomeforalone/plastinka-yamusic-rust/issues), что вам нужно.
 </details>
 
 <details>
@@ -300,5 +300,5 @@ Electron app.
 - Your token is stored only in the OS keychain and sent only to Yandex
 
 A Yandex Plus subscription is required. The interface is in Russian.
-[Download the latest release](https://github.com/welcomeforalone/plastinka/releases/latest).
+[Download the latest release](https://github.com/welcomeforalone/plastinka-yamusic-rust/releases/latest).
 Not affiliated with Yandex LLC. Licensed under GPL-3.0-or-later.
