@@ -22,6 +22,7 @@
   <a href="#возможности">Возможности</a> ·
   <a href="#сравнение-с-официальным-клиентом">Сравнение</a> ·
   <a href="#вопросы">Вопросы</a> ·
+  <a href="https://welcomeforalone.github.io/plastinka-yamusic-rust/">Сайт</a> ·
   <a href="#english">English</a>
 </p>
 
@@ -396,5 +397,6 @@ Electron app.
 - Your token is stored only in the OS keychain and sent only to Yandex
 
 A Yandex Plus subscription is required. The interface is in Russian.
-[Download the latest release](https://github.com/welcomeforalone/plastinka-yamusic-rust/releases/latest).
+[Download the latest release](https://github.com/welcomeforalone/plastinka-yamusic-rust/releases/latest)
+or visit the [website](https://welcomeforalone.github.io/plastinka-yamusic-rust/en/).
 Not affiliated with Yandex LLC. Licensed under GPL-3.0-or-later.
