@@ -1,6 +1,6 @@
 [package]
 name = "plastinka"
-version = "0.0.6"
+version = "1.0.0"
 edition = "2024"
 description = "Неофициальный клиент Яндекс Музыки для Windows, Linux и macOS"
 license = "GPL-3.0-or-later"
