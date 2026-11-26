@@ -19,6 +19,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import ru.plastinka.data.AlbumCard
+import ru.plastinka.data.ArtistCard
 
 /** Сколько популярных треков показываем. */
 private const val POPULAR_SHOWN = 10
@@ -49,6 +50,8 @@ fun ArtistScreen(
     val loaded by model.artist.state.collectAsStateWithLifecycle()
     val playing = rememberPlayingState(player)
     LaunchedEffect(id) { model.loadArtist(id) }
+    LaunchedEffect(id) { model.ensureLikedArtists() }
+    val likedArtists by model.collection.collectAsStateWithLifecycle()
 
     val state = loaded.takeIf { it.key == id }
     val details = state?.data
@@ -73,6 +76,20 @@ fun ArtistScreen(
                         onPlay = { player?.playQueue(popular, 0, shownName, source = source) },
                         onShuffle = { player?.playQueue(popular.shuffled(), 0, shownName, source = source) },
                         subtitle = albums.size.takeIf { it > 0 }?.let { albumsCount(it) },
+                        // Пока список понравившихся исполнителей неизвестен, сердце не показываем.
+                        titleAction = likedArtists.artists?.let { list ->
+                            {
+                                HeartButton(
+                                    liked = list.any { it.id == id },
+                                    onClick = {
+                                        model.toggleArtistLike(
+                                            details?.card ?: ArtistCard(id, shownName, coverUri, albums.size),
+                                        )
+                                    },
+                                    size = 28.dp,
+                                )
+                            }
+                        },
                     )
                 }
                 when {

@@ -31,7 +31,7 @@ pub use catalog::{
     MyArtists, MyPlaylists, Page, Playlist, PlaylistCard, SEARCH_LAST_PAGE, SearchKind,
     SearchResult, TopArtist, Trend, compact_number, fetch_album, fetch_artist, fetch_artist_tracks,
     fetch_month_top, fetch_my_albums, fetch_my_artists, fetch_my_playlists, fetch_playlist, search,
-    total_duration,
+    set_artist_liked, total_duration,
 };
 pub use history::{
     HistoryContext, HistoryDay, HistoryItem, Ymd, day_label, fetch_history, today_utc,

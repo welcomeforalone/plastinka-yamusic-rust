@@ -395,7 +395,10 @@ pub fn notice<'a>(name: Icon, message: String, error: bool) -> Element<'a, Messa
     .into()
 }
 
-/// Логотип: пластинка с бирюзовым центром. Диаметр `size`.
+/// Логотип: чёрная виниловая пластинка с наклейкой цвета акцента. Диаметр
+/// `size`. Диск чёрный в любой теме, как настоящий: дорожки — полупрозрачный
+/// белый поверх диска, а не цвета темы (в светлой теме те были светлыми
+/// кольцами на чёрном). Светлая обводка края нужна только на тёмном фоне.
 pub fn logo<'a>(size: f32) -> Element<'a, Message> {
     let disc =
         |diameter: f32, fill: Option<Color>, stroke: Option<Color>| -> Element<'a, Message> {
@@ -416,14 +419,18 @@ pub fn logo<'a>(size: f32) -> Element<'a, Message> {
             .into()
         };
     let scale = size / 28.0;
+    let groove = Color {
+        a: 0.1,
+        ..Color::WHITE
+    };
+    let edge = match theme::current_tone() {
+        theme::Tone::Dark => Some(theme::surface_4()),
+        theme::Tone::Light => None,
+    };
     container(stack![
-        disc(
-            size,
-            Some(Color::from_rgb8(0x08, 0x09, 0x0B)),
-            Some(theme::surface_4())
-        ),
-        disc(22.0 * scale, None, Some(theme::surface_3())),
-        disc(17.0 * scale, None, Some(theme::surface_3())),
+        disc(size, Some(Color::from_rgb8(0x08, 0x09, 0x0B)), edge),
+        disc(22.0 * scale, None, Some(groove)),
+        disc(17.0 * scale, None, Some(groove)),
         disc(11.0 * scale, Some(theme::accent()), None),
         disc((3.0 * scale).max(2.0), Some(theme::bg()), None),
     ])

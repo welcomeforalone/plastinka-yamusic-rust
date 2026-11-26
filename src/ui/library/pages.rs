@@ -414,7 +414,12 @@ impl Library {
         });
         self.selected = None;
         let scroll = self.jump(0.0);
-        Task::batch([self.load_target(serial, &target, 0, http), scroll])
+        let mut tasks = vec![self.load_target(serial, &target, 0, http), scroll];
+        // Сердце исполнителя зависит от списка «Вам понравились».
+        if matches!(target, Target::Artist(_)) {
+            tasks.push(self.load_collection(Section::Artists, false, http));
+        }
+        Task::batch(tasks)
     }
 
     /// Назад: на предыдущую страницу или в раздел. `None` — некуда.
@@ -731,6 +736,85 @@ impl Library {
             },
             Message::CollectionLoaded,
         )
+    }
+
+    /// Список понравившихся исполнителей, если он загружен.
+    fn liked_artists_mut(&mut self) -> Option<&mut Vec<ArtistCard>> {
+        match &mut self.collections.artists {
+            Some(Load::Ready(artists)) => Some(&mut Arc::make_mut(artists).liked),
+            _ => None,
+        }
+    }
+
+    /// Нравится ли исполнитель `id`. `None` — список ещё грузится или не
+    /// загрузился: состояние неизвестно, сердце не показываем.
+    pub(super) fn artist_liked(&self, id: &str) -> Option<bool> {
+        let artists = self.collections.artists.as_ref()?.ready()?;
+        Some(artists.liked.iter().any(|card| card.id == id))
+    }
+
+    /// Нажали сердце исполнителя: сразу меняем список «Вам понравились»,
+    /// потом шлём запрос. Пока запрос по исполнителю идёт, повторные нажатия
+    /// игнорируются. Запись в аккаунт — только по нажатию пользователя.
+    pub(super) fn toggle_artist_like(
+        &mut self,
+        card: ArtistCard,
+    ) -> (Task<Message>, Option<Effect>) {
+        let Some(liked) = self.artist_liked(&card.id) else {
+            return (Task::none(), None);
+        };
+        if self.artist_like_busy.contains(&card.id) {
+            return (Task::none(), None);
+        }
+        let Some(http) = self.http.clone() else {
+            let toast = Effect::Toast(crate::texts::sentence(
+                "не удалось подготовить сетевое соединение",
+            ));
+            return (Task::none(), Some(toast));
+        };
+        let target = !liked;
+        if let Some(list) = self.liked_artists_mut() {
+            edit_artist_likes(list, &card, target);
+        }
+        self.artist_like_busy.insert(card.id.clone());
+        let token = self.token.clone();
+        let uid = self.status.account().uid;
+        let id = card.id.clone();
+        let task = Task::perform(
+            async move {
+                api::set_artist_liked(&http, &token.access_token, uid, &id, target)
+                    .await
+                    .map_err(Failure::from)
+            },
+            move |result| Message::ArtistLikeDone(card, target, result),
+        );
+        (task, None)
+    }
+
+    /// Ответ сервера на сердце исполнителя. Отказ — сердце и список как были.
+    pub(super) fn artist_like_done(
+        &mut self,
+        card: &ArtistCard,
+        target: bool,
+        result: Result<(), Failure>,
+    ) -> Option<Effect> {
+        self.artist_like_busy.remove(&card.id);
+        let failure = result.err()?;
+        if let Some(list) = self.liked_artists_mut() {
+            edit_artist_likes(list, card, !target);
+        }
+        if failure.kind == FailureKind::Unauthorized {
+            return Some(Effect::Relogin);
+        }
+        let action = if target {
+            "поставить «Нравится» исполнителю"
+        } else {
+            "снять «Нравится» с исполнителя"
+        };
+        Some(Effect::Toast(crate::texts::sentence(&format!(
+            "Не удалось {action}: {}",
+            failure.text
+        ))))
     }
 
     pub(super) fn collection_loaded(&mut self, collected: Collected) -> Option<Effect> {
@@ -1139,6 +1223,27 @@ fn entry_target(page: &Page) -> Target {
 
 fn same_target(page: &Page, target: &Target) -> bool {
     entry_target(page) == *target
+}
+
+/// Кладёт исполнителя в начало списка «Вам понравились» (без дублей) или
+/// убирает из него. `true` — список изменился.
+pub(super) fn edit_artist_likes(
+    list: &mut Vec<ArtistCard>,
+    card: &ArtistCard,
+    liked: bool,
+) -> bool {
+    let at = list.iter().position(|item| item.id == card.id);
+    match (liked, at) {
+        (true, None) => {
+            list.insert(0, card.clone());
+            true
+        }
+        (false, Some(at)) => {
+            list.remove(at);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Раздел коллекции ещё не загружен (или не загрузился, или `again`):

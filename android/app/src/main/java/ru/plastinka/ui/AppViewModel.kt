@@ -558,6 +558,69 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Исполнители, у которых запрос «Нравится» ещё идёт: повторные нажатия игнорируются. */
+    private val artistLikeBusy = HashSet<String>()
+    private var likedArtistsJob: Job? = null
+
+    /** Список понравившихся исполнителей для сердца на экране исполнителя: грузим, если его ещё нет. */
+    fun ensureLikedArtists() {
+        if (_collection.value.artists != null || likedArtistsJob?.isActive == true) return
+        val token = plastinka.tokenStore.load() ?: return
+        val uid = _library.value.account?.uid ?: return
+        likedArtistsJob = viewModelScope.launch {
+            val list = attempt { plastinka.api.likedArtists(token, uid) } ?: return@launch
+            // Пока шёл запрос, список мог прийти иначе (хаб или нажатие): тогда он главнее.
+            if (_collection.value.artists == null) {
+                _collection.value = _collection.value.copy(artists = list, artistsError = null)
+            }
+        }
+    }
+
+    /**
+     * Сердце исполнителя: список «Исполнители» меняется сразу (новый — в начало, без дублей),
+     * запрос уходит в фоне. Отказ — список как был и сообщение. Список не загружен —
+     * ничего не делает (сердце тогда не показано). Запись в аккаунт — только по нажатию.
+     */
+    fun toggleArtistLike(card: ru.plastinka.data.ArtistCard) {
+        val before = _collection.value.artists ?: return
+        val token = plastinka.tokenStore.load() ?: return
+        val uid = _library.value.account?.uid ?: return
+        if (!artistLikeBusy.add(card.id)) return
+        val wasLiked = before.any { it.id == card.id }
+        val target = !wasLiked
+        _collection.value = _collection.value.copy(
+            artists = ru.plastinka.data.ArtistLikes.apply(before, card, target),
+        )
+        viewModelScope.launch {
+            try {
+                plastinka.api.setArtistLike(token, uid, card.id, target)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                rollbackArtistLike(before, card, wasLiked)
+                throw e
+            } catch (e: Exception) {
+                rollbackArtistLike(before, card, wasLiked)
+                if (e is YandexApi.UnauthorizedException) relogin()
+                val what = if (target) "поставить" else "снять"
+                val reason = when (e) {
+                    is java.io.IOException -> "нет соединения с сервером"
+                    is YandexApi.UnauthorizedException -> "вход больше не действует"
+                    is YandexApi.HttpStatusException -> "сервер ответил ${e.code}"
+                    else -> e.javaClass.simpleName
+                }
+                toast("Не удалось $what «Нравится»: $reason")
+            } finally {
+                artistLikeBusy.remove(card.id)
+            }
+        }
+    }
+
+    private fun rollbackArtistLike(before: List<ru.plastinka.data.ArtistCard>, card: ru.plastinka.data.ArtistCard, wasLiked: Boolean) {
+        val current = _collection.value.artists ?: return
+        _collection.value = _collection.value.copy(
+            artists = ru.plastinka.data.ArtistLikes.rollback(current, before, card, wasLiked),
+        )
+    }
+
     private val _monthTop = MutableStateFlow(MonthTopUi())
     val monthTop: StateFlow<MonthTopUi> = _monthTop
     private var monthTopJob: Job? = null
@@ -864,6 +927,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         QueueHolder.set(emptyList(), -1, "")
         _library.value = LibraryUi()
         collectionJob?.cancel()
+        likedArtistsJob?.cancel()
         historyJob?.cancel()
         monthTopJob?.cancel()
         _monthTop.value = MonthTopUi()

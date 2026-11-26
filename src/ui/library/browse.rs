@@ -996,13 +996,35 @@ impl Library {
         } else {
             "Исполнитель".to_owned()
         };
+        let mut actions = row![list_actions(&key, self.any_playable(&artist.popular))]
+            .spacing(10)
+            .align_y(Alignment::Center);
+        // Сердце: пока неизвестно, нравится ли исполнитель (список грузится
+        // или не загрузился), его не показываем, чтобы не соврать.
+        if let Some(liked) = self.artist_liked(&card.id) {
+            let (icon, tip) = if liked {
+                (Icon::HeartFilled, "Убрать из «Вам понравились»")
+            } else {
+                (Icon::Heart, "Поставить «Нравится»")
+            };
+            actions = actions.push(widgets::with_tooltip(
+                widgets::icon_button(
+                    icon,
+                    Size::M,
+                    liked,
+                    Some(Lib(Message::ToggleArtistLike(card.clone()))),
+                ),
+                tip,
+                tooltip::Position::Top,
+            ));
+        }
         let header = detail_header(
             header_cover(covers, card.cover_uri.as_deref(), &card.id, true),
             caption,
             card.name.clone(),
             None,
             stats.join(" · "),
-            list_actions(&key, self.any_playable(&artist.popular)),
+            actions.into(),
         );
         let mut top = column![
             Space::new().height(TOP_PAD),

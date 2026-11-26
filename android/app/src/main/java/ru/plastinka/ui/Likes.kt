@@ -177,11 +177,20 @@ fun TracksHeader(
     subtitle: String? = null,
     /** Своя подпись с нажимаемыми частями; перекрывает `subtitle`. */
     subtitleContent: (@Composable () -> Unit)? = null,
+    /** Кнопка справа от заголовка (сердце исполнителя); `null` — без неё. */
+    titleAction: (@Composable () -> Unit)? = null,
 ) {
     Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 14.dp)) {
         cover()
         Spacer(Modifier.height(18.dp))
-        PlText(title, PlType.hero)
+        if (titleAction == null) {
+            PlText(title, PlType.hero)
+        } else {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                PlText(title, PlType.hero, modifier = Modifier.weight(1f))
+                titleAction()
+            }
+        }
         Spacer(Modifier.height(4.dp))
         if (subtitleContent != null) {
             subtitleContent()

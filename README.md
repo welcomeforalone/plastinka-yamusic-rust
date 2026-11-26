@@ -113,7 +113,8 @@ tar -xzf plastinka-linux-x86_64.tar.gz && cd plastinka-linux-x86_64 && sh instal
 ### Ваша коллекция
 
 «Мне нравится» с поиском прямо по списку, плейлисты, альбомы, исполнители с
-«Топом месяца», история прослушиваний и поиск по всему каталогу.
+«Топом месяца» (сердце на странице исполнителя добавляет его в «Вам
+понравились»), история прослушиваний и поиск по всему каталогу.
 
 <table>
   <tr>
@@ -350,6 +351,8 @@ Plastinka ходит к тем же адресам API, что и официал
 - [docs/ANDROID.md](docs/ANDROID.md) — Android-клиент
 - [docs/api](docs/api) — описание API Яндекс Музыки и протокола «Слушать вместе»
 - [CONTRIBUTING.md](CONTRIBUTING.md) — как предложить изменения
+- [AGENTS.md](AGENTS.md) — правила для ИИ-агентов (Claude Code, Codex, Cursor,
+  Copilot): дайте агенту прочитать его до работы
 - [docs/RELEASING.md](docs/RELEASING.md) — как выходит релиз
 
 Стек: Rust, [iced](https://github.com/iced-rs/iced), wgpu, tokio, rodio и

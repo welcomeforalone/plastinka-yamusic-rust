@@ -189,6 +189,23 @@ class YandexApi(private val http: OkHttpClient) {
     }
 
     /**
+     * Поставить/снять «Нравится» исполнителю (`add-multiple` и `remove`, поле `artist-ids`).
+     * Запись в аккаунт — только по нажатию пользователя. Не число — ничего не шлём.
+     * Токен не принят — [UnauthorizedException], другой неуспех — [HttpStatusException].
+     */
+    suspend fun setArtistLike(token: String, uid: Long, artistId: String, like: Boolean) {
+        withContext(Dispatchers.IO) {
+            val request = artistLikeRequest(token, uid, artistId, like) ?: return@withContext
+            http.newCall(request).execute().use { resp ->
+                when {
+                    resp.code == 401 || resp.code == 403 -> throw UnauthorizedException()
+                    !resp.isSuccessful -> throw HttpStatusException(resp.code)
+                }
+            }
+        }
+    }
+
+    /**
      * «Не нравится» треку: запись в аккаунт. Зовёт только Slopless и только
      * после отдельного согласия пользователя. Токен — только в заголовке;
      * ошибка — исключение с кодом ответа (без токена и адреса).
@@ -1210,6 +1227,18 @@ class YandexApi(private val http: OkHttpClient) {
 
         /** Идентификатор для адреса запроса: только цифры. */
         fun isNumericId(id: String): Boolean = id.length in 1..20 && id.all { it in '0'..'9' }
+
+        /** Запрос «Нравится» исполнителю; `null`, если id не число. */
+        internal fun artistLikeRequest(token: String, uid: Long, artistId: String, like: Boolean): Request? {
+            if (!isNumericId(artistId)) return null
+            val action = if (like) "add-multiple" else "remove"
+            return Request.Builder()
+                .url("$API_BASE/users/$uid/likes/artists/$action")
+                .header("Authorization", "OAuth $token")
+                .header("X-Yandex-Music-Client", MUSIC_CLIENT)
+                .post(FormBody.Builder().add("artist-ids", artistId).build())
+                .build()
+        }
 
         private const val TRACKS_BATCH = 250
         private const val MAX_REJECTED_BEFORE_SUCCESS = 32

@@ -744,6 +744,44 @@ pub async fn fetch_month_top(http: &reqwest::Client, token: &str) -> Result<Mont
     })
 }
 
+/// Поставить (`liked`) или снять «Нравится» исполнителю `id`: запись в
+/// аккаунт по явному нажатию сердца. Ответ `{"result":{"revision":N}}` не
+/// нужен: список обновляет окно. С фальшивым токеном (отладочный хук) в
+/// аккаунт ничего не пишем.
+pub async fn set_artist_liked(
+    http: &reqwest::Client,
+    token: &str,
+    uid: u64,
+    id: &str,
+    liked: bool,
+) -> Result<(), ApiError> {
+    let request = artist_like_request(http, token, uid, id, liked)?;
+    #[cfg(debug_assertions)]
+    if crate::storage::test_hooks_active() {
+        return Ok(());
+    }
+    let response = request.send().await.map_err(NetError::from)?;
+    check_status(response.status())
+}
+
+/// `POST /users/{uid}/likes/artists/add-multiple` или `.../remove`, форма
+/// `artist-ids=<id>`. Идентификатор — только число: он попадает в запрос.
+fn artist_like_request(
+    http: &reqwest::Client,
+    token: &str,
+    uid: u64,
+    id: &str,
+    liked: bool,
+) -> Result<reqwest::RequestBuilder, ApiError> {
+    let id = checked_id(id)?;
+    let action = if liked { "add-multiple" } else { "remove" };
+    Ok(http
+        .post(format!("{API_BASE}/users/{uid}/likes/artists/{action}"))
+        .header(AUTHORIZATION, auth_header(token)?)
+        .header("X-Yandex-Music-Client", MUSIC_CLIENT)
+        .form(&[("artist-ids", id)]))
+}
+
 /// Идентификатор для адреса: только число. Иначе — «не найдено», запроса
 /// нет.
 fn checked_id(id: &str) -> Result<String, ApiError> {
@@ -1975,6 +2013,46 @@ mod tests {
         ] {
             assert!(matches!(checked_id(bad), Err(ApiError::NotFound)), "{bad}");
         }
+    }
+
+    #[test]
+    fn artist_like_request_has_path_and_form() {
+        let http = reqwest::Client::new();
+        for (liked, action) in [(true, "add-multiple"), (false, "remove")] {
+            let request = artist_like_request(&http, "tok", 42, "41052", liked)
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(request.method(), reqwest::Method::POST);
+            assert_eq!(
+                request.url().as_str(),
+                format!("{API_BASE}/users/42/likes/artists/{action}")
+            );
+            let body = request.body().and_then(|body| body.as_bytes()).unwrap();
+            assert_eq!(body, b"artist-ids=41052");
+            let auth = request.headers().get(AUTHORIZATION).unwrap();
+            assert!(auth.is_sensitive());
+            assert_eq!(auth.to_str().unwrap(), "OAuth tok");
+        }
+    }
+
+    #[test]
+    fn artist_like_request_rejects_bad_ids() {
+        let http = reqwest::Client::new();
+        for bad in ["", "0", "abc", "1,2", "1/2", "../x", "1&artist-ids=2"] {
+            assert!(
+                matches!(
+                    artist_like_request(&http, "tok", 42, bad, true),
+                    Err(ApiError::NotFound)
+                ),
+                "{bad}"
+            );
+        }
+        // Токен с недопустимыми символами в заголовок не попадает.
+        assert!(matches!(
+            artist_like_request(&http, "bad\ntoken", 42, "1", true),
+            Err(ApiError::Unauthorized)
+        ));
     }
 
     #[test]

@@ -49,7 +49,8 @@ use super::visualizer::{self, Analyzer};
 use super::widgets::{self, CoverArt, Kind, Size};
 use super::{Failure, FailureKind, Moment, Prefs};
 use crate::api::{
-    self, AccountStatus, AudioQuality, Codec, PlaybackPermit, SearchKind, StreamInfo, Track,
+    self, AccountStatus, ArtistCard, AudioQuality, Codec, PlaybackPermit, SearchKind, StreamInfo,
+    Track,
 };
 use crate::media_controls;
 use crate::player::eq::{EqSettings, EqState};
@@ -388,6 +389,8 @@ pub enum Message {
     /// Сердце: поставить или снять «Нравится» треку (настоящему треку из
     /// списка, не его подмене FckCensor).
     ToggleLike(Track),
+    /// Сердце на странице исполнителя: поставить или снять «Нравится».
+    ToggleArtistLike(ArtistCard),
     /// Серверная история: ответ (номер запроса), «Повторить», играть трек
     /// (день, группа, номер в группе).
     HistoryLoaded(u64, Result<Arc<Vec<api::HistoryDay>>, Failure>),
@@ -411,6 +414,8 @@ pub enum Message {
     SeekTo(f32),
     /// Ответ сервера на сердце: трек, какое состояние просили, результат.
     LikeDone(Track, bool, Result<(), Failure>),
+    /// То же для исполнителя.
+    ArtistLikeDone(ArtistCard, bool, Result<(), Failure>),
     Noop,
 }
 
@@ -505,6 +510,8 @@ pub struct Library {
     /// Треки, чей запрос сердца ещё идёт: повторные нажатия по ним
     /// игнорируются, пока не придёт ответ.
     like_busy: HashSet<String>,
+    /// То же для исполнителей: идентификаторы с идущим запросом сердца.
+    artist_like_busy: HashSet<String>,
     collections: Collections,
     search: SearchState,
     /// Что играет и что дальше.
@@ -775,6 +782,7 @@ impl Library {
             likes: Likes::Loading { skeleton: false },
             liked: HashSet::new(),
             like_busy: HashSet::new(),
+            artist_like_busy: HashSet::new(),
             collections: Collections::default(),
             search: SearchState::new(),
             queue: None,
@@ -1498,6 +1506,10 @@ impl Library {
                         }
                     }
                 }
+            }
+            Message::ToggleArtistLike(card) => return self.toggle_artist_like(card),
+            Message::ArtistLikeDone(card, target, result) => {
+                self.artist_like_done(&card, target, result)
             }
             Message::Noop => None,
         };
@@ -4317,5 +4329,123 @@ mod tests {
         assert!(set.contains("5"));
         assert!(edit_likes(&mut set, None, &track("5"), false));
         assert!(set.is_empty());
+    }
+
+    fn artist_card(id: &str) -> ArtistCard {
+        ArtistCard {
+            id: id.to_owned(),
+            name: format!("Исполнитель {id}"),
+            cover_uri: None,
+            tracks: None,
+            albums: None,
+        }
+    }
+
+    /// Библиотека с загруженным списком понравившихся исполнителей `ids`.
+    fn artists_library(ids: &[&str]) -> Library {
+        let mut library = test_library();
+        library.http = Some(reqwest::Client::new());
+        library.collections.artists = Some(pages::Load::Ready(Arc::new(api::MyArtists {
+            liked: ids.iter().map(|id| artist_card(id)).collect(),
+            ..Default::default()
+        })));
+        library
+    }
+
+    fn liked_artist_ids(library: &Library) -> Vec<String> {
+        library
+            .collections
+            .artists
+            .as_ref()
+            .and_then(|load| load.ready())
+            .map(|artists| artists.liked.iter().map(|card| card.id.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn artist_like_goes_first_without_duplicates_and_can_be_removed() {
+        let mut list = vec![artist_card("1"), artist_card("2")];
+        assert!(pages::edit_artist_likes(&mut list, &artist_card("3"), true));
+        // Уже есть — список не меняется.
+        assert!(!pages::edit_artist_likes(
+            &mut list,
+            &artist_card("3"),
+            true
+        ));
+        let ids: Vec<&str> = list.iter().map(|card| card.id.as_str()).collect();
+        assert_eq!(ids, ["3", "1", "2"]);
+        assert!(pages::edit_artist_likes(
+            &mut list,
+            &artist_card("1"),
+            false
+        ));
+        assert!(!pages::edit_artist_likes(
+            &mut list,
+            &artist_card("1"),
+            false
+        ));
+        let ids: Vec<&str> = list.iter().map(|card| card.id.as_str()).collect();
+        assert_eq!(ids, ["3", "2"]);
+    }
+
+    #[test]
+    fn artist_heart_changes_at_once_and_repeat_press_is_ignored() {
+        let mut library = artists_library(&["1"]);
+        assert_eq!(library.artist_liked("2"), Some(false));
+        let (_, effect) = library.update(Message::ToggleArtistLike(artist_card("2")), None);
+        assert!(effect.is_none());
+        assert_eq!(library.artist_liked("2"), Some(true));
+        assert_eq!(liked_artist_ids(&library), ["2", "1"]);
+        // Запрос идёт: повторное нажатие ничего не меняет.
+        let _ = library.update(Message::ToggleArtistLike(artist_card("2")), None);
+        assert_eq!(liked_artist_ids(&library), ["2", "1"]);
+        assert!(library.artist_like_busy.contains("2"));
+        // Ответ пришёл: можно снимать.
+        let _ = library.update(
+            Message::ArtistLikeDone(artist_card("2"), true, Ok(())),
+            None,
+        );
+        assert!(library.artist_like_busy.is_empty());
+        assert_eq!(liked_artist_ids(&library), ["2", "1"]);
+        let _ = library.update(Message::ToggleArtistLike(artist_card("2")), None);
+        assert_eq!(liked_artist_ids(&library), ["1"]);
+    }
+
+    #[test]
+    fn artist_like_is_rolled_back_on_failure() {
+        let mut library = artists_library(&["1"]);
+        let _ = library.update(Message::ToggleArtistLike(artist_card("2")), None);
+        let failure = Failure::from(api::ApiError::Server(503));
+        let (_, effect) = library.update(
+            Message::ArtistLikeDone(artist_card("2"), true, Err(failure)),
+            None,
+        );
+        assert!(matches!(effect, Some(Effect::Toast(text)) if text.contains("Не удалось")));
+        assert_eq!(liked_artist_ids(&library), ["1"]);
+        assert!(library.artist_like_busy.is_empty());
+
+        // Снятое сердце при отказе возвращается на место (в начало списка).
+        let _ = library.update(Message::ToggleArtistLike(artist_card("1")), None);
+        assert!(liked_artist_ids(&library).is_empty());
+        let failure = Failure::from(api::ApiError::Unauthorized);
+        let (_, effect) = library.update(
+            Message::ArtistLikeDone(artist_card("1"), false, Err(failure)),
+            None,
+        );
+        assert!(matches!(effect, Some(Effect::Relogin)));
+        assert_eq!(liked_artist_ids(&library), ["1"]);
+    }
+
+    #[test]
+    fn artist_heart_is_unknown_until_the_list_is_loaded() {
+        let mut library = test_library();
+        library.http = Some(reqwest::Client::new());
+        assert_eq!(library.artist_liked("1"), None);
+        library.collections.artists = Some(pages::Load::Loading(Instant::now()));
+        assert_eq!(library.artist_liked("1"), None);
+        // Нажатие при неизвестном состоянии ничего не делает.
+        let (_, effect) = library.update(Message::ToggleArtistLike(artist_card("1")), None);
+        assert!(effect.is_none());
+        assert!(library.artist_like_busy.is_empty());
     }
 }
