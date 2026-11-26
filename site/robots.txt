@@ -1,0 +1,8 @@
+# Поисковики читают robots.txt только из корня домена. На адресе GitHub Pages
+# проекта (…github.io/plastinka-yamusic-rust/) этот файл не в корне и не
+# действует: sitemap отправляется вручную в Search Console и Вебмастере.
+# Файл заработает, если у сайта появится свой домен.
+User-agent: *
+Allow: /
+
+Sitemap: @SITE_URL@/sitemap.xml

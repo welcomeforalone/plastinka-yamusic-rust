@@ -6,7 +6,8 @@
 
 <p align="center">
   <b>Быстрый нативный клиент Яндекс Музыки для Windows, Linux, macOS и Android</b><br>
-  Без Electron: один файл на 20 МБ, запуск за полсекунды, в 5 раз меньше памяти
+  Без Electron: один файл на 20 МБ, запуск за полсекунды, в 5 раз меньше памяти<br>
+  <i>Unofficial native Yandex Music client written in Rust</i>
 </p>
 
 <p align="center">
@@ -51,6 +52,10 @@
 | **Linux** (x86_64, любой дистрибутив) | [plastinka-linux-x86_64.tar.gz](https://github.com/welcomeforalone/plastinka-yamusic-rust/releases/latest/download/plastinka-linux-x86_64.tar.gz) | Распакуйте и выполните `sh install.sh` |
 | **macOS** (Apple Silicon и Intel) | [plastinka-macos.zip](https://github.com/welcomeforalone/plastinka-yamusic-rust/releases/latest/download/plastinka-macos.zip) | Распакуйте и перенесите `Plastinka.app` в «Программы» |
 | **Android 8.0+** | [plastinka-android.apk](https://github.com/welcomeforalone/plastinka-yamusic-rust/releases/latest/download/plastinka-android.apk) | Откройте файл на телефоне и установите |
+
+**Linux — любой современный дистрибутив.** Одна сборка без deb и rpm работает
+на Arch, CachyOS, Manjaro, Fedora 36+, openSUSE, Ubuntu 22.04+ и Debian 12+,
+под Wayland и X11.
 
 Все версии и что в них нового — на странице [релизов](https://github.com/welcomeforalone/plastinka-yamusic-rust/releases).
 Рядом с каждым файлом лежит `.sha256`, общий список — `SHA256SUMS.txt`.
@@ -386,6 +391,8 @@ Electron app.
   replacement by an explicit version or your own file (FckCensor), AI-track
   labels and skipping (Slopless), cover-colored wave (VibeColorizer), copy
   track name, listening stats
+- One Linux build for any modern distro: Arch, Fedora, openSUSE, Ubuntu
+  22.04+, Debian 12+, Wayland and X11
 - Your token is stored only in the OS keychain and sent only to Yandex
 
 A Yandex Plus subscription is required. The interface is in Russian.
